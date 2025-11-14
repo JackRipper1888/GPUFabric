@@ -1,0 +1,38 @@
+[workspace]
+members = [
+    "gpuf-s",
+    "gpuf-c",
+    "common",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full", "sync","io-util","signal"] }
+tokio-rustls = { version = "0.26.2", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+clap = { version = "4", features = ["derive","env"] }
+futures-util = "0.3"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+bincode = { version = "2.0.1", features = ["serde"] }
+hex = "0.4"
+
+[profile.release]
+lto = true
+debug = true  
+opt-level ="z"
+
+[profile.dev]
+debug = true  
+opt-level = 0
+
+[profile.release.package.gpuf-c]
+strip = true   
+codegen-units = 1
+

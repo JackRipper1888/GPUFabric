@@ -1,0 +1,40 @@
+sequenceDiagram
+    participant Client as Client
+    participant Kafka as Kafka Cluster
+    participant HConsumer as Heartbeat Consumer
+    participant HProcessor as Heartbeat Processor
+    participant DB as Database
+
+    %% Kafka Consumer Setup
+    HConsumer->>Kafka: Subscribe to topic "client-heartbeats"
+    HConsumer->>Kafka: Join consumer group "heartbeat-consumer-group"
+
+    loop Heartbeat Processing
+        %% 1. Client sends heartbeat
+        Client->>Kafka: Produce heartbeat message
+        
+        %% 2. Consumer receives and batches messages
+        Kafka->>HConsumer: Deliver message
+        HConsumer->>HConsumer: Buffer message
+        alt Batch size reached or timeout
+            HConsumer->>HProcessor: Send batch of messages
+            HProcessor->>DB: Start transaction
+            
+            %% 3. Process each message in batch
+            loop For each message
+                HProcessor->>HProcessor: Deserialize message
+                HProcessor->>DB: Update client_heartbeats
+                HProcessor->>DB: Update client_daily_stats
+                HProcessor->>DB: Update device_daily_stats
+            end
+            
+            %% 4. Commit transaction
+            HProcessor->>DB: Commit transaction
+            HProcessor->>Kafka: Commit offsets
+        end
+    end
+
+    %% Error handling
+    HConsumer->>HConsumer: Log error if batch send fails
+    HProcessor->>HProcessor: Log error if processing fails
+    HProcessor->>DB: Rollback on error

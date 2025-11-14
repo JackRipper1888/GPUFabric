@@ -1,0 +1,50 @@
+version: "3.8"
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: zookeeper
+    user: "1000:1000"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_DATA_DIR: /var/lib/zookeeper/data
+      ZOOKEEPER_DATA_LOG_DIR: /var/lib/zookeeper/log
+    ports:
+      - "2181:2181"
+    networks:
+      - kafka-net
+    volumes:
+      - ./zookeeper_data:/var/lib/zookeeper/data
+      - ./zookeeper_logs:/var/lib/zookeeper/log
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    volumes:  
+      - ./kafka_data:/var/lib/kafka/data
+      - ./kafka_logs:/var/log/kafka
+    ports:
+      - "9092:9092"   
+      - "29092:29092" 
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://8.140.251.142:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: 104857600 # 100MB
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 1048576 # 1MB
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 1048576 # 1MB
+      KAFKA_MESSAGE_MAX_BYTES: 104857600 # 100MB
+    networks:
+      - kafka-net
+
+networks:
+  kafka-net:
+    driver: bridge

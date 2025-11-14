@@ -1,0 +1,64 @@
+[package]
+name = "gpuf-s"
+version = "0.1.0"
+edition = "2021"
+
+# This is both a library and a binary
+[lib]
+name = "gpuf_s"
+path = "src/lib.rs"
+
+[dependencies]
+common = { path = "../common" }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+hyper = { version = "1.4.1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+http-body-util = "0.1.2"
+futures-util = { workspace = true }
+bincode = { workspace = true ,features = ["serde"]}
+httparse = "1.8.0"
+bytes = { workspace = true }
+sqlx = { version = "0.8", default-features = false,  features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "derive"] }
+redis = { version = "0.24", features = ["tokio-comp"] }
+validator = { version = "0.20.0", features = ["derive"] }
+simd-json = { version = "0.13", features = ["serde"] }
+dhat = "0.3"
+hex = { workspace = true }
+lru = "0.16.0"
+rdkafka = { version = "0.38", features = ["cmake-build"] }
+time = "0.3"
+
+socket2 = { version = "0.6.0", features = ["all"] }
+tokio-util = "0.7.16"
+futures = "0.3.28"
+twoway = "0.2.0"
+http = "0.2.7"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = "0.5.0"
+aya = { version = "0.13.1", optional = true }
+
+[[bin]]
+name = "heartbeat_consumer"
+path = "src/bin/heartbeat_consumer.rs"
+
+[[bin]]
+name = "api_server"
+path = "src/bin/api_server.rs"
+
+[features]
+default = ["xdp"]
+xdp = ["aya"]

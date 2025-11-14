@@ -1,0 +1,75 @@
+classDiagram
+    class Args {
+        +server_addr: String
+        +control_port: u16
+        +local_addr: String
+        +local_port: u16
+        +engine_type: EngineType
+        +load_config() Result<Self>
+    }
+
+    class WorkerHandle {
+        <<trait>>
+        +login() Result<()>
+        +handler() Result<()>
+        +model_task() Result<()>
+        +heartbeat_task() Result<()>
+    }
+
+    class TCPWorker {
+        -reader: Arc<Mutex<ReadHalf<TcpStream>>>
+        -writer: Arc<Mutex<WriteHalf<TcpStream>>>
+        -system_info: Arc<SystemInfo>
+        -devices_info: Arc<Vec<DevicesInfo>>
+        -engine: Arc<Mutex<Option<AnyEngine>>>
+        +login() Result<()>
+        +handler() Result<()>
+    }
+
+    class WSWorker {
+        -reader: Arc<Mutex<SplitStream<...>>>
+        -writer: Arc<Mutex<SplitSink<...>>>
+        -args: Args
+    }
+
+    class AutoWorker {
+        +login() Result<()>
+        +handler() Result<()>
+        +model_task() Result<()>
+        +heartbeat_task() Result<()>
+    }
+
+    class Engine {
+        <<trait>>
+        +init() Result<()>
+        +infer() Result<()>
+    }
+
+    class VLLMEngine {
+        +init() Result<()>
+        +infer() Result<()>
+    }
+
+    class OllamaEngine {
+        +init() Result<()>
+        +infer() Result<()>
+    }
+
+    class SystemInfo {
+        // System information fields
+    }
+
+    class DevicesInfo {
+        // Device information fields
+    }
+
+    AutoWorker --> TCPWorker : contains
+    AutoWorker --> WSWorker : contains
+    TCPWorker ..|> WorkerHandle : implements
+    WSWorker ..|> WorkerHandle : implements
+    VLLMEngine ..|> Engine : implements
+    OllamaEngine ..|> Engine : implements
+    TCPWorker --> Args : uses
+    TCPWorker --> Engine : uses
+    TCPWorker --> SystemInfo : contains
+    TCPWorker --> DevicesInfo : contains

@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant User
+    participant gpuf-s
+    participant gpuf-c
+    participant LocalService
+
+    User->>gpuf-s: 1. connect gpuf-s:7000
+    gpuf-s->>gpuf-s: 2. record user connection (pending_connections)
+    gpuf-s->>gpuf-c: 3. select available gpuf-c
+    gpuf-s->>gpuf-c: 4. send RequestNewProxyConn
+    gpuf-c->>gpuf-s: 5. connect gpuf-s:7001
+    gpuf-c->>gpuf-s:    send NewProxyConn(proxy_conn_id)
+    gpuf-c->>LocalService: 6. connect localhost:localport
+    gpuf-s->>gpuf-s: 7. match connection by proxy_conn_id
+    loop data forwarding
+        User->>gpuf-s: send data
+        gpuf-s->>gpuf-c: forward data
+        gpuf-c->>LocalService: forward data
+        LocalService->>gpuf-c: return data
+        gpuf-c->>gpuf-s: forward data
+        gpuf-s->>User: return data
+    end

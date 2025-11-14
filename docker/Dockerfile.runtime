@@ -1,0 +1,125 @@
+# syntax=docker/dockerfile:1
+
+# -------- Build stage --------
+FROM ubuntu:22.04 AS builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG BIN=api_server
+
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=localhost,127.0.0.1,host.docker.internal
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    libsasl2-dev \
+    libzstd-dev \
+    zlib1g-dev \
+    libsasl2-modules \
+    libcurl4-openssl-dev \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
+# Build librdkafka for Kafka support
+RUN git clone --depth 1 --branch v2.3.0 https://github.com/edenhill/librdkafka.git && \
+    cd librdkafka && \
+    ./configure --prefix=/usr && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd .. && rm -rf librdkafka
+
+WORKDIR /app
+
+# Copy workspace manifests first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY gpuf-s/Cargo.toml gpuf-s/
+COPY gpuf-c/Cargo.toml gpuf-c/
+COPY common/Cargo.toml common/
+
+# Create empty src trees with placeholder files to satisfy cargo
+RUN mkdir -p gpuf-s/src gpuf-c/src common/src && \
+    echo "fn main() {}" > gpuf-s/src/lib.rs && \
+    echo "fn main() {}" > gpuf-c/src/lib.rs && \
+    echo "fn main() {}" > common/src/lib.rs
+
+# Fetch dependencies (cached if manifests unchanged)
+RUN cargo fetch
+
+# Now copy the actual source code
+COPY gpuf-s/ gpuf-s/
+COPY gpuf-c/ gpuf-c/
+COPY common/ common/
+
+# Build the selected binary
+RUN cargo build --release -p gpuf-s --bin ${BIN}
+
+# -------- Runtime stage --------
+FROM ubuntu:22.04
+
+ARG BIN=api_server
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libsasl2-2 \
+    libzstd1 \
+    libcurl4 \
+    curl \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m appuser && mkdir -p /app && chown -R appuser:appuser /app
+USER appuser
+WORKDIR /app
+
+# Copy the binary
+COPY --from=builder /app/target/release/${BIN} /app/${BIN}
+
+# Create config directory (currently unused, all configs via CLI args)
+# RUN mkdir -p /app/config
+
+# Set environment for dynamic entrypoint
+ENV BIN=${BIN}
+
+# Conditional healthcheck based on service type
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD sh -c ' \
+        if [ "$BIN" = "api_server" ]; then \
+            curl -fsS http://localhost:18081/api/health || exit 1; \
+        elif [ "$BIN" = "gpuf-s" ]; then \
+            pgrep -x "$BIN" > /dev/null || exit 1; \
+        elif [ "$BIN" = "heartbeat_consumer" ]; then \
+            pgrep -f "$BIN" > /dev/null || exit 1; \
+        else \
+            exit 0; \
+        fi'
+
+# Expose all possible ports (adjust per service at runtime if needed)
+# 17000: gpuf-s control port
+# 17001: gpuf-s proxy port  
+# 18080: gpuf-s public port
+# 18081: api_server port
+EXPOSE 17000 17001 18080 18081
+
+# Dynamic entrypoint
+ENTRYPOINT ["/bin/sh", "-c", "exec /app/$BIN \"$@\"", "--"]
