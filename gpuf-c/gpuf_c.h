@@ -26,39 +26,28 @@ char *gpuf_get_last_error(void);
 void gpuf_free_string(char *s);
 
 /**
- * Create Worker configuration
- * Returns: Configuration handle, returns null on failure
- */
-void *gpuf_create_config(const char *server_addr,
-                         uint16_t _control_port,
-                         const char *_local_addr,
-                         uint16_t _local_port);
-
-/**
- * Release configuration
- */
-void gpuf_free_config(void *config);
-
-/**
  * Get version information
  */
 const char *gpuf_version(void);
 
 /**
- * Initialize LLM engine
- * model_path: Model file path
- * n_ctx: Context size
- * n_gpu_layers: Number of GPU layers (0 means CPU only)
- * Returns: 0 for success, -1 for failure
+ * Initialize LLM engine - Not supported in lightweight version
  */
-int32_t gpuf_llm_init(const char *model_path, uint32_t n_ctx, uint32_t n_gpu_layers);
+int32_t gpuf_llm_init(const char *_model_path, uint32_t _n_ctx, uint32_t _n_gpu_layers);
 
 /**
- * Generate text
- * prompt: Input prompt
- * max_tokens: Maximum number of tokens to generate
- * Returns: Generated text pointer, needs to call gpuf_free_string to release
+ * Generate text - Not supported in lightweight version
  */
-char *gpuf_llm_generate(const char *prompt, uintptr_t max_tokens);
+char *gpuf_llm_generate(const char *_prompt, uintptr_t _max_tokens);
+
+/**
+ * Check if LLM engine is initialized - Always false in lightweight version
+ */
+int32_t gpuf_llm_is_initialized(void);
+
+/**
+ * Unload LLM engine - No-op in lightweight version
+ */
+int32_t gpuf_llm_unload(void);
 
 #endif /* GPUF_C_H */

@@ -1,29 +1,23 @@
 mod handle;
-mod llm_engine;
 mod util;
+
+// LLM modules are excluded in lightweight Android version
+#[cfg(not(target_os = "android"))]
+mod llm_engine;
+#[cfg(not(target_os = "android"))]
 mod llama_wrapper;
 
 pub use handle::{WorkerHandle, AutoWorker};
 
 use anyhow::Result;
-use tokio_rustls::rustls::crypto::aws_lc_rs;
-use tracing::{debug, info};
 
 #[cfg(target_os = "android")]
 use android_logger::Config;
 #[cfg(target_os = "android")]
 use log::LevelFilter;
 
-/// Initialize the library (crypto provider and logging)
+/// Initialize the library (logging only for lightweight version)
 pub fn init() -> Result<()> {
-    let provider = aws_lc_rs::default_provider();
-    provider.install_default().map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to install default AWS provider: {:?}",
-            e
-        )
-    })?;
-
     #[cfg(target_os = "android")]
     android_logger::init_once(
         Config::default()
@@ -39,9 +33,9 @@ pub fn init() -> Result<()> {
 
 /// Create a new worker with the given configuration
 pub async fn create_worker(args: util::cmd::Args) -> Result<handle::AutoWorker> {
-    debug!("Creating worker with args: {:#?}", args);
-    info!("Server address: {}:{}", args.server_addr, args.control_port);
-    info!("Local service: {}:{}", args.local_addr, args.local_port);
+    log::debug!("Creating worker with args: {:#?}", args);
+    log::info!("Server address: {}:{}", args.server_addr, args.control_port);
+    log::info!("Local service: {}:{}", args.local_addr, args.local_port);
     
     Ok(handle::new_worker(args).await)
 }
@@ -52,10 +46,10 @@ pub mod config {
 }
 
 // ============================================================================
-// C FFI Layer - Unified C interface for iOS and Android
+// C FFI Layer - Lightweight C interface for Android
 // ============================================================================
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
@@ -105,54 +99,6 @@ pub extern "C" fn gpuf_free_string(s: *mut c_char) {
     }
 }
 
-/// Create Worker configuration
-/// Returns: Configuration handle, returns null on failure
-#[no_mangle]
-pub extern "C" fn gpuf_create_config(
-    server_addr: *const c_char,
-    _control_port: u16,
-    _local_addr: *const c_char,
-    _local_port: u16,
-) -> *mut std::ffi::c_void {
-    if server_addr.is_null() || _local_addr.is_null() {
-        set_last_error("Invalid parameters".to_string());
-        return std::ptr::null_mut();
-    }
-
-    let _server_addr_str = unsafe {
-        match CStr::from_ptr(server_addr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_last_error("Invalid server address".to_string());
-                return std::ptr::null_mut();
-            }
-        }
-    };
-
-    let _local_addr_str = unsafe {
-        match CStr::from_ptr(_local_addr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_last_error("Invalid local address".to_string());
-                return std::ptr::null_mut();
-            }
-        }
-    };
-
-    // Need to create configuration based on actual Args structure
-    // Temporarily return null, need to implement complete configuration creation logic
-    set_last_error("Not implemented yet".to_string());
-    std::ptr::null_mut()
-}
-
-/// Release configuration
-#[no_mangle]
-pub extern "C" fn gpuf_free_config(config: *mut std::ffi::c_void) {
-    if !config.is_null() {
-        // Implement configuration release logic
-    }
-}
-
 /// Get version information
 #[no_mangle]
 pub extern "C" fn gpuf_version() -> *const c_char {
@@ -161,77 +107,38 @@ pub extern "C" fn gpuf_version() -> *const c_char {
 }
 
 // ============================================================================
-// LLM Inference Interface
+// LLM Interface - Stubs for lightweight version
 // ============================================================================
 
-/// Initialize LLM engine
-/// model_path: Model file path
-/// n_ctx: Context size
-/// n_gpu_layers: Number of GPU layers (0 means CPU only)
-/// Returns: 0 for success, -1 for failure
+/// Initialize LLM engine - Not supported in lightweight version
 #[no_mangle]
 pub extern "C" fn gpuf_llm_init(
-    model_path: *const c_char,
-    n_ctx: u32,
-    n_gpu_layers: u32,
+    _model_path: *const c_char,
+    _n_ctx: u32,
+    _n_gpu_layers: u32,
 ) -> i32 {
-    if model_path.is_null() {
-        set_last_error("Model path is null".to_string());
-        return -1;
-    }
-
-    let path_str = unsafe {
-        match CStr::from_ptr(model_path).to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                set_last_error("Invalid model path".to_string());
-                return -1;
-            }
-        }
-    };
-
-    match llama_wrapper::init_global_engine(path_str, n_ctx, n_gpu_layers) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_last_error(format!("Failed to initialize LLM: {}", e));
-            -1
-        }
-    }
+    set_last_error("LLM engine not supported in lightweight version".to_string());
+    -1
 }
 
-/// Generate text
-/// prompt: Input prompt
-/// max_tokens: Maximum number of tokens to generate
-/// Returns: Generated text pointer, needs to call gpuf_free_string to release
+/// Generate text - Not supported in lightweight version
 #[no_mangle]
 pub extern "C" fn gpuf_llm_generate(
-    prompt: *const c_char,
-    max_tokens: usize,
+    _prompt: *const c_char,
+    _max_tokens: usize,
 ) -> *mut c_char {
-    if prompt.is_null() {
-        set_last_error("Prompt is null".to_string());
-        return std::ptr::null_mut();
-    }
+    set_last_error("LLM generation not supported in lightweight version".to_string());
+    std::ptr::null_mut()
+}
 
-    let prompt_str = unsafe {
-        match CStr::from_ptr(prompt).to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                set_last_error("Invalid prompt".to_string());
-                return std::ptr::null_mut();
-            }
-        }
-    };
+/// Check if LLM engine is initialized - Always false in lightweight version
+#[no_mangle]
+pub extern "C" fn gpuf_llm_is_initialized() -> i32 {
+    0
+}
 
-    match llama_wrapper::generate_text(prompt_str, max_tokens) {
-        Ok(text) => {
-            CString::new(text)
-                .unwrap_or_else(|_| CString::new("").unwrap())
-                .into_raw()
-        }
-        Err(e) => {
-            set_last_error(format!("Generation failed: {}", e));
-            std::ptr::null_mut()
-        }
-    }
+/// Unload LLM engine - No-op in lightweight version
+#[no_mangle]
+pub extern "C" fn gpuf_llm_unload() -> i32 {
+    0
 }

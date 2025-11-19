@@ -218,6 +218,7 @@ impl VLLMEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn stop_container(&self) -> Result<()> {
         if let Some(container_id) = &self.container_id {
             info!("Stopping VLLM container...");

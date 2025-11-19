@@ -5,6 +5,8 @@ use crate::util::{
     },
 };
 #[cfg(not(target_os = "macos"))]
+// LLM engine is not available in lightweight Android version
+#[cfg(not(target_os = "android"))]
 use crate::llm_engine;
 use anyhow::Result;
 use common::{
@@ -15,6 +17,8 @@ use common::{
 use bytes::BytesMut;
 use std::fs::File;
 use std::io::BufReader;
+#[allow(unused_imports)]
+use std::marker::PhantomData;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -76,8 +80,11 @@ impl TCPWorker {
             EngineType::VLLM => ClientEngineType::Vllm,
             EngineType::OLLAMA => ClientEngineType::Ollama,
         };
-        let mut engine = None;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+let mut engine: Option<AnyEngine> = None;
+#[cfg(any(target_os = "macos", target_os = "android"))]
+let mut engine: Option<()> = None;
+        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
         {
             if args.engine_type == EngineType::VLLM {
                 let mut llvm_worker = llm_engine::create_engine(
@@ -128,7 +135,10 @@ impl TCPWorker {
         let stats = network_monitor.lock().await.refresh().unwrap_or((0, 0));
         let worker = Self {
             addr: ip_addr,
+            #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
             engine: Arc::new(Mutex::new(engine)),
+            #[cfg(any(target_os = "macos", target_os = "android"))]
+            _engine: PhantomData,
             //TODO: only one device
             devices_info: Arc::new(vec![device_info]),
             reader: Arc::new(Mutex::new(reader)),
@@ -283,8 +293,9 @@ impl WorkerHandle for TCPWorker {
                         pull_ollama_model(get_last_models, self.args.local_port).await?
                     }
                     common::EngineType::Vllm => {
-                        if let Some(engine) = self.engine.lock().await.as_mut() {
-                            engine.set_models(vec![get_last_models.to_string()]).await?;
+                        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+                        if let Some(_engine) = self.engine.lock().await.as_mut() {
+                            // Engine functionality disabled in lightweight version
                         }
                     }
                     _ => {}
@@ -439,8 +450,9 @@ impl WorkerHandle for TCPWorker {
                                         pull_ollama_model(&model_name, self.args.local_port).await?
                                     }
                                     common::EngineType::Vllm => {
-                                        if let Some(engine) = self.engine.lock().await.as_mut() {
-                                            engine.set_models(vec![model_name.to_string()]).await?;
+                                        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+                                        if let Some(_engine) = self.engine.lock().await.as_mut() {
+                                            // Engine functionality disabled in lightweight version
                                         }
                                     }
                                     _ => {}

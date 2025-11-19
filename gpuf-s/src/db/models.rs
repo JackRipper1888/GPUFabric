@@ -36,7 +36,7 @@ impl HotModelClass {
         // let aligned_mem = Self::align_gpu_memory(mem_total_mb);
         // {
         //     let cache = self.cache.read().await;
-        //     if let Some(model) = cache.peek(&aligned_mem) {  // 使用 peek 而不是 get
+        //     if let Some(model) = cache.peek(&aligned_mem) {  // Use peek instead of get
         //         debug!("Found model for memory {} MB: {}", mem_total_mb, model);
         //         return Ok(model.cloneReceived empty models from server());
         //     }
@@ -70,12 +70,16 @@ impl HotModelClass {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // Client model classification system, partially implemented
 pub struct ClientModelClass {
+    #[allow(dead_code)] // Database connection pool for model queries
     pool: Arc<Pool<Postgres>>,
+    #[allow(dead_code)] // Cache for client model mappings
     cache: Arc<RwLock<LruCache<ClientId, String>>>,
 }
 
 impl ClientModelClass {
+    #[allow(dead_code)] // Constructor for client model classification
     pub fn new(pool: Arc<Pool<Postgres>>) -> Self {
         Self {
             pool,
@@ -85,6 +89,7 @@ impl ClientModelClass {
         }
     }
 
+    #[allow(dead_code)] // Client model retrieval with caching
     pub async fn get_client_model(&self, client_id: &ClientId) -> Result<String> {
         {
             let cache = self.cache.read().await;
@@ -109,12 +114,16 @@ impl ClientModelClass {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)] // Database row mapping for client model queries
 struct ClientModel {
+    #[allow(dead_code)] // Client model name
     model: Option<String>,
+    #[allow(dead_code)] // Client model version
     model_version: Option<String>,
 }
 
 // Get client model
+#[allow(dead_code)] // Database query implementation for client model retrieval
 async fn get_client_model_impl(pool: &Pool<Postgres>, client_id: &ClientId) -> Result<String> {
 
     let client = sqlx::query_as::<_, ClientModel>(

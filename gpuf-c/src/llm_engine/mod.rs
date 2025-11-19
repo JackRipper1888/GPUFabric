@@ -1,5 +1,6 @@
 pub mod vllm_engine;
 pub mod ollama_engine;
+pub mod llama_engine;
 use crate::util::cmd::EngineType;
 use anyhow::Result;
 use reqwest::Client;
@@ -17,7 +18,6 @@ const DEFAULT_CHAT_TEMPLATE: &str = r#"
 {% endif %}
 {% for message in messages %}
 <|im_start|>{{ message['role'] }}
-{{ message['content'] }}<|im_end|>
 {% endfor %}
 {% if add_generation_prompt %}
             {% endif %}
@@ -25,6 +25,7 @@ const DEFAULT_CHAT_TEMPLATE: &str = r#"
 
 pub trait Engine {
     async fn init(&mut self) -> Result<()>;
+    #[allow(dead_code)]
     async fn set_models(&mut self, models: Vec<String>) -> Result<()>;
     #[allow(dead_code)]
     async fn start_worker(&mut self) -> Result<()>;

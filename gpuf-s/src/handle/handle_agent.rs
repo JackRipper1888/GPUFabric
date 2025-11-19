@@ -375,6 +375,7 @@ pub struct PeekableTcpStream {
 use tokio::io::ReadBuf;
 
 impl PeekableTcpStream {
+    #[allow(dead_code)] // Constructor for peekable TCP stream wrapper
     pub fn new(stream: TcpStream) -> Self {
         Self {
             inner: stream,
@@ -385,6 +386,7 @@ impl PeekableTcpStream {
     }
 
     /// Peek at the data without consuming it
+    #[allow(dead_code)] // Peek functionality for TCP stream inspection
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // If we've already peeked data, return it
         if self.peek_pos < self.peek_buf.len() {
@@ -412,6 +414,7 @@ impl PeekableTcpStream {
     }
 
     /// Consume n bytes from the peek buffer
+    #[allow(dead_code)] // Consume peeked data from buffer
     pub fn consume(&mut self, n: usize) {
         self.peek_pos = (self.peek_pos + n).min(self.peek_buf.len());
         if self.peek_pos == self.peek_buf.len() {
@@ -426,16 +429,19 @@ impl PeekableTcpStream {
     }
 
     /// Get a reference to the inner TcpStream
+    #[allow(dead_code)] // Get reference to inner TCP stream
     pub fn get_ref(&self) -> &TcpStream {
         &self.inner
     }
 
     /// Get a mutable reference to the inner TcpStream
+    #[allow(dead_code)] // Get mutable reference to inner TCP stream
     pub fn get_mut(&mut self) -> &mut TcpStream {
         &mut self.inner
     }
 
     /// Convert back into the inner TcpStream
+    #[allow(dead_code)] // Consume wrapper and return inner TCP stream
     pub fn into_inner(self) -> TcpStream {
         self.inner
     }
@@ -489,6 +495,7 @@ pub struct ChatRequestInfo {
     pub model: Option<String>,
     pub request_id: Option<String>,
     pub api_key: Option<String>,
+    #[allow(dead_code)] // Content type for future request parsing
     pub content_type: Option<String>,
     // pub reader: R,
 }

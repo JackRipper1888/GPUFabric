@@ -94,6 +94,7 @@ impl ClientDailyStats {
         Ok(record)
     }
 
+    #[allow(dead_code)] // Get client statistics for date range
     pub async fn get_stats(
         pool: &PgPool,
         client_id: &[u8; 16],
@@ -110,6 +111,7 @@ impl ClientDailyStats {
         .await
     }
 
+    #[allow(dead_code)] // Delete client statistics
     pub async fn delete(
         pool: &PgPool,
         client_id: &[u8; 16],
@@ -199,6 +201,7 @@ impl DeviceDailyStats {
         Ok(records.rows_affected() as i32)
     }
 
+    #[allow(dead_code)] // Get device statistics for date range
     pub async fn get_stats(
         pool: &PgPool,
         client_id: &[u8; 16],

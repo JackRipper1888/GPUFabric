@@ -42,7 +42,7 @@ detect_system() {
             
             # get GPU info
             echo "GPU info:"
-            system_profiler SPDisplaysDataType | grep -A 5 "Chipset Model" || echo "  未检测到独立GPU"
+            system_profiler SPDisplaysDataType | grep -A 5 "Chipset Model" || echo "  No dedicated GPU detected"
             
             # get GPU count
             GPU_COUNT=$(system_profiler SPDisplaysDataType | grep -c "Chipset Model" || echo "0")

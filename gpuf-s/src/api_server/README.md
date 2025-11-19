@@ -34,7 +34,7 @@ All API responses follow this format:
 {
   "success": true,
   "data": { /* response data */ },
-  "message": "操作成功",
+  "message": "Operation successful",
   "timestamp": "2025-07-29T17:55:48.826362Z"
 }
 ```

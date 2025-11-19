@@ -33,6 +33,7 @@ debug = true
 opt-level = 0
 
 [profile.release.package.gpuf-c]
-strip = true   
+# For Android, do not strip symbols to preserve JNI exports
+# strip = true   # Commented out to preserve symbols
 codegen-units = 1
 

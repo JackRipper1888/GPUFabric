@@ -19,8 +19,8 @@ use tracing::warn;
 #[cfg(target_os = "macos")]
 use crate::util::device_info::read_power_metrics;
 
-#[cfg(not(target_os = "macos"))]
-use nvml_wrapper::Nvml;
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+use nvml_wrapper::NVML;
 
 #[cfg(not(target_os = "macos"))]
 use std::sync::Once;
@@ -172,10 +172,10 @@ pub fn get_pci_ids_by_lspci(device_index: u32) -> Result<(u16, u16)> {
     Ok((vendor_id, device_id))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 pub fn get_gpu_count() -> Result<usize, Box<dyn std::error::Error>> {
     // Initialize NVML
-    let nvml = Nvml::init()?;
+    let nvml = NVML::init()?;
     // Get GPU device count
     let device_count = nvml.device_count()?;
     if device_count > 1 && !is_power_of_two_divide(device_count as i32) {
@@ -183,14 +183,37 @@ pub fn get_gpu_count() -> Result<usize, Box<dyn std::error::Error>> {
     }
     Ok(device_count as usize)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "android")]
+pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
+    // Lightweight Android version - no GPU monitoring
+    let devices_info = DevicesInfo {
+        num: 0,
+        pod_id: 0,
+        total_tflops: 0,
+        memtotal_gb: 0,
+        port: 0,
+        ip: 0,
+        os_type: common::OsType::ANDROID,
+        engine_type: common::EngineType::None,
+        usage: 0,
+        mem_usage: 0,
+        power_usage: 0,
+        temp: 0,
+        vendor_id: 0,
+        device_id: 0,
+        memsize_gb: 0,
+        powerlimit_w: 0,
+    };
+    Ok((devices_info, 0))
+}
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
     static INIT: Once = Once::new();
-    static mut NVML: Option<Result<Nvml, nvml_wrapper::error::NvmlError>> = None;
+    static mut NVML: Option<Result<NVML, nvml_wrapper::error::Error>> = None;
 
     // Initialize NVML only once
     INIT.call_once(|| unsafe {
-        NVML = Some(Nvml::init());
+        NVML = Some(NVML::init());
     });
     
     let nvml_ptr = &raw const NVML;
@@ -319,8 +342,8 @@ pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
                             index as usize,
                             (meminfo.total >>30) as u16,
                         );
-                        //TODO: power_limit   w单位
-                        //TODO: total_memory  gb单位
+                        //TODO: power_limit   watts unit
+                        //TODO: total_memory  gb unit
                         set_u16_to_u128(
                             &mut device_info.powerlimit_w,
                             index as usize,

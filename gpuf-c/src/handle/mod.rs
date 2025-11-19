@@ -2,6 +2,8 @@ pub mod handle_tcp;
 pub mod handle_ws;
 use crate::util::cmd::{Args, WorkerType,EngineType};
 use crate::util::network_info::SessionNetworkMonitor;
+// LLM engine is not available in lightweight Android version
+#[cfg(not(target_os = "android"))]
 use crate::llm_engine::Engine;
 use common::{OsType,DevicesInfo, SystemInfo, EngineType as ClientEngineType};
 
@@ -10,9 +12,13 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use futures_util::stream::{SplitStream, SplitSink};
 use std::sync::Arc;
 use std::future::Future;
+#[allow(unused_imports)]
+use std::marker::PhantomData;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+// LLM engine is not available in lightweight Android version
+#[cfg(not(target_os = "android"))]
 use crate::llm_engine::AnyEngine;
 
 pub trait WorkerHandle: Send + Sync {
@@ -35,7 +41,10 @@ pub struct TCPWorker {
     os_type: OsType,
     engine_type: ClientEngineType,
     args: Args,
+    #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    _engine: PhantomData<()>,
 }
 
 // WS worker
