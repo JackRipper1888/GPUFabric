@@ -79,14 +79,14 @@ async fn main() -> Result<()> {
     let checksum = matches.get_one::<String>("checksum").cloned();
     let resume = !matches.get_flag("no-resume");
 
-    println!("🚀 GPUFabric Model Downloader");
-    println!("📥 URL: {}", url);
-    println!("💾 Output: {:?}", output_path);
-    println!("🔧 Parallel chunks: {}", parallel_chunks);
-    println!("📦 Chunk size: {} MB", chunk_size_mb);
-    println!("🔄 Resume: {}", if resume { "Enabled" } else { "Disabled" });
+    println!("GPUFabric Model Downloader");
+    println!("URL: {}", url);
+    println!("Output: {:?}", output_path);
+    println!("Parallel chunks: {}", parallel_chunks);
+    println!("Chunk size: {} MB", chunk_size_mb);
+    println!("Resume: {}", if resume { "Enabled" } else { "Disabled" });
     if checksum.is_some() {
-        println!("🔐 Checksum verification: Enabled");
+        println!("Checksum verification: Enabled");
     }
     println!();
 
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         
         // Clear line and print progress
         print!(
-            "\r⏳ Progress: {:.1}% ({}/{} MB) - {:.1} MB/s",
+            "\rProgress: {:.1}% ({}/{} MB) - {:.1} MB/s",
             percentage, downloaded_mb, total_mb, speed_mbps
         );
         
@@ -126,11 +126,11 @@ async fn main() -> Result<()> {
     });
 
     // Start download
-    println!("🔄 Starting download...");
+    println!("Starting download...");
     match downloader.download().await {
         Ok(_) => {
             println!();
-            println!("✅ Download completed successfully!");
+            println!("Download completed successfully!");
             
             // Show file info
             match std::fs::metadata(&output_path) {
@@ -143,20 +143,20 @@ async fn main() -> Result<()> {
                         0
                     };
                     
-                    println!("📊 File size: {} MB", file_size_mb);
-                    println!("⏱️  Time elapsed: {} seconds", elapsed_seconds);
-                    println!("📈 Average speed: {} MB/s", avg_speed_mbps);
-                    println!("💾 File saved to: {:?}", output_path);
+                    println!("File size: {} MB", file_size_mb);
+                    println!("Time elapsed: {} seconds", elapsed_seconds);
+                    println!("Average speed: {} MB/s", avg_speed_mbps);
+                    println!("File saved to: {:?}", output_path);
                 }
                 Err(e) => {
-                    println!("⚠️  Warning: Could not get file metadata: {}", e);
-                    println!("💾 Expected file location: {:?}", output_path);
+                    println!("Warning: Could not get file metadata: {}", e);
+                    println!("Expected file location: {:?}", output_path);
                 }
             }
         }
         Err(e) => {
             println!();
-            eprintln!("❌ Download failed: {}", e);
+            eprintln!("Download failed: {}", e);
             std::process::exit(1);
         }
     }

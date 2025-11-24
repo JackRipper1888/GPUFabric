@@ -108,4 +108,44 @@ int32_t gpuf_client_disconnect(void);
  */
 int32_t gpuf_client_cleanup(void);
 
+/**
+ * JNI wrapper for init() method
+ */
+jint Java_com_pocketpal_GpufNative_init(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for cleanup() method
+ */
+jint Java_com_pocketpal_GpufNative_cleanup(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for connect() method
+ */
+jint Java_com_pocketpal_GpufNative_connect(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for disconnect() method
+ */
+jint Java_com_pocketpal_GpufNative_disconnect(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for getStatus() method
+ */
+jstring Java_com_pocketpal_GpufNative_getStatus(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for getDeviceInfo() method
+ */
+jstring Java_com_pocketpal_GpufNative_getDeviceInfo(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for getMetrics() method
+ */
+jstring Java_com_pocketpal_GpufNative_getMetrics(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for getLastError() method
+ */
+jstring Java_com_pocketpal_GpufNative_getLastError(JNIEnv env, JClass _class);
+
 #endif /* GPUF_C_H */

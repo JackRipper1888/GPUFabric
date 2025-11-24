@@ -81,16 +81,16 @@ async fn main() -> Result<()> {
     let resume = !matches.get_flag("no-resume");
     let validate = matches.get_flag("validate");
 
-    println!("🚀 GPUFabric Download & Validate Tool");
-    println!("📥 URL: {}", url);
-    println!("💾 Output: {:?}", output_path);
-    println!("🔧 Parallel chunks: {}", parallel_chunks);
-    println!("📦 Chunk size: {} MB", chunk_size_mb);
-    println!("🔄 Resume: {}", if resume { "Enabled" } else { "Disabled" });
+    println!("GPUFabric Download & Validate Tool");
+    println!("URL: {}", url);
+    println!("Output: {:?}", output_path);
+    println!("Parallel chunks: {}", parallel_chunks);
+    println!("Chunk size: {} MB", chunk_size_mb);
+    println!("Resume: {}", if resume { "Enabled" } else { "Disabled" });
     if checksum.is_some() {
-        println!("🔐 Checksum verification: Enabled");
+        println!("Checksum verification: Enabled");
     }
-    println!("🔍 Validation: {}", if validate { "Enabled" } else { "Disabled" });
+    println!("Validation: {}", if validate { "Enabled" } else { "Disabled" });
     println!();
 
     // Download the file
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         
         // Clear line and print progress
         print!(
-            "\r⏳ Progress: {:.1}% ({}/{} MB) - {:.1} MB/s",
+            "\rProgress: {:.1}% ({}/{} MB) - {:.1} MB/s",
             percentage, downloaded_mb, total_mb, speed_mbps
         );
         
@@ -129,11 +129,11 @@ async fn main() -> Result<()> {
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
     });
 
-    println!("🔄 Starting download...");
+    println!("Starting download...");
     match downloader.download().await {
         Ok(_) => {
             println!();
-            println!("✅ Download completed successfully!");
+            println!("Download completed successfully!");
             
             // Show file info
             match std::fs::metadata(&output_path) {
@@ -146,32 +146,32 @@ async fn main() -> Result<()> {
                         0
                     };
                     
-                    println!("📊 File size: {} MB", file_size_mb);
-                    println!("⏱️  Time elapsed: {} seconds", elapsed_seconds);
-                    println!("📈 Average speed: {} MB/s", avg_speed_mbps);
-                    println!("💾 File saved to: {:?}", output_path);
+                    println!("File size: {} MB", file_size_mb);
+                    println!("Time elapsed: {} seconds", elapsed_seconds);
+                    println!("Average speed: {} MB/s", avg_speed_mbps);
+                    println!("File saved to: {:?}", output_path);
                 }
                 Err(e) => {
-                    println!("⚠️  Warning: Could not get file metadata: {}", e);
-                    println!("💾 Expected file location: {:?}", output_path);
+                    println!("Warning: Could not get file metadata: {}", e);
+                    println!("Expected file location: {:?}", output_path);
                 }
             }
 
             // Validate file format if requested
             if validate {
                 println!();
-                println!("🔍 Validating file format...");
+                println!("Validating file format...");
                 
                 if let Err(e) = validate_file_format(&output_path) {
-                    println!("❌ Validation failed: {}", e);
+                    println!("Validation failed: {}", e);
                 } else {
-                    println!("✅ File format validation passed!");
+                    println!("File format validation passed!");
                 }
             }
         }
         Err(e) => {
             println!();
-            eprintln!("❌ Download failed: {}", e);
+            eprintln!("Download failed: {}", e);
             std::process::exit(1);
         }
     }
@@ -202,23 +202,23 @@ fn validate_file_format(file_path: &PathBuf) -> Result<()> {
     
     // Check for different model formats
     if header.starts_with(b"GGUF") {
-        println!("🤖 Detected format: GGUF (GPT-Generated Unified Format)");
+        println!("Detected format: GGUF (GPT-Generated Unified Format)");
         validate_gguf_format(file_path)?;
     } else if header.starts_with(b"PK") {
-        println!("📦 Detected format: ZIP/Safetensors archive");
-        println!("✅ Valid ZIP archive format");
+        println!("Detected format: ZIP/Safetensors archive");
+        println!("Valid ZIP archive format");
     } else if header.starts_with(b"\x89PNG") {
-        println!("🖼️  Detected format: PNG image");
-        println!("⚠️  Warning: This appears to be an image file, not a model");
+        println!("Detected format: PNG image");
+        println!("Warning: This appears to be an image file, not a model");
     } else if header.starts_with(b"<?xml") || header.starts_with(b"<html") {
-        println!("🌐 Detected format: HTML/XML");
-        println!("⚠️  Warning: This appears to be a web page, not a model");
+        println!("Detected format: HTML/XML");
+        println!("Warning: This appears to be a web page, not a model");
     } else if header.starts_with(b"%PDF") {
-        println!("📄 Detected format: PDF document");
-        println!("⚠️  Warning: This appears to be a PDF file, not a model");
+        println!("Detected format: PDF document");
+        println!("Warning: This appears to be a PDF file, not a model");
     } else {
-        println!("❓ Unknown format: {:?}", &header[..4]);
-        println!("⚠️  Could not determine file format");
+        println!("Unknown format: {:?}", &header[..4]);
+        println!("Could not determine file format");
     }
 
     Ok(())
@@ -266,10 +266,10 @@ fn validate_gguf_format(file_path: &PathBuf) -> Result<()> {
         return Err(anyhow::anyhow!("Invalid KV count: 0"));
     }
 
-    println!("📋 GGUF version: {}", version);
-    println!("🧩 Tensor count: {}", tensor_count);
-    println!("🔑 KV count: {}", kv_count);
-    println!("✅ Valid GGUF structure");
+    println!("GGUF version: {}", version);
+    println!("Tensor count: {}", tensor_count);
+    println!("KV count: {}", kv_count);
+    println!("Valid GGUF structure");
 
     Ok(())
 }

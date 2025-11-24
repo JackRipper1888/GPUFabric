@@ -93,8 +93,26 @@ impl WorkerHandle for AutoWorker {
 
 pub async fn new_worker(args: Args) -> AutoWorker {
     // TODO: IPC shared memory should be selected
-    match args.worker_type {
-        WorkerType::TCP => AutoWorker::TCP(TCPWorker::new(args).await.expect("Failed to create TCP worker")),
-        WorkerType::WS => AutoWorker::WS(WSWorker::new(args).await.expect("Failed to create WS worker")),
+    loop {
+        match args.worker_type {
+            WorkerType::TCP => {
+                match TCPWorker::new(args.clone()).await {
+                    Ok(worker) => return AutoWorker::TCP(worker),
+                    Err(e) => {
+                        tracing::error!("Failed to create TCP worker: {}. Retrying in 5 seconds...", e);
+                    }
+                }
+            }
+            WorkerType::WS => {
+                match WSWorker::new(args.clone()).await {
+                    Ok(worker) => return AutoWorker::WS(worker),
+                    Err(e) => {
+                        tracing::error!("Failed to create WS worker: {}. Retrying in 5 seconds...", e);
+                    }
+                }
+            }
+        }
+        
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }

@@ -62,6 +62,8 @@ impl TCPWorker {
             error!(" device is empty");
             return Err(anyhow!(" device is empty"));
         }
+        
+        info!("Debug: Engine type from args: {:?}", args.engine_type);
 
         let os_type = if cfg!(target_os = "macos") {
             OsType::MACOS
@@ -105,8 +107,8 @@ impl TCPWorker {
                     info!("Creating LLAMA engine with model: {}", model_path);
                     llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
                         model_path.clone(),
-                        2048,  // context size
-                        35,    // GPU layers (adjust based on your GPU)
+                        4096,  // context size
+                        999,    // GPU layers (999 = try to offload all layers)
                     ))
                 } else {
                     // Create engine without model (will be set later)

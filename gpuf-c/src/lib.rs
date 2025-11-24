@@ -576,3 +576,139 @@ pub extern "C" fn gpuf_client_cleanup() -> i32 {
         -1
     }
 }
+
+// ============================================================================
+// JNI Wrapper Functions for Android
+// ============================================================================
+
+#[cfg(target_os = "android")]
+mod jni_wrapper {
+    use super::*;
+    use jni::JNIEnv;
+    use jni::objects::{JClass, JString, JObject};
+    use jni::sys::{jstring, jint, jobject};
+
+    /// JNI wrapper for init() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_init(env: JNIEnv, _class: JClass) -> jint {
+        match gpuf_init() {
+            0 => 0,
+            _ => -1
+        }
+    }
+
+    /// JNI wrapper for cleanup() method  
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_cleanup(env: JNIEnv, _class: JClass) -> jint {
+        match gpuf_client_cleanup() {
+            0 => 0,
+            _ => -1
+        }
+    }
+
+    /// JNI wrapper for connect() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_connect(env: JNIEnv, _class: JClass) -> jint {
+        match gpuf_client_connect() {
+            0 => 0,
+            _ => -1
+        }
+    }
+
+    /// JNI wrapper for disconnect() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_disconnect(env: JNIEnv, _class: JClass) -> jint {
+        match gpuf_client_disconnect() {
+            0 => 0,
+            _ => -1
+        }
+    }
+
+    /// JNI wrapper for getStatus() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_getStatus(env: JNIEnv, _class: JClass) -> jstring {
+        let status_ptr = gpuf_client_get_status();
+        if status_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        
+        let status_str = unsafe {
+            let c_str = std::ffi::CStr::from_ptr(status_ptr);
+            match c_str.to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut()
+            }
+        };
+        
+        match env.new_string(status_str) {
+            Ok(jstring) => jstring.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    }
+
+    /// JNI wrapper for getDeviceInfo() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_getDeviceInfo(env: JNIEnv, _class: JClass) -> jstring {
+        let info_ptr = gpuf_client_get_device_info();
+        if info_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        
+        let info_str = unsafe {
+            let c_str = std::ffi::CStr::from_ptr(info_ptr);
+            match c_str.to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut()
+            }
+        };
+        
+        match env.new_string(info_str) {
+            Ok(jstring) => jstring.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    }
+
+    /// JNI wrapper for getMetrics() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_getMetrics(env: JNIEnv, _class: JClass) -> jstring {
+        let metrics_ptr = gpuf_client_get_metrics();
+        if metrics_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        
+        let metrics_str = unsafe {
+            let c_str = std::ffi::CStr::from_ptr(metrics_ptr);
+            match c_str.to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut()
+            }
+        };
+        
+        match env.new_string(metrics_str) {
+            Ok(jstring) => jstring.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    }
+
+    /// JNI wrapper for getLastError() method
+    #[no_mangle]
+    pub extern "C" fn Java_com_pocketpal_GpufNative_getLastError(env: JNIEnv, _class: JClass) -> jstring {
+        let error_ptr = gpuf_get_last_error();
+        if error_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        
+        let error_str = unsafe {
+            let c_str = std::ffi::CStr::from_ptr(error_ptr);
+            match c_str.to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut()
+            }
+        };
+        
+        match env.new_string(error_str) {
+            Ok(jstring) => jstring.into_raw(),
+            Err(_) => std::ptr::null_mut()
+        }
+    }
+}
