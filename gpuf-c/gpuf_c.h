@@ -148,4 +148,68 @@ jstring Java_com_pocketpal_GpufNative_getMetrics(JNIEnv env, JClass _class);
  */
 jstring Java_com_pocketpal_GpufNative_getLastError(JNIEnv env, JClass _class);
 
+/**
+ * JNI wrapper for starting inference service (local mode)
+ */
+jint Java_com_pocketpal_GpufNative_startInferenceService(JNIEnv env,
+                                                         JClass _class,
+                                                         JString model_path,
+                                                         jint port);
+
+/**
+ * JNI wrapper for stopping inference service
+ */
+jint Java_com_pocketpal_GpufNative_stopInferenceService(JNIEnv _env, JClass _class);
+
+/**
+ * JNI wrapper for generating text through local engine
+ */
+jstring Java_com_pocketpal_GpufNative_generateText(JNIEnv env,
+                                                   JClass _class,
+                                                   JString prompt,
+                                                   jint max_tokens);
+
+/**
+ * JNI wrapper for checking inference service health
+ */
+jint Java_com_pocketpal_GpufNative_isInferenceServiceHealthy(JNIEnv _env, JClass _class);
+
+/**
+ * JNI wrapper for starting compute monitoring
+ */
+jint Java_com_pocketpal_GpufNative_startComputeMonitoring(JNIEnv env,
+                                                          JClass _class,
+                                                          JString server_url,
+                                                          JString server_addr,
+                                                          jint control_port,
+                                                          jint proxy_port,
+                                                          jint worker_type,
+                                                          jint engine_type,
+                                                          jboolean offline_mode);
+
+/**
+ * JNI wrapper for loading a specific model
+ */
+jint Java_com_pocketpal_GpufNative_loadModel(JNIEnv env, JClass _class, JString model_path);
+
+/**
+ * JNI wrapper for getting current loaded model
+ */
+jstring Java_com_pocketpal_GpufNative_getCurrentModel(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for checking if model is loaded
+ */
+jint Java_com_pocketpal_GpufNative_isModelLoaded(JNIEnv _env, JClass _class);
+
+/**
+ * JNI wrapper for getting model loading status
+ */
+jstring Java_com_pocketpal_GpufNative_getModelLoadingStatus(JNIEnv env, JClass _class);
+
+/**
+ * JNI wrapper for stopping compute monitoring
+ */
+jint Java_com_pocketpal_GpufNative_stopComputeMonitoring(JNIEnv _env, JClass _class);
+
 #endif /* GPUF_C_H */

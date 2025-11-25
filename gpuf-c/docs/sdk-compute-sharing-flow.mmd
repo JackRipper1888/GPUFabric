@@ -1,0 +1,177 @@
+graph TB
+    %% Android Application Layer
+    A[Android Application]
+    
+    %% JNI Layer Functions
+    J1[init]
+    J2[startInferenceService]
+    J3[generateText]
+    J4[isInferenceServiceHealthy]
+    J5[stopInferenceService]
+    J6[startComputeMonitoring]
+    J7[stopComputeMonitoring]
+    
+    %% Local Inference Path
+    L1[Global LLM Engine]
+    L2[Model Loading]
+    L3[Local Text Generation]
+    L4[Engine Health Check]
+    L5[Engine Cleanup]
+    
+    %% Compute Monitoring & Sharing Path
+    C1[ComputeProxy]
+    C2[WorkerHandle Compatible]
+    C3[TCPWorker/WSWorker]
+    C4[CommandV1 Protocol]
+    C5[Heartbeat Task]
+    C6[Model Task Handler]
+    C7[Proxy Connection]
+    
+    %% Remote Servers
+    R1[GPUFabric HTTP Server]
+    R2[gpuf-s TCP/WS Server]
+    R3[Device Registration]
+    R4[Task Distribution]
+    R5[Status Collection]
+    R6[Enhanced Monitoring]
+    
+    %% Communication Protocols
+    P1[TCP Socket]
+    P2[WebSocket]
+    P3[HTTP REST API]
+    P4[JSON Messages]
+    
+    %% Decision Points
+    D1{Local Inference Ready?}
+    D2{Compute Sharing Enabled?}
+    D3{Network Connected?}
+    D4{Task Received?}
+    D5{Model Available?}
+    
+    %% Main Initialization Flow
+    A -->|App Start| J1
+    J1 -->|Load Library| J2
+    J2 -->|Start Local Service| L1
+    L1 -->|Initialize Engine| L2
+    L2 -->|Model Loaded?| D5
+    D5 -->|Success| L3
+    D5 -->|Failed| L5
+    J2 -->|Check Service| D1
+    D1 -->|Ready| J6
+    D1 -->|Not Ready| L5
+    
+    %% Compute Monitoring Initialization
+    J6 -->|Start Monitoring| C1
+    C1 -->|Create Worker| C2
+    C2 -->|Select Worker Type| C3
+    C3 -->|TCP or WS| D3
+    D3 -->|Connected| R2
+    D3 -->|Failed| C1
+    R2 -->|Device Register| R3
+    R3 -->|Login Success| C4
+    C4 -->|Command Protocol| C5
+    
+    %% Local Inference Flow
+    A -->|User Request| J3
+    J3 -->|Direct Call| L3
+    L3 -->|Generate Text| L1
+    L1 -->|Return Result| J3
+    J3 -->|Return to App| A
+    
+    %% Compute Sharing Flow
+    C5 -->|Send Heartbeat| R5
+    R5 -->|Collect Status| R6
+    R6 -->|HTTP Enhanced| R1
+    C4 -->|Receive Commands| D4
+    D4 -->|Task Available| C6
+    C6 -->|Model Task| L2
+    L2 -->|Model Ready| C7
+    C7 -->|Create Proxy| P1
+    P1 -->|Forward Connection| R4
+    R4 -->|Distribute Tasks| C6
+    
+    %% Health Check Flow
+    A -->|Query Health| J4
+    J4 -->|Check Engine| L4
+    L4 -->|Engine Status| J4
+    J4 -->|Return Status| A
+    
+    %% Enhanced Monitoring Flow
+    C1 -->|Additional Monitor| R1
+    R1 -->|HTTP API| P3
+    P3 -->|Enhanced Metrics| R6
+    R6 -->|GPU Utilization| R1
+    R6 -->|Memory Efficiency| R1
+    R6 -->|Inference Stats| R1
+    
+    %% Message Protocols
+    C4 -->|CommandV1::Login| P4
+    C4 -->|CommandV1::Heartbeat| P4
+    C4 -->|CommandV1::PullModelResult| P4
+    C4 -->|CommandV1::RequestNewProxyConn| P4
+    P4 -->|JSON Format| R2
+    
+    %% Stop and Cleanup Flow
+    A -->|App Close| J7
+    J7 -->|Stop Monitoring| C1
+    C1 -->|Stop Worker| C3
+    C3 -->|Disconnect| R2
+    J7 -->|Stop Local Service| J5
+    J5 -->|Cleanup Engine| L5
+    L5 -->|Unload Model| L2
+    L2 -->|Engine Stopped| J5
+    
+    %% Error Handling
+    D3 -->|Connection Failed| C1
+    C1 -->|Retry Connection| C3
+    D4 -->|Task Failed| C6
+    C6 -->|Error Report| R5
+    L3 -->|Inference Failed| L5
+    L5 -->|Restart Engine| L1
+    
+    %% Styles - Android Layer
+    style A fill:#e1f5fe,stroke:#01579b,stroke-width:3px
+    style J1 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J2 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J3 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J4 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J5 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J6 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style J7 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    
+    %% Styles - Local Inference
+    style L1 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style L2 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style L3 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style L4 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style L5 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    
+    %% Styles - Compute Sharing
+    style C1 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C2 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C3 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C4 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C5 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C6 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    style C7 fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    
+    %% Styles - Remote Servers
+    style R1 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    style R2 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    style R3 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    style R4 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    style R5 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    style R6 fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    
+    %% Styles - Protocols
+    style P1 fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style P2 fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style P3 fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style P4 fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    
+    %% Styles - Decision Points
+    style D1 fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style D2 fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style D3 fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style D4 fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style D5 fill:#fff9c4,stroke:#f57f17,stroke-width:2px

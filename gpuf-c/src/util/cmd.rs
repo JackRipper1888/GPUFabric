@@ -143,7 +143,7 @@ fn parse_client_id(s: &str) -> Result<[u8; 16], String> {
         .map_err(|_| format!("Invalid client ID length"))?)
 }
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, serde::Serialize)]
 pub enum WorkerType {
     #[clap(name = "tcp")]
     TCP,
@@ -151,7 +151,7 @@ pub enum WorkerType {
     WS,
 }
 
-#[derive(ValueEnum, Debug, Clone, PartialEq)]
+#[derive(ValueEnum, Debug, Clone, PartialEq, serde::Serialize)]
 pub enum EngineType {
     #[clap(name = "vllm")]
     VLLM,

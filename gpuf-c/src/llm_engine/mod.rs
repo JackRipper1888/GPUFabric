@@ -2,6 +2,7 @@ pub mod vllm_engine;
 pub mod ollama_engine;
 pub mod llama_engine;
 pub mod llama_server;
+pub mod inference_service;
 use crate::util::cmd::EngineType;
 use llama_engine::LlamaEngine;
 use anyhow::Result;

@@ -17,6 +17,9 @@ pub struct LlamaEngine {
     pub n_gpu_layers: u32,
     pub is_initialized: bool,
     pub models_dir: PathBuf,
+    // Added: model loading status tracking
+    pub loading_status: Arc<RwLock<String>>, // "not_loaded", "loading", "loaded", "error"
+    pub current_loading_model: Arc<RwLock<Option<String>>>,
 }
 
 #[allow(dead_code)] // LlamaEngine implementation methods
@@ -35,6 +38,8 @@ impl LlamaEngine {
             n_gpu_layers: 0,
             is_initialized: false,
             models_dir,
+            loading_status: Arc::new(RwLock::new("not_loaded".to_string())),
+            current_loading_model: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -47,11 +52,13 @@ impl LlamaEngine {
         LlamaEngine {
             models: Arc::new(RwLock::new(Vec::new())),
             models_name: Vec::new(),
-            model_path: Some(model_path),
+            model_path: Some(model_path.clone()),
             n_ctx,
             n_gpu_layers,
             is_initialized: false,
             models_dir,
+            loading_status: Arc::new(RwLock::new("not_loaded".to_string())),
+            current_loading_model: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -200,12 +207,101 @@ impl Drop for LlamaEngine {
 // Additional utility functions for Llama.cpp engine
 #[allow(dead_code)] // LlamaEngine utility methods
 impl LlamaEngine {
-    /// Get the current model status
+    /// Get the current model status (enhanced with loading states)
     pub async fn get_model_status(&self) -> Result<String> {
-        if self.is_initialized && is_initialized() {
-            Ok("loaded".to_string())
-        } else {
-            Ok("unloaded".to_string())
+        let status = self.loading_status.read().await;
+        Ok(status.clone())
+    }
+
+    /// Load a new model dynamically
+    pub async fn load_model(&mut self, model_path: &str) -> Result<()> {
+        info!("Starting to load model: {}", model_path);
+        
+        // Set loading status
+        {
+            let mut status = self.loading_status.write().await;
+            *status = "loading".to_string();
+        }
+        {
+            let mut loading_model = self.current_loading_model.write().await;
+            *loading_model = Some(model_path.to_string());
+        }
+        
+        // Check if model file exists
+        if !tokio::fs::metadata(model_path).await.is_ok() {
+            let mut status = self.loading_status.write().await;
+            *status = format!("error: Model file not found: {}", model_path);
+            return Err(anyhow!("Model file not found: {}", model_path));
+        }
+        
+        // Unload current model
+        if self.is_initialized {
+            info!("Unloading current model...");
+            if let Err(e) = unload_global_engine() {
+                warn!("Failed to unload current model: {}", e);
+            }
+            self.is_initialized = false;
+        }
+        
+        // Load new model
+        info!("Loading new model: {}", model_path);
+        match init_global_engine(model_path, self.n_ctx, self.n_gpu_layers) {
+            Ok(_) => {
+                self.is_initialized = true;
+                self.model_path = Some(model_path.to_string());
+                
+                // Update status to loaded
+                {
+                    let mut status = self.loading_status.write().await;
+                    *status = "loaded".to_string();
+                }
+                
+                info!("Model loaded successfully: {}", model_path);
+                Ok(())
+            }
+            Err(e) => {
+                let mut status = self.loading_status.write().await;
+                *status = format!("error: Failed to load model: {}", e);
+                error!("Failed to load model {}: {}", model_path, e);
+                Err(anyhow!("Failed to load model: {}", e))
+            }
+        }
+    }
+
+    /// Get current loaded model path
+    pub async fn get_current_model(&self) -> String {
+        self.model_path.clone().unwrap_or_default()
+    }
+
+    /// Check if model is loaded
+    pub async fn is_model_loaded(&self) -> bool {
+        let status = self.loading_status.read().await;
+        status.as_str() == "loaded"
+    }
+
+    /// Get detailed loading status
+    pub async fn get_loading_status(&self) -> String {
+        let status = self.loading_status.read().await;
+        let loading_model = self.current_loading_model.read().await;
+        
+        match status.as_str() {
+            "loading" => {
+                if let Some(model) = loading_model.as_ref() {
+                    format!("Loading model: {}", model)
+                } else {
+                    "Loading...".to_string()
+                }
+            }
+            "loaded" => {
+                if let Some(model) = &self.model_path {
+                    format!("Model loaded: {}", model)
+                } else {
+                    "Model loaded".to_string()
+                }
+            }
+            "not_loaded" => "No model loaded".to_string(),
+            other if other.starts_with("error:") => format!("Loading error: {}", &other[6..]),
+            _ => format!("Unknown status: {}", status.as_str()),
         }
     }
 

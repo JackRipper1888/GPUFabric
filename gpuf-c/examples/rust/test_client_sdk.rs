@@ -8,6 +8,7 @@ use std::ffi::{CString, CStr};
 // the functions themselves are safe in their implementation
 #[allow(unused_unsafe)]
 
+#[allow(unused_unsafe)] // FFI calls need unsafe blocks
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the library
     init()?;
@@ -118,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test LLM functionality
+#[allow(unused_unsafe)] // FFI calls need unsafe blocks
 fn test_llm_functionality() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting LLM function test...");
     
