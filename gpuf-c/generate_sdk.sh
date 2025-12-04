@@ -279,8 +279,10 @@ link_sdk() {
     BACKEND_OBJ="$LLAMA_ANDROID_NDK_DIR/ggml-backend-reg.cpp.o"
     OMP_LIB="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux/aarch64/libomp.a"
     
-    # Execute linking
+    # Execute linking with proper C++ runtime
     echo "Linking command executing..."
+    echo "🔧 Using dynamic C++ runtime for better compatibility..."
+    
     $CLANG -shared \
         -o libgpuf_c_sdk_v9.so \
         $RUST_LIB \
@@ -289,9 +291,13 @@ link_sdk() {
         $GGML_LIB \
         $GGML_CPU_LIB \
         $GGML_BASE_LIB \
-        -llog -ldl -lm -lc++_shared \
+        -llog -ldl -lm \
+        -lc++_shared \
         $OMP_LIB \
-        -Wl,--exclude-libs,libomp.a
+        -Wl,--exclude-libs,libomp.a \
+        -Wl,--as-needed \
+        -Wl,--gc-sections \
+        -fPIC
     
     if [ $? -ne 0 ]; then
         handle_error "SDK linking failed"
