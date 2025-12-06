@@ -462,7 +462,7 @@ jstring Java_com_gpuf_c_GPUEngine_isInferenceServiceHealthy(JNIEnv env, JClass _
 /**
  * Stop ongoing generation
  */
-int gpuf_stop_generation(struct llama_context *ctx);
+int gpuf_stop_generation(struct llama_context *_ctx);
 
 /**
  * Start async generation with streaming callback (simplified version)

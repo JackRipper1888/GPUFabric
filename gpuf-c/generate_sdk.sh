@@ -108,6 +108,10 @@ build_rust_library() {
     
     cd "$PROJECT_ROOT"
     
+    # Add Android NDK toolchain to PATH for OpenSSL build system
+    echo "🔧 Adding Android NDK toolchain to PATH..."
+    export PATH="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+    
     echo "🔧 Using static C++ runtime for better Android compatibility..."
     cargo rustc --target $TARGET_ARCH --release --lib --crate-type=staticlib \
         --features android \

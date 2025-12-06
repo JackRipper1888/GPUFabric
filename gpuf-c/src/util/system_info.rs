@@ -494,13 +494,14 @@ async fn collect_device_info_cpu() -> Result<(DevicesInfo, u32)> {
 pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
     use common::{set_u16_to_u128, set_u8_to_u64, to_tflops};
     use std::sync::Once;
-    
+    use nvml_wrapper::NVML as NVMLWrapper;
+
     static INIT: Once = Once::new();
-    static mut NVML: Option<Result<NVML, nvml_wrapper::error::Error>> = None;
+    static mut NVML: Option<Result<NVMLWrapper, nvml_wrapper::error::Error>> = None;
 
     // Initialize NVML only once
     INIT.call_once(|| unsafe {
-        NVML = Some(NVML::init());
+        NVML = Some(NVMLWrapper::init());
     });
     
     let nvml_ptr = &raw const NVML;
