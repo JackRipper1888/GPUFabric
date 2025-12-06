@@ -2,6 +2,8 @@ pub mod handle_tcp;
 pub mod handle_ws;
 use crate::util::cmd::{Args, WorkerType,EngineType};
 use crate::util::network_info::SessionNetworkMonitor;
+// LLM engine is not available in lightweight Android version
+#[cfg(not(target_os = "android"))]
 use crate::llm_engine::Engine;
 use common::{OsType,DevicesInfo, SystemInfo, EngineType as ClientEngineType};
 
@@ -9,16 +11,21 @@ use anyhow::{anyhow, Result};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use futures_util::stream::{SplitStream, SplitSink};
 use std::sync::Arc;
+use std::future::Future;
+#[allow(unused_imports)]
+use std::marker::PhantomData;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+// LLM engine is not available in lightweight Android version
+#[cfg(not(target_os = "android"))]
 use crate::llm_engine::AnyEngine;
 
 pub trait WorkerHandle: Send + Sync {
-    async fn login(&self) -> Result<()>;
-    async fn handler(&self) -> Result<()>;
-    async fn model_task(&self, get_last_models: &str) -> Result<()>;
-    async fn heartbeat_task(&self) -> Result<()>;
+    fn login(&self) -> impl Future<Output = Result<()>> + Send;
+    fn handler(&self) -> impl Future<Output = Result<()>> + Send;
+    fn model_task(&self, get_last_models: &str) -> impl Future<Output = Result<()>> + Send;
+    fn heartbeat_task(&self) -> impl Future<Output = Result<()>> + Send;
 }
 
 pub struct TCPWorker {
@@ -34,7 +41,10 @@ pub struct TCPWorker {
     os_type: OsType,
     engine_type: ClientEngineType,
     args: Args,
+    #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
+    #[cfg(any(target_os = "macos", target_os = "android"))]
+    _engine: PhantomData<()>,
 }
 
 // WS worker
@@ -83,8 +93,26 @@ impl WorkerHandle for AutoWorker {
 
 pub async fn new_worker(args: Args) -> AutoWorker {
     // TODO: IPC shared memory should be selected
-    match args.worker_type {
-        WorkerType::TCP => AutoWorker::TCP(TCPWorker::new(args).await.expect("Failed to create TCP worker")),
-        WorkerType::WS => AutoWorker::WS(WSWorker::new(args).await.expect("Failed to create WS worker")),
+    loop {
+        match args.worker_type {
+            WorkerType::TCP => {
+                match TCPWorker::new(args.clone()).await {
+                    Ok(worker) => return AutoWorker::TCP(worker),
+                    Err(e) => {
+                        tracing::error!("Failed to create TCP worker: {}. Retrying in 5 seconds...", e);
+                    }
+                }
+            }
+            WorkerType::WS => {
+                match WSWorker::new(args.clone()).await {
+                    Ok(worker) => return AutoWorker::WS(worker),
+                    Err(e) => {
+                        tracing::error!("Failed to create WS worker: {}. Retrying in 5 seconds...", e);
+                    }
+                }
+            }
+        }
+        
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }

@@ -72,7 +72,7 @@ fn set_keepalive(stream: &TcpStream) -> std::io::Result<()> {
         .with_retries(3);
 
     let result = socket.set_tcp_keepalive(&keepalive);
-    // 防止 socket 被自动关闭
+    // Prevent socket from being automatically closed
     mem::forget(socket);
 
     result

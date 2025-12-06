@@ -16,6 +16,7 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
+    #[allow(dead_code)] // Public API function, may be used in tests or future
     pub async fn new(db_url: &str, redis_url: &str) -> Result<Self> {
         let db_pool = Pool::connect(db_url).await?;
     

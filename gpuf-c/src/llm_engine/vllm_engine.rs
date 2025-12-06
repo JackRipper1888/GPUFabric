@@ -218,6 +218,7 @@ impl VLLMEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn stop_container(&self) -> Result<()> {
         if let Some(container_id) = &self.container_id {
             info!("Stopping VLLM container...");
@@ -240,7 +241,7 @@ impl VLLMEngine {
         while start.elapsed() < timeout {
             match client
                 .get(&endpoint)
-                .timeout(Duration::from_secs(2)) // 添加超时
+                .timeout(Duration::from_secs(2)) // Add timeout
                 .send()
                 .await
             {
@@ -312,47 +313,55 @@ impl VLLMEngine {
 }
 
 impl Engine for VLLMEngine {
-    async fn init(&mut self) -> Result<()> {
-        info!("Initializing VLLM engine...");
-        self.start_container().await?;
-        info!("VLLM engine initialized successfully");
-        Ok(())
-    }
-
-    async fn set_models(&mut self, models: Vec<String>) -> Result<()> {
-        if models.is_empty() {
-            return Err(anyhow!("Model list cannot be empty"));
-        }
-        if self.models_name == models {
-            info!("Models are the same, no need to update");
-            return Ok(());
-        }
-        info!("Setting models: {:?}", models);
-        self.models_name = models.clone();
-        if models.first().is_some() {
-            // Stop existing container if running
-            self.stop_container().await?;
-            // Start new container with the specified model
+    fn init(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            info!("Initializing VLLM engine...");
             self.start_container().await?;
+            info!("VLLM engine initialized successfully");
+            Ok(())
         }
-        Ok(())
     }
 
-    async fn start_worker(&mut self) -> Result<()> {
-        info!("Starting VLLM worker...");
-        if self.models_name.is_empty() {
-            return Err(anyhow!("No models loaded, cannot start worker"));
+    fn set_models(&mut self, models: Vec<String>) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            if models.is_empty() {
+                return Err(anyhow!("Model list cannot be empty"));
+            }
+            if self.models_name == models {
+                info!("Models are the same, no need to update");
+                return Ok(());
+            }
+            info!("Setting models: {:?}", models);
+            self.models_name = models.clone();
+            if models.first().is_some() {
+                // Stop existing container if running
+                self.stop_container().await?;
+                // Start new container with the specified model
+                self.start_container().await?;
+            }
+            Ok(())
         }
-        self.start_container().await?;
-        info!("VLLM worker started successfully");
-        Ok(())
     }
 
-    async fn stop_worker(&mut self) -> Result<()> {
-        info!("Stopping VLLM worker...");
-        self.stop_container().await?;
-        info!("VLLM worker stopped successfully");
-        Ok(())
+    fn start_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            info!("Starting VLLM worker...");
+            if self.models_name.is_empty() {
+                return Err(anyhow!("No models loaded, cannot start worker"));
+            }
+            self.start_container().await?;
+            info!("VLLM worker started successfully");
+            Ok(())
+        }
+    }
+
+    fn stop_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            info!("Stopping VLLM worker...");
+            self.stop_container().await?;
+            info!("VLLM worker stopped successfully");
+            Ok(())
+        }
     }
 }
 

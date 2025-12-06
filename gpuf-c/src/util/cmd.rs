@@ -60,6 +60,14 @@ pub struct Args {
 
     #[arg(long, default_value = None, help = "chat template path" )]
     pub chat_template_path: Option<String>,
+
+    /// Run as standalone LLAMA API server (no GPUFabric connection)
+    #[arg(long, help = "Run as standalone LLAMA API server")]
+    pub standalone_llama: bool,
+
+    /// Model path for standalone LLAMA server
+    #[arg(long, help = "Path to GGUF model file for standalone mode")]
+    pub llama_model_path: Option<String>,
 }
 
 impl Args {
@@ -83,6 +91,7 @@ impl Args {
             let engine_type = match config_data.client.engine_type.to_lowercase().as_str() {
                 "vllm" => EngineType::VLLM,
                 "ollama" => EngineType::OLLAMA,
+                "llama" => EngineType::LLAMA,
                 _ => {
                     return Err(anyhow::anyhow!(
                         "Invalid engine_type in config. Must be 'vllm' or 'ollama'"
@@ -110,6 +119,8 @@ impl Args {
                 auto_models: config_data.client.auto_models,
                 hugging_face_hub_token: config_data.client.hugging_face_hub_token,
                 chat_template_path: config_data.client.chat_template_path,
+                standalone_llama: false,  // Config file doesn't support standalone mode
+                llama_model_path: None,
             })
             
         } else {
@@ -132,7 +143,7 @@ fn parse_client_id(s: &str) -> Result<[u8; 16], String> {
         .map_err(|_| format!("Invalid client ID length"))?)
 }
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, serde::Serialize)]
 pub enum WorkerType {
     #[clap(name = "tcp")]
     TCP,
@@ -140,10 +151,12 @@ pub enum WorkerType {
     WS,
 }
 
-#[derive(ValueEnum, Debug, Clone, PartialEq)]
+#[derive(ValueEnum, Debug, Clone, PartialEq, serde::Serialize)]
 pub enum EngineType {
     #[clap(name = "vllm")]
     VLLM,
     #[clap(name = "ollama")]
     OLLAMA,
+    #[clap(name = "llama")]
+    LLAMA,
 }

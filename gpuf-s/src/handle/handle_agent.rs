@@ -163,6 +163,7 @@ impl ServerState {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)] // Experimental io_uring implementation for performance optimization
    pub async fn handle_proxy_connections_uring(
         self: Arc<Self>,
         listener: TcpListener,
@@ -218,6 +219,7 @@ impl ServerState {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Experimental io_uring implementation for performance optimization
 async fn route_public_connection_uring(
     _user_stream: UringTcpStream,
     _active_clients: ActiveClients,
@@ -233,6 +235,7 @@ async fn route_public_connection_uring(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Experimental io_uring implementation for performance optimization
 async fn parse_request_uring(_user_stream: UringTcpStream) -> Result<()> {
     // TODO: Implement uring version of parse_request
     info!("Parsing request with io_uring (not yet implemented)");
@@ -265,7 +268,7 @@ async fn parse_request(
                 .map(str::to_string);
 
             info!("authorization api_key: {:?}", api_key);
-            // 获取 Content-Length
+            // Get Content-Length
             let content_length = req
                 .headers
                 .iter()
@@ -375,6 +378,7 @@ pub struct PeekableTcpStream {
 use tokio::io::ReadBuf;
 
 impl PeekableTcpStream {
+    #[allow(dead_code)] // Constructor for peekable TCP stream wrapper
     pub fn new(stream: TcpStream) -> Self {
         Self {
             inner: stream,
@@ -385,6 +389,7 @@ impl PeekableTcpStream {
     }
 
     /// Peek at the data without consuming it
+    #[allow(dead_code)] // Peek functionality for TCP stream inspection
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // If we've already peeked data, return it
         if self.peek_pos < self.peek_buf.len() {
@@ -412,6 +417,7 @@ impl PeekableTcpStream {
     }
 
     /// Consume n bytes from the peek buffer
+    #[allow(dead_code)] // Consume peeked data from buffer
     pub fn consume(&mut self, n: usize) {
         self.peek_pos = (self.peek_pos + n).min(self.peek_buf.len());
         if self.peek_pos == self.peek_buf.len() {
@@ -426,16 +432,19 @@ impl PeekableTcpStream {
     }
 
     /// Get a reference to the inner TcpStream
+    #[allow(dead_code)] // Get reference to inner TCP stream
     pub fn get_ref(&self) -> &TcpStream {
         &self.inner
     }
 
     /// Get a mutable reference to the inner TcpStream
+    #[allow(dead_code)] // Get mutable reference to inner TCP stream
     pub fn get_mut(&mut self) -> &mut TcpStream {
         &mut self.inner
     }
 
     /// Convert back into the inner TcpStream
+    #[allow(dead_code)] // Consume wrapper and return inner TCP stream
     pub fn into_inner(self) -> TcpStream {
         self.inner
     }
@@ -489,6 +498,7 @@ pub struct ChatRequestInfo {
     pub model: Option<String>,
     pub request_id: Option<String>,
     pub api_key: Option<String>,
+    #[allow(dead_code)] // Content type for future request parsing
     pub content_type: Option<String>,
     // pub reader: R,
 }
@@ -543,7 +553,7 @@ async fn extract_chat_info<R: AsyncRead + Unpin>(
         buffer.extend_from_slice(&temp_buf[..n]);
 
         if let Some(pos) = twoway::find_bytes(&buffer, b"\r\n\r\n") {
-            let headers_data = &buffer[..pos + 4]; // 包含 \r\n\r\n
+            let headers_data = &buffer[..pos + 4]; // Include \r\n\r\n
             headers = Some(parse_headers(headers_data)?);
             body_start = pos + 4;
             break 'header_loop;

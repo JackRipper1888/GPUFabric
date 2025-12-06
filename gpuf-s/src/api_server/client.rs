@@ -132,7 +132,9 @@ pub async fn get_user_client_status_list(
 pub struct ClientDetailQuery {
     pub user_id: String,
     pub client_id: String,
+    #[allow(dead_code)] // Optional query parameters for future filtering
     pub status: Option<String>,
+    #[allow(dead_code)] // Optional query parameters for future filtering
     pub name: Option<String>,
 }
 

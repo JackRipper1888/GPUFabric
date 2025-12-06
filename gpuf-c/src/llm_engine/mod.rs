@@ -1,5 +1,11 @@
 pub mod vllm_engine;
 pub mod ollama_engine;
+pub mod llama_engine;
+pub mod llama_server;
+pub mod inference_service;
+
+// Re-export commonly used types
+pub use llama_engine::LlamaEngine;
 use crate::util::cmd::EngineType;
 use anyhow::Result;
 use reqwest::Client;
@@ -16,20 +22,25 @@ const DEFAULT_CHAT_TEMPLATE: &str = r#"
   {% set add_generation_prompt = false %}
 {% endif %}
 {% for message in messages %}
-<|im_start|>{{ message['role'] }}
-{{ message['content'] }}<|im_end|>
+  <message role="{{ message['role'] }}">
+    {{ message['content'] }}
+  </message>
 {% endfor %}
 {% if add_generation_prompt %}
-            {% endif %}
-        "#;
+  <message role="assistant">
+    {{ add_generation_prompt }}
+  </message>
+{% endif %}
+"#;
 
 pub trait Engine {
-    async fn init(&mut self) -> Result<()>;
-    async fn set_models(&mut self, models: Vec<String>) -> Result<()>;
+    fn init(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
     #[allow(dead_code)]
-    async fn start_worker(&mut self) -> Result<()>;
+    fn set_models(&mut self, models: Vec<String>) -> impl std::future::Future<Output = Result<()>> + Send;
     #[allow(dead_code)]
-    async fn stop_worker(&mut self) -> Result<()>;
+    fn start_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
+    #[allow(dead_code)]
+    fn stop_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 #[allow(dead_code)]
@@ -87,31 +98,47 @@ impl Default for OllamaEngine {
 pub enum AnyEngine {
     VLLM(VLLMEngine),
     Ollama(OllamaEngine),
+    Llama(LlamaEngine),
 }
 
 impl Engine for AnyEngine {
-    async fn init(&mut self) -> Result<()> {
-        match self {
-            AnyEngine::VLLM(engine) => engine.init().await,
-            AnyEngine::Ollama(engine) => engine.init().await,
+    fn init(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            match self {
+                AnyEngine::VLLM(engine) => engine.init().await,
+                AnyEngine::Ollama(engine) => engine.init().await,
+                AnyEngine::Llama(engine) => engine.init().await,
+            }
         }
     }
-    async fn set_models(&mut self, models: Vec<String>) -> Result<()> {
-        match self {
-            AnyEngine::VLLM(engine) => engine.set_models(models).await,
-            AnyEngine::Ollama(engine) => engine.set_models(models).await,
+    
+    fn set_models(&mut self, models: Vec<String>) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            match self {
+                AnyEngine::VLLM(engine) => engine.set_models(models).await,
+                AnyEngine::Ollama(engine) => engine.set_models(models).await,
+                AnyEngine::Llama(engine) => engine.set_models(models).await,
+            }
         }
     }
-    async fn start_worker(&mut self) -> Result<()> {
-        match self {
-            AnyEngine::VLLM(engine) => engine.start_worker().await,
-            AnyEngine::Ollama(engine) => engine.start_worker().await,
+    
+    fn start_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            match self {
+                AnyEngine::VLLM(engine) => engine.start_worker().await,
+                AnyEngine::Ollama(engine) => engine.start_worker().await,
+                AnyEngine::Llama(engine) => engine.start_worker().await,
+            }
         }
     }
-    async fn stop_worker(&mut self) -> Result<()> {
-        match self {
-            AnyEngine::VLLM(engine) => engine.stop_worker().await,
-            AnyEngine::Ollama(engine) => engine.stop_worker().await,
+    
+    fn stop_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move {
+            match self {
+                AnyEngine::VLLM(engine) => engine.stop_worker().await,
+                AnyEngine::Ollama(engine) => engine.stop_worker().await,
+                AnyEngine::Llama(engine) => engine.stop_worker().await,
+            }
         }
     }
 }
@@ -122,5 +149,6 @@ pub fn create_engine(engine_type: EngineType, hugging_face_hub_token: Option<Str
     match engine_type {
         EngineType::VLLM => AnyEngine::VLLM(VLLMEngine::new(hugging_face_hub_token, chat_template_path)),
         EngineType::OLLAMA => AnyEngine::Ollama(OllamaEngine::new()),
+        EngineType::LLAMA => AnyEngine::Llama(LlamaEngine::new()),  
     }
 }

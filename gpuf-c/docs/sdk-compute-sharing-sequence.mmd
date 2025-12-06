@@ -1,0 +1,137 @@
+sequenceDiagram
+    participant App as Android App
+    participant JNI as JNI Layer
+    participant Local as Local LLM Engine
+    participant Proxy as ComputeProxy
+    participant Worker as WorkerHandle
+    participant gpufs as gpuf-s Server
+    participant http as GPUFabric HTTP
+
+    %% Initialization Phase
+    App->>+JNI: init()
+    JNI->>+Local: Initialize global engine
+    Local-->>-JNI: Engine ready
+    JNI-->>-App: Library initialized
+
+    %% Start Local Inference Service
+    App->>+JNI: startInferenceService(modelPath, port)
+    JNI->>+Local: Load model and start engine
+    Local-->>-JNI: Local inference ready
+    JNI-->>-App: Service started
+
+    %% Start Compute Monitoring & Sharing
+    App->>+JNI: startComputeMonitoring(serverUrl, serverAddr, ports, types, offlineMode)
+    JNI->>+Proxy: Create ComputeProxy with Args
+    Proxy->>+Worker: new_worker(args)
+    Worker->>+gpufs: TCP/WS connection
+    gpufs-->>-Worker: Connection established
+    Worker->>+gpufs: CommandV1::Login
+    gpufs-->>-Worker: CommandV1::LoginResult(success)
+    Worker->>+Proxy: Start handler()
+    Proxy->>+Worker: Start heartbeat_task()
+    loop Every 120 seconds
+        Worker->>+gpufs: CommandV1::Heartbeat
+        gpufs-->>-Worker: Heartbeat acknowledged
+    end
+    
+    %% Additional HTTP Monitoring (only if not offline)
+    alt Not Offline Mode
+        Proxy->>+Proxy: Start additional HTTP monitoring
+        loop Every 10 seconds
+            Proxy->>+http: POST /api/devices/enhanced-status
+            http-->>-Proxy: Status recorded
+        end
+    end
+    Proxy-->>-JNI: Compute monitoring started
+    JNI-->>-App: Monitoring and sharing active
+
+    %% Model Management Functions
+    App->>+JNI: loadModel(newModelPath)
+    JNI->>+Local: Load new model dynamically
+    Local-->>-JNI: Model loaded successfully
+    JNI->>+Proxy: notify_current_model()
+    alt Not Offline Mode
+        Proxy->>+http: POST /api/models/current
+        http-->>-Proxy: Model status recorded
+    else Offline Mode
+        Proxy->>Proxy: Skip notification (offline mode)
+    end
+    JNI-->>-App: Model loaded
+
+    App->>+JNI: getCurrentModel()
+    JNI->>+Local: Get current loaded model
+    Local-->>-JNI: Return model path
+    JNI-->>-App: Return current model
+
+    App->>+JNI: isModelLoaded()
+    JNI->>+Local: Check model loading status
+    Local-->>-JNI: Return loaded status
+    JNI-->>-App: Return boolean result
+
+    App->>+JNI: getModelLoadingStatus()
+    JNI->>+Local: Get detailed loading status
+    Local-->>-JNI: Return status string
+    JNI-->>-App: Return loading status
+
+    %% Local Inference (Zero Latency, No Reporting)
+    App->>+JNI: generateText(prompt, maxTokens)
+    JNI->>+Local: Direct local inference
+    Local-->>-JNI: Generated text
+    JNI-->>-App: Return result
+
+    %% Remote Task Distribution
+    gpufs->>+Worker: CommandV1::PullModelResult
+    Worker->>+Local: Load requested model
+    Local-->>-Worker: Model ready
+    Worker-->>-gpufs: Model loaded successfully
+
+    gpufs->>+Worker: CommandV1::RequestNewProxyConn
+    Worker->>+gpufs: Create proxy connection
+    gpufs->>+Worker: Forward inference tasks
+    Worker->>+Local: Execute remote inference
+    Local-->>-Worker: Generated text
+    Worker-->>-gpufs: Return inference result
+
+    %% Health Check
+    App->>+JNI: isInferenceServiceHealthy()
+    JNI->>+Local: Check engine status
+    Local-->>-JNI: Engine is healthy
+    JNI-->>-App: Return healthy status
+
+    %% Enhanced Monitoring Data Flow (only if not offline)
+    alt Not Offline Mode
+        Proxy->>+Proxy: collect_enhanced_compute_info()
+        Proxy->>+http: Enhanced metrics (GPU, memory, thermal)
+        http-->>-Proxy: Metrics stored
+    end
+
+    %% Error Handling and Recovery
+    gpufs->>+Worker: Connection lost
+    Worker->>+Worker: Auto-reconnect logic
+    Worker->>+gpufs: Re-establish connection
+    gpufs-->>-Worker: Connection restored
+
+    Local->>+Proxy: Inference error
+    Proxy->>+http: Error report
+    http-->>-Proxy: Error logged
+
+    %% Shutdown Phase
+    App->>+JNI: stopComputeMonitoring()
+    JNI->>+Proxy: stop_monitoring()
+    Proxy->>+Worker: Stop handler and heartbeat
+    Worker->>+gpufs: Disconnect
+    Proxy->>+Proxy: Stop HTTP monitoring
+    Proxy-->>-JNI: Monitoring stopped
+    JNI-->>-App: Compute sharing stopped
+
+    App->>+JNI: stopInferenceService()
+    JNI->>+Local: Cleanup and stop engine
+    Local-->>-JNI: Engine stopped
+    JNI-->>-App: Service stopped
+
+    %% Summary Notes
+    Note over App, http: Simplified Architecture:
+    Note over App, http: 1. Local inference: Pure zero latency, no reporting overhead
+    Note over App, http: 2. Model management: Dynamic loading, status queries, server notifications
+    Note over App, http: 3. Compute sharing: Compatible WorkerHandle, TCP/WS + HTTP
+    Note over App, http: 4. Offline mode: Skip network requests, preserve privacy

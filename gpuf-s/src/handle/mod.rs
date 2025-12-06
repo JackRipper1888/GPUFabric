@@ -29,14 +29,18 @@ pub type PendingConnections = Arc<Mutex<HashMap<ProxyConnId, (TcpStream,BytesMut
 pub struct ClientInfo {
     pub writer: Arc<Mutex<OwnedWriteHalf>>,
     pub authed: bool,
+    #[allow(dead_code)] // Client protocol version
     pub version: u32,
     pub system_info: Option<SystemInfo>,
+    #[allow(dead_code)] // Connected devices information
     pub devices_info: Vec<DevicesInfo>,
+    #[allow(dead_code)] // Connection timestamp
     pub connected_at: DateTime<Utc>,
     pub models: Option<Vec<Model>>,
 }
 
 pub struct User {
+    #[allow(dead_code)] // User password hash
     pub pass: String,
 }
 
@@ -74,10 +78,14 @@ pub struct ServerConfig {
 pub struct ServerState {
     pub active_clients: ActiveClients,
     pub pending_connections: PendingConnections,
+    #[allow(dead_code)] // User authentication database
     pub user_db: UserDb,
+    #[allow(dead_code)] // Token authentication database
     pub token_db: TokenDb,
+    #[allow(dead_code)] // Server start timestamp
     pub server_start_time: DateTime<Utc>,
     pub total_connections: Arc<Mutex<u64>>,
+    #[allow(dead_code)] // Server configuration
     pub config: ServerConfig,
     pub db_pool: Arc<Pool<Postgres>>,
     pub redis_client: Arc<RedisClient>,
@@ -210,6 +218,7 @@ pub async fn print_monitoring_data(active_clients: ActiveClients) {
 
 // Response structure
 #[derive(Debug, Serialize)]
+#[allow(dead_code)] // Client statistics response structure
 pub struct ClientStatResponse {
     pub systems_total_number: i64,
     pub systems_online_number: i64,
