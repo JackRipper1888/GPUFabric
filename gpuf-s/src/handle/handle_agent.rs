@@ -29,10 +29,16 @@ use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+
 use tokio_rustls::{
-    rustls::{crypto::aws_lc_rs, server::ServerConfig},
+    rustls::{server::ServerConfig},
     TlsAcceptor,
 };
+
+#[cfg(feature = "aws_lc_rs")]
+use tokio_rustls::rustls::crypto::aws_lc_rs;
+#[cfg(feature = "ring")]
+use tokio_rustls::rustls::crypto::ring;
 
 use tracing::debug;
 use crate::db::client::get_user_client_by_token;
@@ -45,9 +51,16 @@ impl ServerState {
         let cert_chain = self.cert_chain.clone();
         let priv_key = self.priv_key.clone();
 
+        #[cfg(feature = "aws_lc_rs")]
         aws_lc_rs::default_provider()
             .install_default()
             .expect("failed to install aws-lc-rs provider");
+        
+        #[cfg(feature = "ring")]
+        ring::default_provider()
+            .install_default()
+            .expect("failed to install ring provider");
+
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain.to_vec(), priv_key.clone_key())?;

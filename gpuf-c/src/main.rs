@@ -74,12 +74,15 @@ async fn run_standalone_llama(mut args: Args) -> Result<()> {
     };
     
     info!("Loading model: {}", model_path);
+    info!("Configuration:");
+    info!("  - Context size: {}", args.n_ctx);
+    info!("  - GPU layers: {}", args.n_gpu_layers);
     
     // Create and initialize engine
     let mut engine = LlamaEngine::with_config(
         model_path.clone(),
-        2048,  // context size
-        35,    // GPU layers (adjust based on your GPU)
+        args.n_ctx,         // context size from args
+        args.n_gpu_layers,  // GPU layers from args
     );
     
     engine.init().await?;

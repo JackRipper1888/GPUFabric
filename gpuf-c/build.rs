@@ -19,6 +19,14 @@ fn main() {
     // Get the target OS from Cargo environment variable
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     println!("cargo:warning=Target OS detected: {}", target_os);
+    
+    // Configure CUDA compilation flags for Position Independent Code
+    // This is required for linking CUDA code into shared libraries
+    if cfg!(feature = "cuda") {
+        println!("cargo:rustc-env=CUDA_NVCC_FLAGS=-Xcompiler -fPIC");
+        println!("cargo:rustc-env=CUDAFLAGS=-Xcompiler -fPIC");
+        println!("cargo:warning=CUDA feature enabled - adding -fPIC flag");
+    }
 
     // Configure NVML library path for Windows target
     if target_os == "windows" {

@@ -11,7 +11,7 @@ pub struct Args {
     pub config: Option<String>,
 
     /// Unique ID for this client instance. If not provided, uses machine ID.
-    #[arg(short('i'), long, value_parser = parse_client_id, required_unless_present = "config")]
+    #[arg(short('i'), long, value_parser = parse_client_id, required_unless_present_any = ["config", "standalone_llama"])]
     pub client_id: Option<[u8; 16]>,
 
     /// Address of the gpuf-s server.
@@ -68,6 +68,14 @@ pub struct Args {
     /// Model path for standalone LLAMA server
     #[arg(long, help = "Path to GGUF model file for standalone mode")]
     pub llama_model_path: Option<String>,
+
+    /// Number of GPU layers to offload (default: 99 for large models)
+    #[arg(long, default_value_t = 99, help = "Number of model layers to offload to GPU")]
+    pub n_gpu_layers: u32,
+
+    /// Context size for model inference (default: 8192)
+    #[arg(long, default_value_t = 8192, help = "Context window size in tokens")]
+    pub n_ctx: u32,
 }
 
 impl Args {
@@ -121,12 +129,15 @@ impl Args {
                 chat_template_path: config_data.client.chat_template_path,
                 standalone_llama: false,  // Config file doesn't support standalone mode
                 llama_model_path: None,
+                n_ctx: config_data.client.n_ctx,
+                n_gpu_layers: config_data.client.n_gpu_layers,
             })
             
         } else {
-            if self.client_id.is_none() {
+            // In standalone_llama mode, client_id is optional
+            if self.client_id.is_none() && !self.standalone_llama {
                 return Err(anyhow::anyhow!(
-                    "Either --config or --client-id must be provided"
+                    "Either --config, --client-id, or --standalone-llama must be provided"
                 ));
             }
 
