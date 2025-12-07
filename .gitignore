@@ -5,7 +5,7 @@
 *.venv
 *.vscode
 *.srl
-*.cargo
+.cargo/config.toml
 *.oss
 output
 dhat-heap.json

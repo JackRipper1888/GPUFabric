@@ -185,11 +185,7 @@ async fn chat_completions(
     // Generate text
     let engine = state.engine.read().await;
     let max_tokens = req.max_tokens.unwrap_or(100);
-    let response_text = engine.generate(&prompt, max_tokens).await?;
-
-    // Estimate token count (simple estimation)
-    let prompt_tokens = prompt.split_whitespace().count();
-    let completion_tokens = response_text.split_whitespace().count();
+    let (response_text, prompt_tokens, completion_tokens) = engine.generate(&prompt, max_tokens).await?;
 
     let response = ChatCompletionResponse {
         id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -226,10 +222,7 @@ async fn completions(
 
     let engine = state.engine.read().await;
     let max_tokens = req.max_tokens.unwrap_or(100);
-    let response_text = engine.generate(&req.prompt, max_tokens).await?;
-
-    let prompt_tokens = req.prompt.split_whitespace().count();
-    let completion_tokens = response_text.split_whitespace().count();
+    let (response_text, prompt_tokens, completion_tokens) = engine.generate(&req.prompt, max_tokens).await?;
 
     let response = CompletionResponse {
         id: format!("cmpl-{}", uuid::Uuid::new_v4()),
@@ -254,20 +247,69 @@ async fn completions(
     Ok(Json(response))
 }
 
-/// Build chat prompt
+/// Build chat prompt using various popular formats
+/// You can set CHAT_TEMPLATE env var to: chatml, llama3, alpaca, or simple (default)
 fn build_chat_prompt(messages: &[ChatMessage]) -> String {
-    let mut prompt = String::new();
+    let template = std::env::var("CHAT_TEMPLATE").unwrap_or_else(|_| "simple".to_string());
     
+    match template.to_lowercase().as_str() {
+        "chatml" => build_chatml_prompt(messages),
+        "llama3" => build_llama3_prompt(messages),
+        "alpaca" => build_alpaca_prompt(messages),
+        _ => build_simple_prompt(messages),
+    }
+}
+
+/// ChatML format (Qwen, GPT-4, etc.)
+fn build_chatml_prompt(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
+    for msg in messages {
+        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
+    }
+    prompt.push_str("<|im_start|>assistant\n");
+    prompt
+}
+
+/// Llama 3 format
+fn build_llama3_prompt(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::from("<|begin_of_text|>");
+    for msg in messages {
+        prompt.push_str(&format!("<|start_header_id|>{}<|end_header_id|>\n\n{}<|eot_id|>", msg.role, msg.content));
+    }
+    prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    prompt
+}
+
+/// Alpaca/Vicuna format (broad compatibility)
+fn build_alpaca_prompt(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
     for msg in messages {
         match msg.role.as_str() {
-            "system" => prompt.push_str(&format!("System: {}\n\n", msg.content)),
-            "user" => prompt.push_str(&format!("User: {}\n\n", msg.content)),
-            "assistant" => prompt.push_str(&format!("Assistant: {}\n\n", msg.content)),
-            _ => prompt.push_str(&format!("{}: {}\n\n", msg.role, msg.content)),
+            "system" => prompt.push_str(&format!("### Instruction:\n{}\n\n", msg.content)),
+            "user" => prompt.push_str(&format!("### Input:\n{}\n\n", msg.content)),
+            "assistant" => prompt.push_str(&format!("### Response:\n{}\n\n", msg.content)),
+            _ => prompt.push_str(&format!("### {}:\n{}\n\n", msg.role, msg.content)),
         }
     }
-    
-    prompt.push_str("Assistant: ");
+    prompt.push_str("### Response:\n");
+    prompt
+}
+
+/// Simple format (most universal, works with almost any model)
+fn build_simple_prompt(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
+    for msg in messages {
+        prompt.push_str(&format!("{}: {}\n\n", 
+            match msg.role.as_str() {
+                "user" => "Human",
+                "assistant" => "Assistant",
+                "system" => "System",
+                _ => &msg.role,
+            },
+            msg.content
+        ));
+    }
+    prompt.push_str("Assistant:");
     prompt
 }
 

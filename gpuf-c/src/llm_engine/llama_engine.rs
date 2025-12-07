@@ -119,7 +119,8 @@ impl LlamaEngine {
     }
     
     /// Generate text using cached model (inference only)
-    pub async fn generate_with_cached_model(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+    /// Returns (generated_text, prompt_tokens, completion_tokens)
+    pub async fn generate_with_cached_model(&self, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize)> {
         if !self.is_initialized {
             return Err(anyhow!("Engine not initialized - call load_model() first"));
         }
@@ -128,8 +129,9 @@ impl LlamaEngine {
         {
             // Android: Simulated response
             warn!("Android SDK: Using simulated response");
-            Ok(format!("Android SDK response for: {} (simulated, {} tokens)", 
-                &prompt[..prompt.len().min(30)], max_tokens))
+            let text = format!("Android SDK response for: {} (simulated, {} tokens)", 
+                &prompt[..prompt.len().min(30)], max_tokens);
+            Ok((text, 10, 20)) // Simulated token counts
         }
         
         #[cfg(not(target_os = "android"))]
@@ -149,6 +151,9 @@ impl LlamaEngine {
             
             // Run inference in blocking thread
             tokio::task::spawn_blocking(move || {
+                use llama_cpp_2::model::AddBos;
+                use llama_cpp_2::llama_batch::LlamaBatch;
+                
                 let context_params = LlamaContextParams::default()
                     .with_n_ctx(NonZeroU32::new(n_ctx));
                 
@@ -156,12 +161,79 @@ impl LlamaEngine {
                 let model_guard = model.lock()
                     .map_err(|e| anyhow!("Failed to lock model: {:?}", e))?;
                 
-                let _context = model_guard.new_context(&*backend, context_params)
+                let mut context = model_guard.new_context(&*backend, context_params)
                     .map_err(|e| anyhow!("Failed to create context: {:?}", e))?;
                 
-                // Simple inference for now
-                Ok(format!("llama-cpp-2 cached inference for: {} ({} tokens)", 
-                    &prompt[..prompt.len().min(30)], max_tokens))
+                // Tokenize the prompt
+                let tokens = model_guard.str_to_token(&prompt, AddBos::Always)
+                    .map_err(|e| anyhow!("Failed to tokenize prompt: {:?}", e))?;
+                
+                // Create batch and add tokens
+                let mut batch = LlamaBatch::new(tokens.len(), 1);
+                for (i, token) in tokens.iter().enumerate() {
+                    let is_last = i == tokens.len() - 1;
+                    batch.add(*token, i as i32, &[0], is_last)
+                        .map_err(|e| anyhow!("Failed to add token to batch: {:?}", e))?;
+                }
+                
+                // Decode tokens (process prompt)
+                context.decode(&mut batch)
+                    .map_err(|e| anyhow!("Failed to decode batch: {:?}", e))?;
+                
+                // Generate tokens
+                let mut output_tokens = Vec::new();
+                let mut output_text = String::new();
+                let mut n_cur = tokens.len(); // Current position in sequence
+                
+                // Create a sampler chain for better sampling
+                use llama_cpp_2::sampling::LlamaSampler;
+                let mut sampler = LlamaSampler::chain_simple(vec![
+                    LlamaSampler::temp(0.8),
+                    LlamaSampler::dist(0),
+                ]);
+                
+                for i in 0..max_tokens {
+                    // Sample using the sampler chain
+                    let new_token = sampler.sample(&context, -1);
+                    
+                    eprintln!("Token {}: id={}, text={:?}", i, new_token, 
+                        model_guard.token_to_str(new_token, llama_cpp_2::model::Special::Tokenize).ok());
+                    
+                    // Check for EOS token
+                    if new_token == model_guard.token_eos() {
+                        break;
+                    }
+                    
+                    // Convert token to string and append
+                    use llama_cpp_2::model::Special;
+                    if let Ok(piece) = model_guard.token_to_str(new_token, Special::Tokenize) {
+                        // Check for stop sequences (ChatML, Llama3, etc.)
+                        if piece.contains("<|im_end|>") || piece.contains("<|eot_id|>") || 
+                           piece.contains("<|end_of_text|>") || piece.contains("</s>") {
+                            break;
+                        }
+                        output_text.push_str(&piece);
+                    }
+                    
+                    output_tokens.push(new_token);
+                    
+                    // Prepare next batch with single token at correct position
+                    let mut next_batch = LlamaBatch::new(1, 1);
+                    next_batch.add(new_token, n_cur as i32, &[0], true)
+                        .map_err(|e| anyhow!("Failed to add token: {:?}", e))?;
+                    
+                    // Decode next token
+                    context.decode(&mut next_batch)
+                        .map_err(|e| anyhow!("Failed to decode token: {:?}", e))?;
+                    
+                    // Increment position for next token
+                    n_cur += 1;
+                }
+                
+                // Return text with token counts
+                let prompt_token_count = tokens.len();
+                let completion_token_count = output_tokens.len();
+                Ok((output_text, prompt_token_count, completion_token_count))
             }).await?
         }
     }
@@ -240,8 +312,9 @@ impl LlamaEngine {
 
         debug!("Generating response with prompt: {}, max_tokens: {}", prompt, max_tokens);
         
-        // Use the new cached inference method
-        self.generate_with_cached_model(prompt, max_tokens).await
+        // Use the new cached inference method and extract just the text
+        let (text, _, _) = self.generate_with_cached_model(prompt, max_tokens).await?;
+        Ok(text)
     }
 }
 
@@ -496,15 +569,16 @@ impl LlamaEngine {
     }
 
     /// Generate text using the loaded model (embedded mode)
-    pub async fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+    /// Returns (generated_text, prompt_tokens, completion_tokens)
+    pub async fn generate(&self, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize)> {
         if !self.is_initialized {
             return Err(anyhow!("Llama.cpp engine is not initialized"));
         }
 
         debug!("Generating text with prompt: {}, max_tokens: {}", prompt, max_tokens);
-        // TODO: Integrate real FFI inference from lib.rs
-        // For now, return simulated response
-        Ok(format!("Generated response for: {} (simulated, {} tokens)", &prompt[..prompt.len().min(30)], max_tokens))
+        
+        // Use the real inference method with cached model
+        self.generate_with_cached_model(prompt, max_tokens).await
     }
 
     /// Download a model from a URL

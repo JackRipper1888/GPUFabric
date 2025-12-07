@@ -44,6 +44,10 @@ pub struct ClientConfig {
     pub hugging_face_hub_token: Option<String>,
     #[serde(rename = "chat_template_path")]
     pub chat_template_path: Option<String>,
+    #[serde(rename = "n_ctx")]
+    pub n_ctx: u32,
+    #[serde(rename = "n_gpu_layers")]
+    pub n_gpu_layers: u32,
 }
 
 impl Config {

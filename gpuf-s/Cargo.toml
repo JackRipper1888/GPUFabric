@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 common = { path = "../common" }
 tokio = { workspace = true }
-tokio-rustls = { workspace = true }
+tokio-rustls = { version = "0.26.2", default-features = false }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -60,5 +60,7 @@ name = "api_server"
 path = "src/bin/api_server.rs"
 
 [features]
-default = ["xdp"]
+default = ["ring", "xdp"]
+aws_lc_rs = ["tokio-rustls/aws_lc_rs"]
+ring = ["tokio-rustls/ring"]
 xdp = ["aya"]

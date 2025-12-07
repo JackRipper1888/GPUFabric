@@ -42,12 +42,51 @@ GPUFabric supports multi-platform builds, including Android, Windows, Linux, and
 git clone https://github.com/your-org/GPUFabric.git
 cd GPUFabric/gpuf-c
 
-# Build release version
+# Build release version (CPU only)
 cargo build --release
+
+# Build with GPU support
+cargo build --release --features vulkan  # Recommended for all platforms
+
+# Build with CUDA (NVIDIA GPU - binary only)
+cargo build --release --bin gpuf-c --features cuda
 
 # Run tests
 cargo test
 ```
+
+## ⚠️ Important: CUDA Build Limitations
+
+### CUDA + Shared Library Issue
+
+Due to `llama-cpp-2` crate's CUDA implementation not using `-fPIC` flag, **CUDA builds cannot generate shared libraries (`.so`/`.dll`)**.
+
+**What works:**
+- ✅ Binary executable: `cargo build --release --bin gpuf-c --features cuda`
+- ✅ Static library: `cargo build --release --lib --features cuda --crate-type staticlib`
+
+**What doesn't work:**
+- ❌ Shared library (cdylib): `cargo build --release --lib --features cuda`
+
+### Solutions:
+
+1. **For Android JNI/SDK (Recommended):**
+   ```bash
+   # Use Vulkan instead of CUDA - supports all library types
+   cargo build --release --features vulkan
+   ```
+
+2. **For NVIDIA GPU on Linux/Windows:**
+   ```bash
+   # Build binary only
+   ./build_cuda.sh  # Or manually: cargo build --release --bin gpuf-c --features cuda
+   ```
+
+3. **For static linking:**
+   ```bash
+   # Build static library
+   cargo rustc --release --lib --features cuda --crate-type staticlib
+   ```
 
 ## 🔧 Build Options
 
