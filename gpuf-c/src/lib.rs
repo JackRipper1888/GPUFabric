@@ -19,6 +19,7 @@ use jni::JNIEnv;
 use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::os::raw::c_ulonglong;
+#[cfg(target_os = "android")]
 use libc::size_t;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};

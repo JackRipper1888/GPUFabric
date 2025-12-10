@@ -42,6 +42,21 @@ fn main() {
                 }
             }
         }
+        
+
+        let project_root = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let icon_path = format!("{}\\{}", project_root, "gpuf_icon.ico");
+        let icon_rc_content = format!(
+            r#"#include <windows.h>
+1 ICON "{}"
+"#,
+            icon_path.replace("\\", "\\\\") // 转义反斜杠
+        );
+    
+        std::fs::write("icon.rc", icon_rc_content)
+            .expect("Failed to write icon.rc file");
+
+        embed_resource::compile("icon.rc", &[] as &[&str]);
     }
     
     // Link OpenMP on Linux target explicitly (LLVM OpenMP)

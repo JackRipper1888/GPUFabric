@@ -30,4 +30,4 @@ ANDROID_STL = "c++_shared"
 [build]
 incremental = true
 rustflags = ["-C","codegen-units=16"]
-rustc-wrapper = "sccache"
+# rustc-wrapper = "sccache"  # Temporarily disabled for icon embedding test
