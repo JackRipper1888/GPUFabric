@@ -805,9 +805,9 @@ async fn route_public_connection_new(
     let chat_info = match extract_chat_info(&mut user_stream, &mut buffer).await {
         Ok(result) => result,
         Err(e) => {
-            error!("Request parsing timed out: {}", e);
+            error!("Request parsing failed: {}", e);
             buffer_pool.put(buffer).await;
-            return Err(anyhow::anyhow!("Request parsing timed out"));
+            return Err(anyhow::anyhow!("Request parsing failed"));
         }
     };
 

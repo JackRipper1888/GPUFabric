@@ -11,13 +11,14 @@
 #[cfg(target_os = "android")]
 use jni::objects::{JClass, JString};
 #[cfg(target_os = "android")]
-use jni::sys::{jint, jstring};
-#[cfg(target_os = "android")]
 use jni::JNIEnv;
+use jni::sys::{jint, jlong, jstring, jboolean, jbyteArray, jfloat};
+use std::ffi::{c_char, c_void};
+use std::ptr;
 
 use crate::{
     get_remote_worker_status, set_remote_worker_model, start_remote_worker,
-    start_remote_worker_tasks, stop_remote_worker,
+    start_remote_worker_tasks_with_callback_ptr, stop_remote_worker, 
 };
 
 // ============================================================================
@@ -211,22 +212,35 @@ pub extern "C" fn Java_com_gpuf_c_RemoteWorker_startRemoteWorker(
 // ============================================================================
 // JNI Function: Start Remote Worker Tasks
 // ============================================================================
-/// Starts the background tasks for the remote worker
+/// Starts the background tasks for the remote worker with optional callback
 ///
 /// Java signature:
-/// public static native int startRemoteWorkerTasks();
+/// public static native int startRemoteWorkerTasks(long callbackFunctionPtr);
 ///
+/// @param callbackFunctionPtr Optional function pointer for status updates
 /// @return 0 on success, -1 on failure
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_com_gpuf_c_RemoteWorker_startRemoteWorkerTasks(
     _env: JNIEnv,
     _class: JClass,
+    callback_function_ptr: jlong,
 ) -> jint {
     println!("🔥 GPUFabric JNI: Starting remote worker tasks");
 
-    // Call C API
-    let result = start_remote_worker_tasks();
+    // Convert function pointer
+    let callback = if callback_function_ptr != 0 {
+        Some(unsafe {
+            std::mem::transmute::<jlong, extern "C" fn(*const c_char, *mut c_void)>(
+                callback_function_ptr,
+            )
+        })
+    } else {
+        None
+    };
+
+    // Call C API with callback
+    let result = start_remote_worker_tasks_with_callback_ptr(callback);
 
     if result == 0 {
         println!("✅ JNI: Remote worker tasks started successfully");

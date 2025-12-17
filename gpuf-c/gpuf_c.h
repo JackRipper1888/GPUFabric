@@ -529,6 +529,11 @@ int set_remote_worker_model(const char *model_path);
 int start_remote_worker_tasks(void);
 
 /**
+ * Start remote worker background tasks with callback support (C API)
+ */
+int start_remote_worker_tasks_with_callback_ptr(void (*callback)(const char*, void*));
+
+/**
  * Stop remote worker and cleanup (C API)
  */
 int stop_remote_worker(void);
@@ -590,14 +595,17 @@ jint Java_com_gpuf_c_RemoteWorker_startRemoteWorker(JNIEnv env,
                                                     JString client_id);
 
 /**
- * Starts the background tasks for the remote worker
+ * Starts the background tasks for the remote worker with optional callback
  *
  * Java signature:
- * public static native int startRemoteWorkerTasks();
+ * public static native int startRemoteWorkerTasks(long callbackFunctionPtr);
  *
+ * @param callbackFunctionPtr Optional function pointer for status updates
  * @return 0 on success, -1 on failure
  */
-jint Java_com_gpuf_c_RemoteWorker_startRemoteWorkerTasks(JNIEnv _env, JClass _class);
+jint Java_com_gpuf_c_RemoteWorker_startRemoteWorkerTasks(JNIEnv _env,
+                                                         JClass _class,
+                                                         jlong callback_function_ptr);
 
 /**
  * Gets the current status of the remote worker

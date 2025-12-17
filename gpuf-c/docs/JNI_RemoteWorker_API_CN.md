@@ -107,34 +107,77 @@ if (result == 0) {
 
 ### 3. startRemoteWorkerTasks
 
-**功能**: 启动后台任务处理线程
+**功能**: 启动后台任务处理线程（支持回调通知）
 
-**描述**: 启动心跳线程和推理任务处理线程。必须在 `startRemoteWorker()` 成功后调用。
+**描述**: 启动心跳线程和推理任务处理线程，并可选地提供状态更新回调函数。必须在 `startRemoteWorker()` 成功后调用。
 
 **Java 方法签名**:
 ```java
-public static native int startRemoteWorkerTasks();
+public static native int startRemoteWorkerTasks(long callbackFunctionPtr);
 ```
 
-**参数**: 无
+**参数**:
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| `callbackFunctionPtr` | long | 回调函数指针<br>`0`: 不使用回调<br>`非0`: 传递回调函数地址 |
+
+**回调函数签名**:
+```c
+extern "C" void worker_status_callback(const char* message, void* user_data);
+```
 
 **返回值**:
 - `0`: 成功启动后台任务
 - `-1`: 启动失败（详细错误信息会输出到日志）
 
 **功能说明**:
-- 启动心跳线程：定期向服务器发送设备状态（CPU、内存、磁盘使用率）
+- 启动心跳线程：定期向服务器发送**真实**设备状态（CPU、内存、磁盘使用率）
 - 启动任务处理线程：监听并处理来自服务器的推理请求
+- 支持实时回调通知：获取任务状态、登录结果、推理进度等
 
-**示例**:
+**回调消息类型**:
+- `STARTING - Initializing background tasks...`
+- `HEARTBEAT - Sending heartbeat to server`
+- `SUCCESS - Heartbeat sent successfully`
+- `HANDLER_START - Handler thread started`
+- `LOGIN_SUCCESS - Login successful`
+- `COMMAND_RECEIVED - V1(InferenceTask {...})`
+- `INFERENCE_START - Task: xxx-xxx-xxx`
+- `INFERENCE_SUCCESS - Task: xxx-xxx-xxx in XXXms`
+
+**高级用法（带回调）**:
 ```java
-int result = RemoteWorker.startRemoteWorkerTasks();
+// 1. 定义本地回调方法
+public native void setupWorkerCallback();
+
+// 2. 在 C/C++ 中实现回调函数
+extern "C" void worker_status_callback(const char* message, void* user_data) {
+    // 处理状态更新
+    __android_log_print(ANDROID_LOG_INFO, "GPUFabric", "[CALLBACK] %s", message);
+}
+
+// 3. 获取回调函数指针并启动任务
+long callbackPtr = getWorkerCallbackPointer(); // 获取函数指针
+int result = RemoteWorker.startRemoteWorkerTasks(callbackPtr);
+```
+
+**基础用法（无回调）**:
+```java
+int result = RemoteWorker.startRemoteWorkerTasks(0);
 if (result == 0) {
     Log.i("GPUFabric", "后台任务启动成功");
 } else {
     Log.e("GPUFabric", "后台任务启动失败");
 }
 ```
+
+**设备信息收集**:
+- **真实内存信息**: 从 `/proc/meminfo` 读取设备总内存
+- **实时CPU使用率**: 从 `/proc/stat` 计算CPU使用百分比
+- **内存使用率**: 从 `/proc/meminfo` 计算内存使用百分比
+- **设备温度**: 从 `/sys/class/thermal/` 读取温度传感器
+- **CPU核心数**: 从 `/proc/cpuinfo` 获取处理器核心数
+- **估算算力**: 基于CPU核心数估算TFLOPS
 
 ---
 
@@ -240,12 +283,16 @@ if (result != 0) {
     return;
 }
 
-// 4. 启动后台任务
-result = RemoteWorker.startRemoteWorkerTasks();
+// 4. 启动后台任务（基础用法）
+result = RemoteWorker.startRemoteWorkerTasks(0);
 if (result != 0) {
     Log.e("GPUFabric", "后台任务启动失败");
     return;
 }
+
+// 4.1 启动后台任务（高级用法 - 带回调）
+// long callbackPtr = getWorkerCallbackPointer(); // 获取回调函数指针
+// result = RemoteWorker.startRemoteWorkerTasks(callbackPtr);
 
 // 5. 监控状态（可选）
 new Thread(() -> {
@@ -285,6 +332,99 @@ if (result != 0) {
     // - 内存不足
 }
 ```
+
+---
+
+## 高级功能：回调通知机制
+
+### 概述
+
+`startRemoteWorkerTasks(long callbackFunctionPtr)` 支持通过函数指针提供实时状态更新回调。这允许应用实时接收工作器状态变化，而无需轮询。
+
+### 实现步骤
+
+#### 1. 定义 C 回调函数
+
+```c
+// 在你的 C/C++ 代码中
+#include <android/log.h>
+#include <jni.h>
+
+extern "C" void worker_status_callback(const char* message, void* user_data) {
+    // 处理状态更新消息
+    __android_log_print(ANDROID_LOG_INFO, "GPUFabric", "[CALLBACK] %s", message);
+    
+    // 可以在这里调用 Java 方法通知 UI
+    // JNIEnv* env = getJNIEnv(); // 获取 JNI 环境
+    // jclass clazz = env->FindClass("com/yourpackage/YourActivity");
+    // jmethodID method = env->GetStaticMethodID(clazz, "onWorkerStatusUpdate", "(Ljava/lang/String;)V");
+    // jstring jMessage = env->NewStringUTF(message);
+    // env->CallStaticVoidMethod(clazz, method, jMessage);
+}
+```
+
+#### 2. 获取函数指针并传递给 JNI
+
+```c
+// 获取回调函数指针
+extern "C" jlong Java_com_yourpackage_YourActivity_getWorkerCallbackPointer(
+    JNIEnv* env, jclass clazz) {
+    return (jlong)worker_status_callback;
+}
+```
+
+#### 3. 在 Java 中使用
+
+```java
+public class YourActivity extends Activity {
+    static {
+        System.loadLibrary("your-native-lib");
+        System.loadLibrary("gpuf_c_sdk_v9");
+    }
+    
+    // 声明本地方法
+    public native long getWorkerCallbackPointer();
+    
+    private void startWorkerWithCallback() {
+        // 获取回调函数指针
+        long callbackPtr = getWorkerCallbackPointer();
+        
+        // 启动工作器任务
+        int result = RemoteWorker.startRemoteWorkerTasks(callbackPtr);
+        if (result == 0) {
+            Log.i("GPUFabric", "工作器启动成功（带回调）");
+        } else {
+            Log.e("GPUFabric", "工作器启动失败");
+        }
+    }
+    
+    // 可选：处理来自 C 的状态更新
+    public static void onWorkerStatusUpdate(String message) {
+        Log.i("GPUFabric", "收到状态更新: " + message);
+        // 更新 UI 或处理业务逻辑
+    }
+}
+```
+
+### 回调消息详解
+
+| 消息类型 | 说明 | 触发时机 |
+|----------|------|----------|
+| `STARTING - Initializing background tasks...` | 任务开始初始化 | 调用 `startRemoteWorkerTasks()` 后 |
+| `HEARTBEAT - Sending heartbeat to server` | 发送心跳 | 每30秒定时触发 |
+| `SUCCESS - Heartbeat sent successfully` | 心跳发送成功 | 心跳完成后 |
+| `HANDLER_START - Handler thread started` | 处理线程启动 | 任务处理线程初始化完成 |
+| `LOGIN_SUCCESS - Login successful` | 登录成功 | 成功连接并注册到服务器 |
+| `COMMAND_RECEIVED - V1(InferenceTask {...})` | 收到推理任务 | 服务器分配推理请求 |
+| `INFERENCE_START - Task: xxx-xxx-xxx` | 开始推理 | 开始处理推理任务 |
+| `INFERENCE_SUCCESS - Task: xxx-xxx-xxx in XXXms` | 推理完成 | 任务处理完成 |
+
+### 性能考虑
+
+- 回调函数在后台线程中执行，避免阻塞主线程
+- 消息字符串为 UTF-8 编码，需要适当处理
+- 建议在回调中执行轻量级操作，复杂处理应异步进行
+- 回调频率：心跳消息每30秒一次，任务消息按需触发
 
 ---
 
@@ -379,6 +519,10 @@ Android 应用需要以下权限：
 - **支持的 Android 版本**: API 21+ (Android 5.0+)
 - **支持的架构**: ARM64 (aarch64)
 - **llama.cpp 版本**: 最新稳定版
+- **新增功能**: 
+  - 实时设备信息收集（内存、CPU、温度等）
+  - 回调通知机制支持
+  - 动态系统使用率监控
 
 ---
 

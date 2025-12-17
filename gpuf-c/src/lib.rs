@@ -3836,11 +3836,35 @@ pub extern "C" fn start_remote_worker_tasks() -> c_int {
     }) {
         Ok(_) => {
             println!("✅ C API: Background tasks started successfully");
-            0
+            0 as c_int
         },
         Err(e) => {
             eprintln!("❌ C API: Failed to start background tasks: {}", e);
-            -1
+            -1 as c_int
+        }
+    }
+}
+
+/// Start remote worker background tasks with callback support (C API)
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
+    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+) -> c_int {
+    use crate::handle::android_sdk::start_worker_tasks_with_callback_ptr;
+    
+    println!("🔥 GPUFabric C API: Starting remote worker background tasks with callback");
+    
+    match TOKIO_RUNTIME.block_on(async {
+        crate::handle::android_sdk::start_worker_tasks_with_callback_ptr(callback).await
+    }) {
+        Ok(_) => {
+            println!("✅ C API: Background tasks with callback started successfully");
+            0 as c_int
+        },
+        Err(e) => {
+            eprintln!("❌ C API: Failed to start background tasks with callback: {}", e);
+            -1 as c_int
         }
     }
 }
@@ -3926,5 +3950,5 @@ pub extern "C" fn get_remote_worker_status(
     }
     
     println!("✅ C API: Status written to buffer");
-    0
+    0 as c_int
 }

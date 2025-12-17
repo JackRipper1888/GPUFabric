@@ -22,9 +22,15 @@
 #define MODEL_PATH_1 "/data/local/tmp/models/llama-3.2-1b-instruct-q8_0.gguf"
 #define MODEL_PATH_2 "/data/local/tmp/models/llama-3.2-1b-instruct-q8_0.gguf"
 
+// Callback function for worker status updates
+void worker_status_callback(const char* message, void* user_data) {
+    printf("📢 [CALLBACK] %s\n", message);
+    fflush(stdout);
+}
+
 int main() {
-    printf("🔥 GPUFabric Android C API Test (with Hot Swapping)\n");
-    printf("==================================================\n");
+    printf("🔥 GPUFabric Android C API Test (with Callback Support)\n");
+    printf("========================================================\n");
     
     // Test 1: Set remote worker model (new function)
     printf("\n🤖 Test 1: Loading initial model...\n");
@@ -64,20 +70,21 @@ int main() {
     printf("⏳ Waiting for worker initialization...\n");
     sleep(3);
     
-    // Test 3: Start background tasks
-    printf("\n🚀 Test 3: Starting background tasks...\n");
-    result = start_remote_worker_tasks();
+    // Test 3: Start background tasks with callback support (NEW!)
+    printf("\n🚀 Test 3: Starting background tasks with callback...\n");
+    printf("   Using callback function to monitor worker status\n");
+    result = start_remote_worker_tasks_with_callback_ptr((long)worker_status_callback);
     
     if (result == 0) {
-        printf("✅ Background tasks started successfully\n");
+        printf("✅ Background tasks with callback started successfully\n");
     } else {
         printf("❌ Failed to start background tasks (error: %d)\n", result);
         return -1;
     }
     
-    // Wait a bit for tasks to start
-    printf("⏳ Waiting for task initialization...\n");
-    sleep(2);
+    // Wait a bit for tasks to start and observe callbacks
+    printf("⏳ Waiting for task initialization (watch for callbacks)...\n");
+    sleep(5);
     
     // Test 4: Get worker status
     printf("\n📊 Test 4: Getting worker status...\n");
@@ -103,20 +110,29 @@ int main() {
         return -1;
     }
     
-    // Test 6: Monitor status after hot swapping
-    printf("\n🔍 Test 6: Monitoring status for 10 seconds...\n");
-    for (int i = 0; i < 10; i++) {
+    // Test 6: Monitor status and callbacks for 30 seconds
+    printf("\n🔍 Test 6: Monitoring status for 30 seconds (watch for callbacks)...\n");
+    printf("   You should see:\n");
+    printf("   - HEARTBEAT callbacks every 30 seconds\n");
+    printf("   - COMMAND_RECEIVED callbacks when server sends commands\n");
+    printf("   - INFERENCE_START/SUCCESS/FAILED when processing tasks\n");
+    printf("   - LOGIN_SUCCESS/FAILED for login results\n");
+    printf("\n");
+    
+    for (int i = 0; i < 30; i++) {
         sleep(1);
-        result = get_remote_worker_status(status_buffer, sizeof(status_buffer));
-        if (result == 0) {
-            printf("[%d/10] Status: %s\n", i + 1, status_buffer);
-        } else {
-            printf("[%d/10] ❌ Failed to get status\n", i + 1);
+        
+        // Check status every 5 seconds
+        if (i % 5 == 0) {
+            result = get_remote_worker_status(status_buffer, sizeof(status_buffer));
+            if (result == 0) {
+                printf("   [%02ds] Status: %s\n", i, status_buffer);
+            }
         }
     }
     
     // Test 7: Continuous monitoring for inference requests
-    printf("\n� Test 7: Continuous monitoring for remote inference requests...\n");
+    printf("\n🔍 Test 7: Continuous monitoring for remote inference requests...\n");
     printf("📡 Android device is now ready to receive inference tasks!\n");
     printf("🌐 Send requests to: http://8.140.251.142:8081/v1/completions\n");
     printf("⏱️  Monitoring for 1 hour (3600 seconds)...\n");

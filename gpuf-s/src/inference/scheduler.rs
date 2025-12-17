@@ -122,7 +122,7 @@ impl InferenceScheduler {
         error: Option<String>,
         _execution_time_ms: u64,
         prompt_tokens: u32,
-        completion_tokens: u32,
+        _completion_tokens: u32,
     ) {
         info!("Handling inference result for task {} (success: {})", task_id, success);
         

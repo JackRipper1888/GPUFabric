@@ -43,10 +43,10 @@ impl TCPWorker {
         &self,
         prompt: &str,
         max_tokens: u32,
-        temperature: f32,
-        top_k: u32,
-        top_p: f32,
-        repeat_penalty: f32,
+        _temperature: f32,
+        _top_k: u32,
+        _top_p: f32,
+        _repeat_penalty: f32,
     ) -> Result<String> {
         use crate::{GLOBAL_MODEL_PTR, GLOBAL_CONTEXT_PTR, gpuf_generate_final_solution_text, GLOBAL_INFERENCE_MUTEX};
         use std::ffi::CString;
@@ -71,6 +71,10 @@ impl TCPWorker {
         let mut output = vec![0u8; 4096];
         
         // Execute inference using existing JNI function
+        // SAFETY: We're calling an FFI function with valid pointers:
+        // - model_ptr and context_ptr are checked for null above
+        // - prompt_cstr.as_ptr() is a valid C string pointer
+        // - output buffer is properly sized and mutable
         let result = unsafe {
             gpuf_generate_final_solution_text(
                 model_ptr,

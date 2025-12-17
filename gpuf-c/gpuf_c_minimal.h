@@ -46,6 +46,24 @@ int start_remote_worker(const char* server_addr, jint control_port, jint proxy_p
 int start_remote_worker_tasks(void);
 
 /**
+ * Start remote worker background tasks with callback support
+ * @param callback_ptr Function pointer for status callbacks (cast to jlong)
+ * @return 0 on success, negative error code on failure
+ * 
+ * Callback signature: void callback(const char* message, void* user_data)
+ * The callback will be invoked with status updates like:
+ * - "STARTING - Initializing background tasks..."
+ * - "HEARTBEAT - Sending heartbeat to server"
+ * - "HANDLER_START - Handler thread started"
+ * - "LOGIN_SUCCESS - Login successful"
+ * - "COMMAND_RECEIVED - V1(InferenceTask {...})"
+ * - "INFERENCE_START - Task: xxx-xxx-xxx"
+ * - "INFERENCE_SUCCESS - Task: xxx-xxx-xxx in XXXms"
+ * - "INFERENCE_FAILED - Task: xxx-xxx-xxx - error message"
+ */
+int start_remote_worker_tasks_with_callback_ptr(jlong callback_ptr);
+
+/**
  * Stop remote worker
  * @return 0 on success, negative error code on failure
  */
