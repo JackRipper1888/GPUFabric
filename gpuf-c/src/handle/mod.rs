@@ -1,13 +1,17 @@
 pub mod handle_tcp;
 pub mod handle_ws;
+pub mod android_sdk;
 use crate::util::cmd::{Args, WorkerType,EngineType};
 use crate::util::network_info::SessionNetworkMonitor;
 // LLM engine is not available in lightweight Android version
 #[cfg(not(target_os = "android"))]
 use crate::llm_engine::Engine;
 use common::{OsType,DevicesInfo, SystemInfo, EngineType as ClientEngineType};
+use tracing::{info,error};
 
 use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
+
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use futures_util::stream::{SplitStream, SplitSink};
 use std::sync::Arc;
@@ -16,7 +20,6 @@ use std::future::Future;
 use std::marker::PhantomData;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 // LLM engine is not available in lightweight Android version
 #[cfg(not(target_os = "android"))]
 use crate::llm_engine::AnyEngine;
@@ -92,27 +95,39 @@ impl WorkerHandle for AutoWorker {
 }
 
 pub async fn new_worker(args: Args) -> AutoWorker {
+    info!("🔧 new_worker: Starting worker creation...");
     // TODO: IPC shared memory should be selected
     loop {
+        info!("🔄 new_worker: Loop iteration for worker type: {:?}", args.worker_type);
         match args.worker_type {
             WorkerType::TCP => {
+                info!("📡 new_worker: Creating TCP worker...");
                 match TCPWorker::new(args.clone()).await {
-                    Ok(worker) => return AutoWorker::TCP(worker),
+                    Ok(worker) => {
+                        info!("✅ new_worker: TCP worker created successfully");
+                        return AutoWorker::TCP(worker);
+                    },
                     Err(e) => {
-                        tracing::error!("Failed to create TCP worker: {}. Retrying in 5 seconds...", e);
+                        error!("Failed to create TCP worker: {}. Retrying in 5 seconds...", e);
                     }
                 }
             }
             WorkerType::WS => {
+                info!("🌐 new_worker: Creating WS worker...");
                 match WSWorker::new(args.clone()).await {
-                    Ok(worker) => return AutoWorker::WS(worker),
+                    Ok(worker) => {
+                        info!("✅ new_worker: WS worker created successfully");
+                        return AutoWorker::WS(worker);
+                    },
                     Err(e) => {
-                        tracing::error!("Failed to create WS worker: {}. Retrying in 5 seconds...", e);
+                        error!("Failed to create WS worker: {}. Retrying in 5 seconds...", e);
                     }
                 }
             }
         }
         
+        info!("⏳ new_worker: Waiting 5 seconds before retry...");
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
+

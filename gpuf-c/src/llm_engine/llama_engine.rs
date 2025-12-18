@@ -33,6 +33,8 @@ pub struct LlamaEngine {
     pub cached_backend: Option<Arc<LlamaBackend>>,
     #[cfg(not(target_os = "android"))]
     pub cached_model: Option<Arc<Mutex<LlamaModel>>>,
+    #[cfg(not(target_os = "android"))]
+    pub cached_model_path: Option<String>, // Track which model is currently cached
 }
 
 // llama-cpp-2 state wrapper (no longer stored, used for single inference)
@@ -66,21 +68,29 @@ impl LlamaEngine {
         
         #[cfg(not(target_os = "android"))]
         {
-            if self.cached_model.is_some() {
-                // Verify cached model matches current configuration
-                let current_model_path = self.model_path.as_ref()
-                    .ok_or_else(|| anyhow!("Model path not set"))?;
-                
-                info!("Model already loaded and cached: {}", current_model_path);
-                return Ok(());
-            }
-            
             let model_path = self.model_path.as_ref()
                 .ok_or_else(|| anyhow!("Model path not set"))?
                 .clone();
-            let n_gpu_layers = self.n_gpu_layers;
+
+            let resolved_model_path = self.validate_model_path(&model_path)?;
+            let resolved_model_path_str = resolved_model_path.to_string_lossy().to_string();
             
-            info!("Loading and caching llama-cpp-2 model: {}", model_path);
+            // Check if model is already cached AND matches current path
+            if let Some(ref cached_path) = self.cached_model_path {
+                if cached_path == &resolved_model_path_str && self.cached_model.is_some() {
+                    info!("Model already loaded and cached: {}", resolved_model_path_str);
+                    return Ok(());
+                } else if cached_path != &resolved_model_path_str {
+                    // Model path changed, clear old cache
+                    warn!("Model path changed from {} to {}, clearing cache", cached_path, resolved_model_path_str);
+                    self.clear_cache();
+                }
+            }
+            let n_gpu_layers = self.n_gpu_layers;
+            let model_path_for_closure = resolved_model_path_str.clone();
+            let model_path_for_cache = model_path_for_closure.clone();
+            
+            info!("Loading and caching llama-cpp-2 model: {}", model_path_for_closure);
             
             // Run model loading in blocking thread
             let (backend, model) = tokio::task::spawn_blocking(move || {
@@ -90,18 +100,19 @@ impl LlamaEngine {
                 let model_params = LlamaModelParams::default()
                     .with_n_gpu_layers(n_gpu_layers);
                 
-                let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
+                let model = LlamaModel::load_from_file(&backend, &model_path_for_closure, &model_params)
                     .map_err(|e| anyhow!("Failed to load model: {:?}", e))?;
                 
                 Ok::<(LlamaBackend, LlamaModel), anyhow::Error>((backend, model))
             }).await??;
             
-            // Cache the components
+            // Cache the components and store the model path
             self.cached_backend = Some(Arc::new(backend));
             self.cached_model = Some(Arc::new(Mutex::new(model)));
+            self.cached_model_path = Some(model_path_for_cache.clone());
             self.is_initialized = true;
             
-            info!("Model successfully loaded and cached");
+            info!("Model successfully loaded and cached: {}", model_path_for_cache);
             Ok(())
         }
     }
@@ -113,6 +124,7 @@ impl LlamaEngine {
             info!("Clearing model cache to free memory");
             self.cached_model = None;
             self.cached_backend = None;
+            self.cached_model_path = None;
             self.is_initialized = false;
             info!("Model cache cleared");
         }
@@ -259,6 +271,8 @@ impl LlamaEngine {
             cached_backend: None,
             #[cfg(not(target_os = "android"))]
             cached_model: None,
+            #[cfg(not(target_os = "android"))]
+            cached_model_path: None,
         }
     }
 
@@ -283,26 +297,83 @@ impl LlamaEngine {
             cached_backend: None,
             #[cfg(not(target_os = "android"))]
             cached_model: None,
+            #[cfg(not(target_os = "android"))]
+            cached_model_path: None,
         }
     }
 
     async fn ensure_initialized(&mut self) -> Result<()> {
-        if !self.is_initialized {
-            // Use the new separated model loading
-            self.initialize_model().await?;
+        #[cfg(target_os = "android")]
+        {
+            // On Android, check if SDK has loaded the model
+            if self.check_sdk_model_loaded() {
+                self.is_initialized = true;
+                return Ok(());
+            } else {
+                return Err(anyhow!("Android: Model not loaded by SDK yet"));
+            }
+        }
+        
+        #[cfg(not(target_os = "android"))]
+        {
+            if !self.is_initialized {
+                // Use the new separated model loading
+                self.initialize_model().await?;
+            }
         }
         Ok(())
     }
 
-    fn validate_model_path(&self, path: &str) -> Result<PathBuf> {
+    /// Check if SDK has loaded the model (Android only)
+    #[cfg(target_os = "android")]
+    fn check_sdk_model_loaded(&self) -> bool {
+        use crate::GLOBAL_MODEL_PTR;
+        use crate::GLOBAL_CONTEXT_PTR;
+        
+        let model_ptr = GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
+        let context_ptr = GLOBAL_CONTEXT_PTR.load(std::sync::atomic::Ordering::SeqCst);
+        
+        !model_ptr.is_null() && !context_ptr.is_null()
+    }
+
+    /// Resolve model path: if relative, try models_dir first; if absolute, use directly
+    fn resolve_model_path(&self, path: &str) -> Result<PathBuf> {
         let path_buf = PathBuf::from(path);
-        if !path_buf.exists() {
-            return Err(anyhow!("Model file does not exist: {}", path));
+        
+        // If absolute path, use it directly
+        if path_buf.is_absolute() {
+            if !path_buf.exists() {
+                return Err(anyhow!("Model file does not exist: {}", path));
+            }
+            if !path_buf.is_file() {
+                return Err(anyhow!("Model path is not a file: {}", path));
+            }
+            return Ok(path_buf);
         }
-        if !path_buf.is_file() {
-            return Err(anyhow!("Model path is not a file: {}", path));
+        
+        // If relative path, try models_dir first
+        let models_dir_path = self.models_dir.join(path);
+        if models_dir_path.exists() && models_dir_path.is_file() {
+            info!("Resolved relative path '{}' to '{}'", path, models_dir_path.display());
+            return Ok(models_dir_path);
         }
-        Ok(path_buf)
+        
+        // Fallback: try current directory
+        if path_buf.exists() && path_buf.is_file() {
+            warn!("Using model from current directory: {}", path);
+            return Ok(path_buf);
+        }
+        
+        Err(anyhow!(
+            "Model file not found: '{}' (checked: {} and current dir)",
+            path,
+            models_dir_path.display()
+        ))
+    }
+    
+    fn validate_model_path(&self, path: &str) -> Result<PathBuf> {
+        // Use resolve_model_path for consistent path handling
+        self.resolve_model_path(path)
     }
 
     async fn generate_response(&self, prompt: &str, max_tokens: usize) -> Result<String> {
@@ -312,9 +383,62 @@ impl LlamaEngine {
 
         debug!("Generating response with prompt: {}, max_tokens: {}", prompt, max_tokens);
         
-        // Use the new cached inference method and extract just the text
-        let (text, _, _) = self.generate_with_cached_model(prompt, max_tokens).await?;
-        Ok(text)
+        #[cfg(target_os = "android")]
+        {
+            // Use SDK functions for inference on Android
+            if !self.check_sdk_model_loaded() {
+                return Err(anyhow!("Android: Model not loaded by SDK"));
+            }
+            
+            use crate::GLOBAL_MODEL_PTR;
+            use crate::GLOBAL_CONTEXT_PTR;
+            use std::ffi::CString;
+            use std::os::raw::c_char;
+            
+            let model_ptr = GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
+            let context_ptr = GLOBAL_CONTEXT_PTR.load(std::sync::atomic::Ordering::SeqCst);
+            
+            // Convert prompt to C string
+            let prompt_cstr = CString::new(prompt)
+                .map_err(|e| anyhow!("Invalid prompt for C FFI: {}", e))?;
+            
+            // Create output buffer (larger buffer for longer responses)
+            let mut output = vec![0u8; 8192];
+            
+            debug!("Calling SDK inference function");
+            let result = unsafe {
+                crate::gpuf_generate_final_solution_text(
+                    model_ptr,
+                    context_ptr,
+                    prompt_cstr.as_ptr(),
+                    max_tokens as i32,
+                    output.as_mut_ptr() as *mut c_char,
+                    output.len() as i32,  // Add missing output_len parameter
+                )
+            };
+            
+            // Check return code (0 = success)
+            if result != 0 {
+                return Err(anyhow!("Android: Inference failed with error code: {}", result));
+            }
+            
+            // Convert output buffer to Rust string
+            let result_str = unsafe {
+                std::ffi::CStr::from_ptr(output.as_ptr() as *const c_char)
+                    .to_str()
+                    .map_err(|e| anyhow!("Invalid UTF-8 in inference result: {}", e))?
+            };
+            
+            info!("Android inference completed successfully");
+            Ok(result_str.to_string())
+        }
+        
+        #[cfg(not(target_os = "android"))]
+        {
+            // Use the new cached inference method and extract just the text
+            let (text, _, _) = self.generate_with_cached_model(prompt, max_tokens).await?;
+            Ok(text)
+        }
     }
 }
 
@@ -323,12 +447,43 @@ impl Engine for LlamaEngine {
         async move {
             info!("Initializing Llama.cpp engine");
             
-            if self.model_path.is_none() {
-                warn!("No model path specified, engine will be initialized when model is set");
-                return Ok(());
+            #[cfg(target_os = "android")]
+            {
+                // On Android, check if SDK has already loaded the model
+                // by verifying global pointers are set
+                use crate::GLOBAL_MODEL_PTR;
+                use crate::GLOBAL_CONTEXT_PTR;
+                
+                if self.model_path.is_some() {
+                    let model_ptr = GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
+                    let context_ptr = GLOBAL_CONTEXT_PTR.load(std::sync::atomic::Ordering::SeqCst);
+                    
+                    if !model_ptr.is_null() && !context_ptr.is_null() {
+                        info!("Android: Model and context already loaded by SDK");
+                        self.is_initialized = true;
+                        return Ok(());
+                    } else {
+                        info!("Android: Model not yet loaded by SDK, waiting for SDK initialization");
+                        // Don't mark as initialized, SDK will handle it
+                        return Ok(());
+                    }
+                } else {
+                    warn!("Android: No model path specified, waiting for SDK to load model");
+                    return Ok(());
+                }
             }
+            
+            #[cfg(not(target_os = "android"))]
+            {
+                // Non-Android: Normal initialization flow
+                if self.model_path.is_none() {
+                    warn!("No model path specified, engine will be initialized when model is set");
+                    return Ok(());
+                }
 
-            self.ensure_initialized().await?;
+                self.ensure_initialized().await?;
+            }
+            
             Ok(())
         }
     }
@@ -344,42 +499,64 @@ impl Engine for LlamaEngine {
             // For Llama.cpp, we only support one model at a time
             let model_path = models[0].clone();
             
-            // Validate model path
-            self.validate_model_path(&model_path)?;
+            #[cfg(target_os = "android")]
+            {
+                // On Android, model loading is handled by SDK API calls
+                // Just store the path for reference and mark as initialized
+                info!("Android target: storing model path for SDK-based loading: {}", model_path);
+                self.model_path = Some(model_path.clone());
+                self.models_name = vec![model_path.clone()];
+                
+                // Update models list
+                let mut models_vec = self.models.write().await;
+                models_vec.clear();
+                models_vec.push(super::ModelInfo {
+                    id: "llama_cpp_model".to_string(),
+                    name: model_path,
+                    status: "loaded_by_sdk".to_string(),
+                });
+                
+                // Note: Don't call ensure_initialized() here - SDK will handle model loading
+                info!("Model path stored for Android SDK loading");
+                return Ok(());
+            }
             
-            // If engine is already initialized with a different model, unload it first
-            if self.is_initialized {
-                if Some(model_path.clone()) != self.model_path {
-                    info!("Unloading previous model before loading new one");
-                    
-                    // Clear cached model and backend to free memory
-                    #[cfg(not(target_os = "android"))]
-                    {
+            #[cfg(not(target_os = "android"))]
+            {
+                // Non-Android: Validate model path and load normally
+                self.validate_model_path(&model_path)?;
+                
+                // If engine is already initialized with a different model, unload it first
+                if self.is_initialized {
+                    if Some(model_path.clone()) != self.model_path {
+                        info!("Unloading previous model before loading new one");
+                        
+                        // Clear cached model and backend to free memory
                         self.cached_model = None;
                         self.cached_backend = None;
                         info!("Previous model cache cleared");
+                        
+                        self.is_initialized = false;
+                        info!("Previous model unloaded completely");
                     }
-                    
-                    self.is_initialized = false;
-                    info!("Previous model unloaded completely");
                 }
-            }
 
-            // Update model configuration
-            self.model_path = Some(model_path.clone());
-            self.models_name = vec![model_path.clone()];
-            
-            // Initialize with new model
-            self.ensure_initialized().await?;
-            
-            // Update models list
-            let mut models_vec = self.models.write().await;
-            models_vec.clear();
-            models_vec.push(super::ModelInfo {
-                id: "llama_cpp_model".to_string(),
-                name: model_path,
-                status: "loaded".to_string(),
-            });
+                // Update model configuration
+                self.model_path = Some(model_path.clone());
+                self.models_name = vec![model_path.clone()];
+                
+                // Initialize with new model
+                self.ensure_initialized().await?;
+                
+                // Update models list
+                let mut models_vec = self.models.write().await;
+                models_vec.clear();
+                models_vec.push(super::ModelInfo {
+                    id: "llama_cpp_model".to_string(),
+                    name: model_path,
+                    status: "loaded".to_string(),
+                });
+            }
 
             info!("Models set successfully for Llama.cpp engine");
             Ok(())
@@ -390,8 +567,22 @@ impl Engine for LlamaEngine {
         async move {
             info!("Starting Llama.cpp worker");
             
-            // For Llama.cpp, the "worker" is essentially just ensuring the engine is initialized
-            self.ensure_initialized().await?;
+            #[cfg(target_os = "android")]
+            {
+                // On Android, verify SDK has loaded the model
+                if self.check_sdk_model_loaded() {
+                    info!("Android: SDK model loaded successfully, worker ready");
+                    self.is_initialized = true;
+                } else {
+                    return Err(anyhow!("Android: Cannot start worker - model not loaded by SDK"));
+                }
+            }
+            
+            #[cfg(not(target_os = "android"))]
+            {
+                // For Llama.cpp, the "worker" is essentially just ensuring the engine is initialized
+                self.ensure_initialized().await?;
+            }
             
             info!("Llama.cpp worker started successfully");
             Ok(())

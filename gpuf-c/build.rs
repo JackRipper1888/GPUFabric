@@ -2,18 +2,6 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    
-    // Configure cbindgen directly, without relying on external config files
-    cbindgen::Builder::new()
-        .with_crate(crate_dir)
-        .with_language(cbindgen::Language::C)
-        .with_pragma_once(true)
-        .with_include_guard("GPUF_C_H")
-        .with_documentation(true)
-        .generate()
-        .expect("Unable to generate bindings")
-        .write_to_file("gpuf_c.h");
     
     // Get the target OS from Cargo environment variable
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
@@ -54,6 +42,21 @@ fn main() {
                 }
             }
         }
+        
+
+        let project_root = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let icon_path = format!("{}\\{}", project_root, "gpuf_icon.ico");
+        let icon_rc_content = format!(
+            r#"#include <windows.h>
+1 ICON "{}"
+"#,
+            icon_path.replace("\\", "\\\\") // 转义反斜杠
+        );
+    
+        std::fs::write("icon.rc", icon_rc_content)
+            .expect("Failed to write icon.rc file");
+
+        embed_resource::compile("icon.rc", &[] as &[&str]);
     }
     
     // Link OpenMP on Linux target explicitly (LLVM OpenMP)
@@ -86,6 +89,19 @@ fn main() {
     
     // For Android, link the static llama.cpp library
     if target_os == "android" {
+        let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        
+        // Configure cbindgen directly, without relying on external config files
+        cbindgen::Builder::new()
+            .with_crate(crate_dir)
+            .with_language(cbindgen::Language::C)
+            .with_pragma_once(true)
+            .with_include_guard("GPUF_C_H")
+            .with_documentation(true)
+            .generate()
+            .expect("Unable to generate bindings")
+            .write_to_file("gpuf_c.h");
+
         println!("cargo:warning=Linking static llama.cpp library for Android...");
         
         // Get the absolute path to the llama library - now in target directory

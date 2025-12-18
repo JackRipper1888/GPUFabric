@@ -20,6 +20,8 @@ use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 #[cfg(target_os = "android")]
 use std::os::raw::c_ulonglong;
+#[cfg(target_os = "android")]
+use libc::size_t;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "android")]
@@ -27,10 +29,28 @@ use std::io::{self, Write};
 #[cfg(target_os = "android")]
 use libc;
 
+// Global Tokio Runtime for async operations
+#[cfg(target_os = "android")]
+static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    println!("🔧 Initializing Android-compatible single-threaded tokio runtime...");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    println!("✅ Tokio runtime initialized successfully");
+    runtime
+});
+
 // Export modules
 pub mod handle;
 pub mod llm_engine;
 pub mod util;
+
+// JNI wrapper modules
+#[cfg(target_os = "android")]
+pub mod jni_remote_worker;
+#[cfg(target_os = "android")]
+pub mod jni_llama;
 
 // Simulate llama.cpp structs (avoid C++ symbol dependencies)
 #[repr(C)]
@@ -273,9 +293,12 @@ fn cleanup_generation_control() {
 pub static MODEL_STATUS: Lazy<Arc<Mutex<ModelStatusInfo>>> =
     Lazy::new(|| Arc::new(Mutex::new(ModelStatusInfo::new())));
 
-// Global model and context pointers (using atomic types for thread safety)
-pub static GLOBAL_MODEL_PTR: AtomicPtr<llama_model> = AtomicPtr::new(std::ptr::null_mut());
-pub static GLOBAL_CONTEXT_PTR: AtomicPtr<llama_context> = AtomicPtr::new(std::ptr::null_mut());
+// Global inference mutex for thread safety
+pub static GLOBAL_INFERENCE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+// Global model and context pointers
+static GLOBAL_MODEL_PTR: AtomicPtr<llama_model> = AtomicPtr::new(std::ptr::null_mut());
+static GLOBAL_CONTEXT_PTR: AtomicPtr<llama_context> = AtomicPtr::new(std::ptr::null_mut());
 
 #[derive(Debug, Clone)]
 pub struct ModelStatusInfo {
@@ -809,7 +832,20 @@ pub fn manual_llama_completion(
 
         println!(" Using {} tokens for inference", token_count);
 
-        // Step 2: Global position tracking for continuous context
+        // Step 2: Clear KV cache for clean inference
+        let kv = llama_get_memory(ctx);
+        if !kv.is_null() {
+            // Clear all sequences from KV cache
+            let clear_result = llama_memory_seq_rm(kv, -1, -1, -1);
+            if clear_result {
+                println!(" KV cache cleared successfully");
+            } else {
+                println!(" KV cache clear failed, trying full clear...");
+                llama_memory_clear(kv, false);
+            }
+        }
+
+        // Step 3: Global position tracking for continuous context
         // CRITICAL FIX: Reset position for new independent inference
         let current_pos = 0; // Always start from 0 for clean inference
         GLOBAL_CONTEXT_POSITION = 0; // Reset global state
@@ -882,10 +918,11 @@ pub fn manual_llama_completion(
             safe_generation_limit, max_tokens, context_available
         );
 
-        // SIMPLE SAMPLER: Match llama-cpp-rs approach (dist + greedy only)
-        println!(" Creating simple sampler (dist + greedy) - like llama-cpp-rs");
+        // PROPER SAMPLER: Use actual sampling parameters
+        println!(" Creating sampler with params: temp={}, top_k={}, top_p={}, repeat_penalty={}", 
+                 temperature, top_k, top_p, repeat_penalty);
 
-        // Create sampler chain once and reuse it
+        // Create sampler chain
         let chain_params = llama_sampler_chain_params { no_perf_fac: false };
         let persistent_sampler = unsafe { llama_sampler_chain_init(chain_params) };
 
@@ -894,39 +931,75 @@ pub fn manual_llama_completion(
             return 0;
         }
 
-        // STEP 1: Add distribution sampler (like llama-cpp-rs)
-        let dist_sampler = unsafe { llama_sampler_init_dist(1234) }; // Fixed seed like llama-cpp-rs
+        // Add samplers in proper order (like llama.cpp examples)
+        
+        // 1. Repeat penalty sampler
+        if repeat_penalty != 1.0 {
+            let repeat_sampler = unsafe { llama_sampler_init_penalties(-1, repeat_penalty, 0.0, 0.0) };
+            if !repeat_sampler.is_null() {
+                unsafe { llama_sampler_chain_add(persistent_sampler, repeat_sampler) };
+                println!(" Added Repeat penalty sampler (penalty: {})", repeat_penalty);
+            }
+        }
+        
+        // 2. Top-K sampler
+        if top_k > 0 {
+            let top_k_sampler = unsafe { llama_sampler_init_top_k(top_k) };
+            if !top_k_sampler.is_null() {
+                unsafe { llama_sampler_chain_add(persistent_sampler, top_k_sampler) };
+                println!(" Added Top-K sampler (k: {})", top_k);
+            }
+        }
+        
+        // 3. Top-P sampler
+        if top_p < 1.0 {
+            let top_p_sampler = unsafe { llama_sampler_init_top_p(top_p, 1) };
+            if !top_p_sampler.is_null() {
+                unsafe { llama_sampler_chain_add(persistent_sampler, top_p_sampler) };
+                println!(" Added Top-P sampler (p: {})", top_p);
+            }
+        }
+        
+        // 4. Temperature sampler
+        if temperature > 0.0 {
+            let temp_sampler = unsafe { llama_sampler_init_temp(temperature) };
+            if !temp_sampler.is_null() {
+                unsafe { llama_sampler_chain_add(persistent_sampler, temp_sampler) };
+                println!(" Added Temperature sampler (temp: {})", temperature);
+            }
+        }
+        
+        // 5. Distribution sampler (for actual sampling)
+        let dist_sampler = unsafe { llama_sampler_init_dist(1234) };
         if !dist_sampler.is_null() {
             unsafe { llama_sampler_chain_add(persistent_sampler, dist_sampler) };
-            println!(" Added Distribution sampler (seed: 1234) - like llama-cpp-rs");
+            println!(" Added Distribution sampler");
         }
 
-        // STEP 2: Add greedy sampler (like llama-cpp-rs)
-        let greedy_sampler = unsafe { llama_sampler_init_greedy() };
-        if !greedy_sampler.is_null() {
-            unsafe { llama_sampler_chain_add(persistent_sampler, greedy_sampler) };
-            println!(" Added Greedy sampler - like llama-cpp-rs");
-        }
-
-        println!(" Using simple sampler (dist + greedy) matching llama-cpp-rs");
+        println!(" Sampler chain configured with all parameters");
 
         // Track current batch size (starts with initial token_count)
         let mut current_batch_size = token_count;
 
         for i in 0..safe_generation_limit {
-            // Step 1: Sample from current batch's last token using persistent sampler
-            let sampling_index = current_batch_size - 1;
+            // Step 1: Sample from the last decoded position
+            // After decode, logits are available at index (n_tokens - 1) for single token batches
+            // For initial batch, logits are at the last token position
+            let sampling_index = if i == 0 {
+                token_count - 1  // First iteration: sample from initial batch's last token
+            } else {
+                0  // Subsequent iterations: single token batch, logits at index 0
+            };
+            
             println!(
-                " Sampling iteration {}: from batch index {} (batch_size: {})",
+                " Sampling iteration {}: from logits index {} (batch_size: {})",
                 i, sampling_index, current_batch_size
             );
 
-            // Use persistent sampler (like llama-cpp-rs)
+            // Use persistent sampler
             let sampled_token =
                 unsafe { llama_sampler_sample(persistent_sampler, ctx, sampling_index) };
-
-            // Note: llama_sampler_accept might not be needed at FFI level
-            // State management might be automatic in the C implementation
+            
             println!(" Sampled token: {} at position {}", sampled_token, next_pos);
 
             // Check for EOS
@@ -1005,17 +1078,19 @@ pub fn manual_llama_completion(
             GLOBAL_CONTEXT_POSITION
         );
 
-        // Step 6: Return result with context information
+        // Step 6: Return only the generated text (no debug info)
         let final_text = if generated_tokens > 0 {
-            format!(
-                " CONTINUOUS CONTEXT: Generated {} tokens from pos {} (next: {}): {}",
-                generated_tokens, current_pos, GLOBAL_CONTEXT_POSITION, result_text
-            )
+            println!(
+                " CONTINUOUS CONTEXT: Generated {} tokens from pos {} (next: {})",
+                generated_tokens, current_pos, GLOBAL_CONTEXT_POSITION
+            );
+            result_text
         } else {
-            format!(
-                " Continuous context ready from pos {} (next: {})",
+            println!(
+                " No tokens generated - continuous context ready from pos {} (next: {})",
                 current_pos, GLOBAL_CONTEXT_POSITION
-            )
+            );
+            String::new()  // Return empty string if no tokens generated
         };
 
         let text_bytes = final_text.as_bytes();
@@ -3104,715 +3179,8 @@ pub fn cleanup_memory_pool() {
     }
 }
 
-// ============================================================================
-// JNI API Functions for Android
-// ============================================================================
 
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_initialize(_env: JNIEnv, _class: JClass) -> jint {
-    println!("🔥 GPUFabric JNI: Initializing engine");
-    match gpuf_init() {
-        0 => 1, // Success
-        _ => 0, // Failure
-    }
-}
 
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_loadModel(
-    mut env: JNIEnv,
-    _class: JClass,
-    model_path: JString,
-) -> jlong {
-    println!("🔥 GPUFabric JNI: Loading model");
-
-    let path = match env.get_string(&model_path) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let path_str = match path.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let path_cstr = match CString::new(path_str) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let model_ptr = gpuf_load_model(path_cstr.as_ptr());
-    model_ptr as jlong
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_createContext(
-    _env: JNIEnv,
-    _class: JClass,
-    model_ptr: jlong,
-) -> jlong {
-    println!("🔥 GPUFabric JNI: Creating context");
-
-    if model_ptr == 0 {
-        return 0;
-    }
-
-    let context_ptr = gpuf_create_context(model_ptr as *mut llama_model);
-    context_ptr as jlong
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_generate(
-    mut env: JNIEnv,
-    _class: JClass,
-    model_ptr: jlong,
-    context_ptr: jlong,
-    prompt: JString,
-    max_tokens: jint,
-    _output_buffer: JObject,
-) -> jint {
-    println!("🔥 GPUFabric JNI: Generating text");
-
-    if model_ptr == 0 || context_ptr == 0 {
-        return -1;
-    }
-
-    let prompt_str = match env.get_string(&prompt) {
-        Ok(s) => s,
-        Err(_) => return -2,
-    };
-
-    let prompt_cstr = match CString::new(prompt_str.to_str().unwrap_or("")) {
-        Ok(s) => s,
-        Err(_) => return -3,
-    };
-
-    // Create a buffer for output (simplified version)
-    let mut output = vec![0u8; 4096];
-
-    let result = gpuf_generate_final_solution_text(
-        model_ptr as *mut llama_model,
-        context_ptr as *mut llama_context,
-        prompt_cstr.as_ptr(),
-        max_tokens as i32,
-        output.as_mut_ptr() as *mut c_char,
-        output.len() as i32,
-    );
-
-    if result > 0 {
-        // Convert output to Java string (simplified)
-        let _output_str = unsafe {
-            CStr::from_ptr(output.as_mut_ptr() as *const c_char)
-                .to_str()
-                .unwrap_or("")
-        };
-
-        // Set the output buffer content (this is simplified, proper implementation needed)
-        // In real implementation, you would set the Java string buffer content
-
-        result
-    } else {
-        result
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getVersion(env: JNIEnv, _class: JClass) -> jstring {
-    println!("🔥 GPUFabric JNI: Getting version");
-
-    let version_ptr = gpuf_version();
-    if version_ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let version_str = unsafe { CStr::from_ptr(version_ptr).to_str().unwrap_or("unknown") };
-
-    env.new_string(version_str)
-        .unwrap_or_else(|_| unsafe { JString::from_raw(std::ptr::null_mut()) })
-        .into_raw()
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_cleanup(_env: JNIEnv, _class: JClass) -> jint {
-    println!("🔥 GPUFabric JNI: Cleaning up");
-    match gpuf_cleanup() {
-        0 => 1, // Success
-        _ => 0, // Failure
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getSystemInfo(
-    mut env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Getting system info");
-
-    let info_cstr = gpuf_system_info();
-    if info_cstr.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let info_str = unsafe { CStr::from_ptr(info_cstr).to_str().unwrap_or("Unknown") };
-
-    match env.new_string(info_str) {
-        Ok(jstring) => jstring.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_gpuf_1init(_env: JNIEnv, _class: JClass) -> jint {
-    println!("🔥 GPUFabric JNI: Calling gpuf_init");
-
-    match gpuf_init() {
-        0 => 0,                           // Success
-        error_code => error_code as jint, // Return actual error code
-    }
-}
-
-// ============================================================================
-// Additional JNI API Functions for SDK Compute Sharing
-// ============================================================================
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_startInferenceService(
-    mut env: JNIEnv,
-    _class: JClass,
-    model_path: JString,
-    _port: jint,
-) -> jint {
-    println!("🔥 GPUFabric JNI: Starting inference service");
-
-    let path = match env.get_string(&model_path) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    let path_str = match path.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    // Update model status
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loading(path_str);
-    }
-
-    // Load model using gpuf_load_model
-    let path_cstr = match CString::new(path_str) {
-        Ok(s) => s,
-        Err(_) => {
-            let mut status = MODEL_STATUS.lock().unwrap();
-            status.set_error("Failed to convert path to CString");
-            return -2;
-        }
-    };
-
-    let model_ptr = gpuf_load_model(path_cstr.as_ptr());
-    if model_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to load model");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to load model");
-        return -3;
-    }
-
-    // Create context
-    let context_ptr = gpuf_create_context(model_ptr);
-    if context_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to create context");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to create context");
-        return -4;
-    }
-
-    // Store global pointers
-    {
-        GLOBAL_MODEL_PTR.store(model_ptr, Ordering::SeqCst);
-        GLOBAL_CONTEXT_PTR.store(context_ptr, Ordering::SeqCst);
-    }
-
-    // Update status
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loaded(path_str);
-    }
-
-    println!("🔥 GPUFabric JNI: Inference service started successfully");
-    1 // Success
-}
-
-/// JNI: Async version of startInferenceService with progress callbacks
-/// Focus on async model loading (slow operation), context creation is fast
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_startInferenceServiceAsync(
-    mut env: JNIEnv,
-    _class: JClass,
-    model_path: JString,
-    _port: jint,
-    progress_callback: JObject, // Progress callback object
-) -> jint {
-    println!("🔥 GPUFabric JNI: Starting async inference service...");
-
-    let path = match env.get_string(&model_path) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    let path_str = match path.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    // Update model status to loading
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loading(path_str);
-    }
-
-    // Create global reference for progress callback
-    let progress_global = if progress_callback.is_null() {
-        None
-    } else {
-        match env.new_global_ref(&progress_callback) {
-            Ok(obj) => Some(obj),
-            Err(e) => {
-                println!(
-                    "❌ JNI: Failed to create progress callback global ref: {:?}",
-                    e
-                );
-                return -1;
-            }
-        }
-    };
-
-    let path_cstr = match CString::new(path_str) {
-        Ok(s) => s,
-        Err(_) => {
-            let mut status = MODEL_STATUS.lock().unwrap();
-            status.set_error("Failed to convert path to CString");
-            return -2;
-        }
-    };
-
-    // Define progress callback function for model loading
-    extern "C" fn model_progress_callback(progress: f32, _user_data: *mut c_void) {
-        if progress < 0.0 {
-            println!("❌ Model loading failed!");
-        } else if progress >= 1.0 {
-            println!("✅ Model loading completed!");
-        } else {
-            println!("📊 Model loading progress: {:.1}%", progress * 100.0);
-        }
-
-        // In a real implementation, this would call the Java progress callback
-        // For now, just print progress
-    }
-
-    // Start async model loading (this is the slow part)
-    let model_ptr = gpuf_load_model_async(
-        path_cstr.as_ptr(),
-        Some(model_progress_callback),
-        std::ptr::null_mut(),
-    );
-
-    if model_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to load model");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to load model");
-        return -3;
-    }
-
-    // Context creation is fast, do it synchronously
-    println!("� Creating context (fast operation)...");
-    let context_ptr = gpuf_create_context(model_ptr);
-
-    if context_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to create context");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to create context");
-        return -4;
-    }
-
-    // Store global pointers
-    {
-        GLOBAL_MODEL_PTR.store(model_ptr, Ordering::SeqCst);
-        GLOBAL_CONTEXT_PTR.store(context_ptr, Ordering::SeqCst);
-    }
-
-    // Update status to ready
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loaded(path_str);
-    }
-
-    println!("🔥 GPUFabric JNI: Async inference service started successfully");
-    1 // Success
-}
-
-/// JNI: Check if model is loaded (non-blocking)
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_isModelLoaded(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jboolean {
-    if gpuf_is_model_loaded() {
-        1 // true
-    } else {
-        0 // false
-    }
-}
-
-/// JNI: Check if context is ready (non-blocking)
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_isContextReady(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jboolean {
-    if gpuf_is_context_ready() {
-        1 // true
-    } else {
-        0 // false
-    }
-}
-
-/// JNI: Get model loading status
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getModelStatus(env: JNIEnv, _class: JClass) -> jstring {
-    let status_code = gpuf_get_model_status();
-    let status_str = match status_code {
-        0 => "not_loaded",
-        1 => "loading",
-        2 => "ready",
-        3 => "error",
-        _ => "unknown",
-    };
-
-    match env.new_string(status_str) {
-        Ok(jstring) => jstring.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_stopInferenceService(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jint {
-    println!("🔥 GPUFabric JNI: Stopping inference service");
-
-    // Clear global pointers and status
-    {
-        GLOBAL_MODEL_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
-        GLOBAL_CONTEXT_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
-    }
-
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.clear();
-    }
-
-    println!("🔥 GPUFabric JNI: Inference service stopped");
-    1 // Success
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_loadModelNew(
-    mut env: JNIEnv,
-    _class: JClass,
-    model_path: JString,
-) -> jint {
-    println!("🔥 GPUFabric JNI: Loading model dynamically");
-
-    let path = match env.get_string(&model_path) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    let path_str = match path.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    // Update model status
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loading(path_str);
-    }
-
-    // Load model using gpuf_load_model
-    let path_cstr = match CString::new(path_str) {
-        Ok(s) => s,
-        Err(_) => {
-            let mut status = MODEL_STATUS.lock().unwrap();
-            status.set_error("Failed to convert path to CString");
-            return -2;
-        }
-    };
-
-    let model_ptr = gpuf_load_model(path_cstr.as_ptr());
-    if model_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to load model");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to load model");
-        return -3;
-    }
-
-    // Create context
-    let context_ptr = gpuf_create_context(model_ptr);
-    if context_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Failed to create context");
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_error("Failed to create context");
-        return -4;
-    }
-
-    // Store global pointers
-    {
-        GLOBAL_MODEL_PTR.store(model_ptr, Ordering::SeqCst);
-        GLOBAL_CONTEXT_PTR.store(context_ptr, Ordering::SeqCst);
-    }
-
-    // Update status
-    {
-        let mut status = MODEL_STATUS.lock().unwrap();
-        status.set_loaded(path_str);
-    }
-
-    println!("🔥 GPUFabric JNI: Model loaded successfully");
-    1 // Success
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getCurrentModel(
-    mut env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Getting current model");
-
-    let status = MODEL_STATUS.lock().unwrap();
-    match &status.current_model {
-        Some(model) => match env.new_string(model) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
-        None => std::ptr::null_mut(),
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getModelLoadingStatus(
-    mut env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Getting model loading status");
-
-    let status = MODEL_STATUS.lock().unwrap();
-    let status_str = if let Some(ref error) = status.error_message {
-        format!("{}: {}", status.loading_status, error)
-    } else {
-        status.loading_status.clone()
-    };
-
-    match env.new_string(status_str) {
-        Ok(jstring) => jstring.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_generateText(
-    mut env: JNIEnv,
-    _class: JClass,
-    prompt: JString,
-    max_tokens: jint,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Generating text locally");
-
-    let prompt_str = match env.get_string(&prompt) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let prompt_text = match prompt_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Get global model and context pointers
-    let model_ptr = GLOBAL_MODEL_PTR.load(Ordering::SeqCst);
-    let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
-
-    if model_ptr.is_null() || context_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Model or context not initialized");
-        return match env.new_string("Error: Model not loaded") {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        };
-    }
-
-    let prompt_cstr = match CString::new(prompt_text) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Create a buffer for output
-    let mut output = vec![0u8; 4096];
-
-    let result = gpuf_generate_final_solution_text(
-        model_ptr,
-        context_ptr,
-        prompt_cstr.as_ptr(),
-        max_tokens as i32,
-        output.as_mut_ptr() as *mut c_char,
-        output.len() as i32,
-    );
-
-    if result > 0 {
-        // Convert output to Java string
-        let output_str = unsafe {
-            CStr::from_ptr(output.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap_or("")
-        };
-
-        match env.new_string(output_str) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        }
-    } else {
-        match env.new_string(format!("Error: Generation failed with code {}", result)) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_generateTextWithSampling(
-    mut env: JNIEnv,
-    _class: JClass,
-    prompt: JString,
-    max_tokens: jint,
-    temperature: jfloat,
-    top_k: jint,
-    top_p: jfloat,
-    repeat_penalty: jfloat,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Generating text with sampling parameters");
-
-    let prompt_str = match env.get_string(&prompt) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let prompt_text = match prompt_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Get global model and context pointers
-    let model_ptr = GLOBAL_MODEL_PTR.load(Ordering::SeqCst);
-    let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
-
-    if model_ptr.is_null() || context_ptr.is_null() {
-        eprintln!("🔥 GPUFabric JNI: Model or context not initialized");
-        return match env.new_string("Error: Model not loaded") {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        };
-    }
-
-    let prompt_cstr = match CString::new(prompt_text) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Create a buffer for output
-    let mut output = vec![0u8; 4096];
-    let mut token_buffer = vec![0i32; 32]; // Test with conservative sampling for more predictable output
-
-    let result = manual_llama_completion(
-        model_ptr,
-        context_ptr,
-        prompt_cstr.as_ptr(),
-        max_tokens,     // Use user-provided max_tokens
-        temperature,    // Use user-provided temperature
-        top_k,          // Use user-provided top_k
-        top_p,          // Use user-provided top_p
-        repeat_penalty, // Use user-provided repeat_penalty
-        output.as_mut_ptr(),
-        output.len() as c_int,
-    );
-
-    if result > 0 {
-        // Convert output to Java string
-        let output_str = unsafe {
-            CStr::from_ptr(output.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap_or("")
-        };
-
-        match env.new_string(output_str) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        }
-    } else {
-        match env.new_string(format!("Error: Generation failed with code {}", result)) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_isInferenceServiceHealthy(
-    mut env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Checking inference service health");
-
-    let status = MODEL_STATUS.lock().unwrap();
-
-    let health_info = if status.is_loaded {
-        format!(
-            "Healthy - Model: {}, Status: {}",
-            status.current_model.as_deref().unwrap_or("None"),
-            status.loading_status
-        )
-    } else {
-        format!(
-            "Unhealthy - Status: {}, Error: {}",
-            status.loading_status,
-            status.error_message.as_deref().unwrap_or("None")
-        )
-    };
-
-    match env.new_string(health_info) {
-        Ok(jstring) => jstring.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
 
 // ============================================================================
 // Async Generation Control Functions
@@ -4049,148 +3417,7 @@ pub extern "C" fn gpuf_start_generation_async(
 
     0
 }
-// JNI Async Generation Functions
-// ============================================================================
 
-/// JNI: Start async generation with streaming callback (direct function pointer approach)
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_startGenerationAsync(
-    mut env: JNIEnv,
-    _class: JClass,
-    ctx_ptr: jlong,
-    prompt: JString,
-    max_tokens: jint,
-    temperature: jfloat,
-    top_k: jint,
-    top_p: jfloat,
-    repeat_penalty: jfloat,
-    callback_function_ptr: jlong, // Direct function pointer from Java
-) -> jint {
-    println!("🚀 JNI: Starting async generation with direct function pointer...");
-
-    // Get context pointer
-    let ctx = ctx_ptr as *mut llama_context;
-    if ctx.is_null() {
-        println!("❌ JNI: Invalid context pointer");
-        return -1;
-    }
-
-    // Get prompt string
-    let prompt_str = match env.get_string(&prompt) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("❌ JNI: Failed to get prompt string: {:?}", e);
-            return -1;
-        }
-    };
-
-    let prompt_cstr = match CString::new(prompt_str.to_string_lossy().to_string()) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("❌ JNI: Failed to create CString: {:?}", e);
-            return -1;
-        }
-    };
-
-    // Convert the function pointer from jlong to actual function pointer
-    let callback = if callback_function_ptr != 0 {
-        Some(unsafe {
-            std::mem::transmute::<jlong, extern "C" fn(*const c_char, *mut c_void)>(
-                callback_function_ptr,
-            )
-        })
-    } else {
-        None
-    };
-
-    // Start streaming generation with the external callback function
-    let result = gpuf_start_generation_async(
-        ctx,
-        prompt_cstr.as_ptr(),
-        max_tokens,
-        temperature,
-        top_k,
-        top_p,
-        repeat_penalty,
-        callback, // Use the external function directly
-        std::ptr::null_mut(),
-    );
-
-    if result == 0 {
-        println!("✅ JNI: Async generation with external callback started successfully");
-    } else {
-        println!("❌ JNI: Failed to start async generation: {}", result);
-    }
-
-    result
-}
-
-/// JNI: Stop ongoing generation
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_stopGeneration(
-    _env: JNIEnv,
-    _class: JClass,
-    ctx_ptr: jlong,
-) -> jint {
-    println!("🛑 JNI: Stopping generation...");
-
-    let ctx = ctx_ptr as *mut llama_context;
-    if ctx.is_null() {
-        println!("❌ JNI: Invalid context pointer for stop");
-        return -1;
-    }
-
-    let result = gpuf_stop_generation(ctx);
-
-    if result == 0 {
-        println!("✅ JNI: Generation stop signal sent");
-    } else {
-        println!("❌ JNI: Failed to stop generation: {}", result);
-    }
-
-    result
-}
-
-/// JNI: Check if generation can be started (context validation)
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_canStartGeneration(
-    _env: JNIEnv,
-    _class: JClass,
-    ctx_ptr: jlong,
-) -> jboolean {
-    let ctx = ctx_ptr as *mut llama_context;
-    if ctx.is_null() {
-        println!("❌ JNI: Context is null, cannot start generation");
-        return 0; // false
-    }
-
-    // Additional validation could go here
-    // For now, just check if context is not null
-    println!("✅ JNI: Context is valid, can start generation");
-    return 1; // true
-}
-
-/// JNI: Get current generation status
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_getGenerationStatus(
-    env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    let status = if should_stop_generation() {
-        "stopping"
-    } else {
-        "idle"
-    };
-
-    match env.new_string(status) {
-        Ok(jstring) => jstring.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
 
 /// Simple single token generation for testing
 #[no_mangle]
@@ -4287,204 +3514,441 @@ pub extern "C" fn gpuf_generate_single_token(
     }
 }
 
+
 // ============================================================================
-// JNI Multimodal API Functions
+// C FFI - Remote Worker Management and Monitoring
 // ============================================================================
 
-/// JNI: Load multimodal model (text model + mmproj)
+/// Start remote worker and initialize global worker (C API)
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_loadMultimodalModel(
-    mut env: JNIEnv,
-    _class: JClass,
-    text_model_path: JString,
-    mmproj_path: JString,
-) -> jlong {
-    println!("🔥 GPUFabric JNI: Loading multimodal model");
-
-    let text_path_str = match env.get_string(&text_model_path) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let mmproj_path_str = match env.get_string(&mmproj_path) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let text_path = match text_path_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let mmproj = match mmproj_path_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let text_path_cstr = match CString::new(text_path) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let mmproj_cstr = match CString::new(mmproj) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let multimodal_model = gpuf_load_multimodal_model(
-        text_path_cstr.as_ptr(),
-        mmproj_cstr.as_ptr(),
-    );
-
-    if multimodal_model.is_null() {
-        println!("❌ Failed to load multimodal model");
-        return 0;
-    }
-
-    println!("✅ Multimodal model loaded successfully");
-    multimodal_model as jlong
-}
-
-/// JNI: Create context for multimodal model
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_createMultimodalContext(
-    _env: JNIEnv,
-    _class: JClass,
-    multimodal_model_ptr: jlong,
-) -> jlong {
-    println!("🔥 GPUFabric JNI: Creating multimodal context");
-
-    if multimodal_model_ptr == 0 {
-        println!("❌ Invalid multimodal model pointer");
-        return 0;
-    }
-
-    let multimodal_model = multimodal_model_ptr as *mut gpuf_multimodal_model;
-    let ctx = gpuf_create_multimodal_context(multimodal_model);
-
-    if ctx.is_null() {
-        println!("❌ Failed to create multimodal context");
-        return 0;
-    }
-
-    println!("✅ Multimodal context created successfully");
-    ctx as jlong
-}
-
-/// JNI: Generate with multimodal input (text + image)
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_generateMultimodal(
-    mut env: JNIEnv,
-    _class: JClass,
-    multimodal_model_ptr: jlong,
-    ctx_ptr: jlong,
-    text_prompt: JString,
-    image_data: jbyteArray,
-    max_tokens: jint,
-    temperature: jfloat,
-    top_k: jint,
-    top_p: jfloat,
-) -> jstring {
-    println!("🔥 GPUFabric JNI: Generating with multimodal input");
-
-    if multimodal_model_ptr == 0 || ctx_ptr == 0 {
-        println!("❌ Invalid model or context pointer");
-        return match env.new_string("Error: Invalid model or context") {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        };
-    }
-
-    let prompt_str = match env.get_string(&text_prompt) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let prompt_text = match prompt_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let prompt_cstr = match CString::new(prompt_text) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Get image data if provided
-    let (image_ptr, image_size) = if !image_data.is_null() {
-        // For now, return null image data - will implement proper JNI array handling later
-        (std::ptr::null(), 0)
+pub extern "C" fn start_remote_worker(
+    server_addr: *const c_char,
+    control_port: c_int,
+    proxy_port: c_int,
+    worker_type: *const c_char,
+    client_id: *const c_char,
+) -> c_int {
+    use crate::handle::android_sdk::init_global_worker;
+    use crate::util::cmd::{Args, WorkerType, EngineType};
+    
+    println!("🔥 GPUFabric C API: Starting remote worker");
+    
+    // Convert C strings to Rust strings
+    let server_addr_str = if server_addr.is_null() {
+        eprintln!("❌ Error: server_addr is null");
+        return -1;
     } else {
-        (std::ptr::null(), 0)
-    };
-
-    // Create output buffer
-    let mut output = vec![0u8; 4096];
-
-    let result = gpuf_generate_multimodal(
-        multimodal_model_ptr as *mut gpuf_multimodal_model,
-        ctx_ptr as *mut llama_context,
-        prompt_cstr.as_ptr(),
-        image_ptr,
-        image_size,
-        max_tokens,
-        temperature,
-        top_k,
-        top_p,
-        1.1, // repeat_penalty
-        output.as_mut_ptr() as *mut c_char,
-        output.len() as c_int,
-    );
-
-    if result > 0 {
-        let output_str = unsafe {
-            CStr::from_ptr(output.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap_or("")
-        };
-
-        match env.new_string(output_str) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
+        match unsafe { std::ffi::CStr::from_ptr(server_addr).to_str() } {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("❌ Error: Invalid server_addr UTF-8: {}", e);
+                return -1;
+            }
         }
+    };
+    
+    let worker_type_str = if worker_type.is_null() {
+        eprintln!("❌ Error: worker_type is null");
+        return -1;
     } else {
-        match env.new_string(format!("Error: Generation failed with code {}", result)) {
-            Ok(jstring) => jstring.into_raw(),
-            Err(_) => std::ptr::null_mut(),
+        match unsafe { std::ffi::CStr::from_ptr(worker_type).to_str() } {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("❌ Error: Invalid worker_type UTF-8: {}", e);
+                return -1;
+            }
+        }
+    };
+    
+    let client_id_str = if client_id.is_null() {
+        eprintln!("❌ Error: client_id is null");
+        return -1;
+    } else {
+        match unsafe { std::ffi::CStr::from_ptr(client_id).to_str() } {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("❌ Error: Invalid client_id UTF-8: {}", e);
+                return -1;
+            }
+        }
+    };
+    
+    println!("📡 C API: Server: {}, Port: {}/{}, Type: {}, Client: {}", 
+             server_addr_str, control_port, proxy_port, worker_type_str, client_id_str);
+
+    // Parse worker type
+    let worker_type = match worker_type_str {
+        "TCP" => WorkerType::TCP,
+        "WS" => WorkerType::WS,
+        _ => {
+            eprintln!("❌ Error: Unknown worker type: {}", worker_type_str);
+            return -1;
+        }
+    };
+
+    // Create args
+    let args = Args {
+        server_addr: server_addr_str.to_string(),
+        control_port: control_port as u16,
+        proxy_port: proxy_port as u16,
+        worker_type,
+        engine_type: EngineType::LLAMA,
+        client_id: Some(hex::decode(client_id_str).unwrap_or_default().try_into().unwrap_or_default()),
+        config: None,
+        local_addr: "0.0.0.0".to_string(),
+        local_port: 0,
+        cert_chain_path: "".to_string(),
+        auto_models: false,
+        hugging_face_hub_token: None,
+        chat_template_path: None,
+        standalone_llama: false,
+        llama_model_path: None,
+        n_gpu_layers: 99,
+        n_ctx: 8192,
+    };
+
+    #[cfg(target_os = "android")]
+    {
+        // Initialize global worker using Android-native login
+        println!("🚀 C API: Initializing global worker with Android-native login...");
+        std::io::stdout().flush().unwrap();
+        
+        // Use the dedicated Android login module with a simple runtime
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create local tokio runtime");
+        
+        match local_runtime.block_on(async {
+            crate::handle::android_sdk::perform_android_login(
+                server_addr_str,
+                control_port as u16,
+                client_id_str,
+                false, // auto_models from args
+            ).await
+        }) {
+            Ok(_) => {
+                println!("✅ C API: Android worker started and logged in successfully");
+                0
+            },
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start and login Android worker: {}", e);
+                -1
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "android"))]
+    {
+        // Initialize global worker in Tokio runtime for other platforms
+        println!("🚀 C API: Initializing global worker...");
+        println!("📍 DEBUG: About to access TOKIO_RUNTIME and call block_on...");
+        std::io::stdout().flush().unwrap();
+        
+        // Bypass global runtime - create local runtime to avoid Lazy initialization issues
+        println!("🔧 DEBUG: Creating local current_thread runtime...");
+        std::io::stdout().flush().unwrap();
+        
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create local tokio runtime");
+        
+        println!("✅ DEBUG: Local runtime created, calling block_on...");
+        std::io::stdout().flush().unwrap();
+        
+        match local_runtime.block_on(async {
+            crate::handle::android_sdk::init_global_worker(args).await
+        }) {
+            Ok(_) => {
+                println!("✅ C API: Remote worker started successfully");
+                0
+            },
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start remote worker: {}", e);
+                -1
+            }
         }
     }
 }
 
-/// JNI: Check if multimodal model supports vision
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_supportsVision(
-    _env: JNIEnv,
-    _class: JClass,
-    multimodal_model_ptr: jlong,
-) -> jboolean {
-    if multimodal_model_ptr == 0 {
+
+// Global backend initialization flag
+static BACKEND_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// Coordination mutex for safe hot swapping
+static MODEL_SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Initialize backend (thread-safe, idempotent)
+fn ensure_backend_initialized() -> c_int {
+    use std::sync::atomic::Ordering;
+    
+    // Check if already initialized (fast path)
+    if BACKEND_INITIALIZED.load(Ordering::SeqCst) {
         return 0;
     }
-
-    let has_vision = gpuf_multimodal_supports_vision(multimodal_model_ptr as *mut gpuf_multimodal_model);
-    if has_vision { 1 } else { 0 }
+    
+    // Try to initialize
+    if real_llama_backend_init() != 0 {
+        return -1;
+    }
+    
+    // Mark as initialized
+    BACKEND_INITIALIZED.store(true, Ordering::SeqCst);
+    0
 }
 
-/// JNI: Free multimodal model
+/// Set remote worker model (C API) - Safe Hot Swapping Version
+/// 
+/// This function supports safe hot swapping without stopping the worker.
+/// Uses coordination mutex to ensure no inference requests access freed memory.
+/// 
+/// # Parameters
+/// - `model_path`: Path to the model file (.gguf)
+/// 
+/// # Returns
+/// - `0`: Success (model loaded and context created)
+/// - `-1`: Backend initialization failed
+/// - `-2`: Path conversion failed
+/// - `-3`: Model loading failed
+/// - `-4`: Context creation failed
+/// 
+/// # Safety
+/// Caller must ensure `model_path` is a valid null-terminated C string
+/// 
+/// # Hot Swapping
+/// This function can be called multiple times without stopping the worker.
+/// Inference requests will be briefly paused during the swap but the worker
+/// remains connected and continues processing afterward.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_com_gpuf_c_GPUEngine_freeMultimodalModel(
-    _env: JNIEnv,
-    _class: JClass,
-    multimodal_model_ptr: jlong,
-) {
-    if multimodal_model_ptr != 0 {
-        println!("🔥 GPUFabric JNI: Freeing multimodal model");
-        gpuf_free_multimodal_model(multimodal_model_ptr as *mut gpuf_multimodal_model);
-        println!("✅ Multimodal model freed");
+pub extern "C" fn set_remote_worker_model(
+    model_path: *const c_char,
+) -> c_int {
+    use std::sync::atomic::Ordering;
+    
+    println!("🔥 GPUFabric C API: Setting remote worker model (hot swap enabled)");
+    
+    // 1. Ensure backend is initialized (only once per process)
+    if ensure_backend_initialized() != 0 {
+        eprintln!("❌ C API: Backend initialization failed");
+        return -1;
     }
+    println!("✅ C API: Backend ready");
+    
+    // 2. Convert C string to Rust string
+    let path_str = if model_path.is_null() {
+        eprintln!("❌ C API: Model path is null");
+        return -2;
+    } else {
+        unsafe {
+            match std::ffi::CStr::from_ptr(model_path).to_str() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("❌ C API: Failed to convert model path: {}", e);
+                    return -2;
+                }
+            }
+        }
+    };
+    
+    // 3. Update model status to loading
+    {
+        let mut status = MODEL_STATUS.lock().unwrap();
+        status.set_loading(path_str);
+    }
+    
+    // 4. Load new model and context
+    let model_ptr = gpuf_load_model(model_path);
+    if model_ptr.is_null() {
+        eprintln!("❌ C API: Failed to load model");
+        let mut status = MODEL_STATUS.lock().unwrap();
+        status.set_error("Failed to load model");
+        return -3;
+    }
+    println!("✅ C API: Model loaded: {}", path_str);
+    
+    let context_ptr = gpuf_create_context(model_ptr);
+    if context_ptr.is_null() {
+        eprintln!("❌ C API: Failed to create context");
+        let mut status = MODEL_STATUS.lock().unwrap();
+        status.set_error("Failed to create context");
+        unsafe { llama_model_free(model_ptr) }; // Clean up loaded model
+        return -4;
+    }
+    println!("✅ C API: Context created");
+    
+    // 5. Atomically swap model/context using inference mutex
+    // This blocks both other swaps AND inference requests briefly
+    println!("🔄 C API: Swapping model (blocking inference briefly)...");
+    {
+        let _swap_lock = MODEL_SWAP_LOCK.lock().unwrap();
+        let _inference_lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
+        
+        // Get old model/context for cleanup
+        let old_model = GLOBAL_MODEL_PTR.load(Ordering::SeqCst);
+        let old_context = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
+        
+        // Update to new model/context atomically
+        GLOBAL_MODEL_PTR.store(model_ptr, Ordering::SeqCst);
+        GLOBAL_CONTEXT_PTR.store(context_ptr, Ordering::SeqCst);
+        
+        println!("✅ C API: Global pointers updated");
+        
+        // Clean up old resources AFTER updating pointers
+        if !old_model.is_null() || !old_context.is_null() {
+            println!("🧹 C API: Cleaning up previous model/context");
+            
+            if !old_context.is_null() {
+                unsafe { llama_free(old_context) };
+                println!("✅ C API: Old context freed");
+            }
+            if !old_model.is_null() {
+                unsafe { llama_model_free(old_model) };
+                println!("✅ C API: Old model freed");
+            }
+        }
+    }
+    
+    println!("✅ C API: Model swap completed");
+    
+    // 6. Update status to loaded
+    {
+        let mut status = MODEL_STATUS.lock().unwrap();
+        status.set_loaded(path_str);
+    }
+    
+    println!("🎉 C API: Remote worker model set successfully (hot swap)");
+    0  // Success
+}
+
+/// Start remote worker background tasks (C API)
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks() -> c_int {
+    use crate::handle::android_sdk::start_worker_tasks;
+    
+    println!("🔥 GPUFabric C API: Starting remote worker background tasks");
+    
+    match TOKIO_RUNTIME.block_on(async {
+        crate::handle::android_sdk::start_worker_tasks().await
+    }) {
+        Ok(_) => {
+            println!("✅ C API: Background tasks started successfully");
+            0 as c_int
+        },
+        Err(e) => {
+            eprintln!("❌ C API: Failed to start background tasks: {}", e);
+            -1 as c_int
+        }
+    }
+}
+
+/// Start remote worker background tasks with callback support (C API)
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
+    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+) -> c_int {
+    use crate::handle::android_sdk::start_worker_tasks_with_callback_ptr;
+    
+    println!("🔥 GPUFabric C API: Starting remote worker background tasks with callback");
+    
+    match TOKIO_RUNTIME.block_on(async {
+        crate::handle::android_sdk::start_worker_tasks_with_callback_ptr(callback).await
+    }) {
+        Ok(_) => {
+            println!("✅ C API: Background tasks with callback started successfully");
+            0 as c_int
+        },
+        Err(e) => {
+            eprintln!("❌ C API: Failed to start background tasks with callback: {}", e);
+            -1 as c_int
+        }
+    }
+}
+
+/// Stop remote worker and cleanup (C API)
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn stop_remote_worker() -> c_int {
+    use crate::handle::android_sdk::stop_global_worker;
+    
+    println!("🔥 GPUFabric C API: Stopping remote worker");
+    
+    TOKIO_RUNTIME.block_on(async {
+        crate::handle::android_sdk::stop_global_worker().await
+    });
+    
+    println!("✅ C API: Remote worker stopped");
+    0
+}
+
+/// Get remote worker status (C API)
+/// 
+/// # Parameters
+/// - `buffer`: Output buffer to write status string
+/// - `buffer_size`: Size of the output buffer
+/// 
+/// # Returns
+/// - `0`: Success (status written to buffer)
+/// - `-1`: Error (buffer too small or other error)
+/// 
+/// # Safety
+/// Caller must ensure `buffer` is valid and can hold `buffer_size` bytes
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn get_remote_worker_status(
+    buffer: *mut c_char,
+    buffer_size: size_t,
+) -> c_int {
+    use crate::handle::android_sdk::get_worker_status;
+    
+    println!("🔥 GPUFabric C API: Getting remote worker status");
+    
+    if buffer.is_null() {
+        eprintln!("❌ C API: Buffer is null");
+        return -1;
+    }
+    
+    if buffer_size == 0 {
+        eprintln!("❌ C API: Buffer size is zero");
+        return -1;
+    }
+    
+    // Get status from async function
+    let status = TOKIO_RUNTIME.block_on(async {
+        crate::handle::android_sdk::get_worker_status().await.unwrap_or_else(|_| "Error".to_string())
+    });
+    
+    println!("📊 C API: Status: {}", status);
+    
+    // Convert to C string and copy to buffer
+    let status_c = match std::ffi::CString::new(status) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("❌ C API: Failed to convert status to C string: {}", e);
+            return -1;
+        }
+    };
+    
+    let status_bytes = status_c.as_bytes_with_nul();
+    
+    if status_bytes.len() > buffer_size {
+        eprintln!("❌ C API: Buffer too small (need {}, have {})", 
+                 status_bytes.len(), buffer_size);
+        return -1;
+    }
+    
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            status_bytes.as_ptr(),
+            buffer as *mut u8,
+            status_bytes.len()
+        );
+    }
+    
+    println!("✅ C API: Status written to buffer");
+    0 as c_int
 }
