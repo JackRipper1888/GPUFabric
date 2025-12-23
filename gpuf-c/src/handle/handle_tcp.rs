@@ -13,6 +13,8 @@ use common::{
 };
 use tokio::io::AsyncWriteExt;
 
+use futures_util::StreamExt;
+
 use bytes::BytesMut;
 use std::fs::File;
 use std::io::BufReader;
@@ -72,7 +74,7 @@ impl TCPWorker {
                         .await?;
                     Ok(text)
                 }
-                
+
                 _ => Err(anyhow!(
                     "execute_inference_task is only supported for LLAMA engine"
                 )),
@@ -129,6 +131,113 @@ impl TCPWorker {
             } else {
                 Err(anyhow!("Inference failed with code: {}", result))
             }
+        }
+    }
+
+    async fn stream_inference_task_to_server(
+        &self,
+        task_id: String,
+        prompt: String,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+    ) -> Result<()> {
+        #[cfg(not(target_os = "android"))]
+        {
+            let engine_guard = self.engine.lock().await;
+            let engine = engine_guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("Engine not initialized"))?;
+
+            let AnyEngine::Llama(llama) = engine else {
+                return Err(anyhow!(
+                    "stream_inference_task_to_server is only supported for LLAMA engine"
+                ));
+            };
+
+            let sampling = crate::llm_engine::llama_engine::SamplingParams {
+                temperature,
+                top_k: top_k as i32,
+                top_p,
+                repeat_penalty,
+                repeat_last_n,
+                seed: 0,
+                min_keep: min_keep as usize,
+            };
+
+            let mut stream = llama
+                .stream_with_cached_model_sampling(&prompt, max_tokens as usize, &sampling)
+                .await?;
+
+            let max_bytes: usize = self.args.stream_chunk_bytes.max(1);
+            let mut seq: u32 = 0;
+            let mut buf = String::new();
+
+            while let Some(piece_res) = stream.next().await {
+                let piece = piece_res?;
+                buf.push_str(&piece);
+
+                if buf.len() >= max_bytes {
+                    let delta = std::mem::take(&mut buf);
+                    let chunk = CommandV1::InferenceResultChunk {
+                        task_id: task_id.clone(),
+                        seq,
+                        delta,
+                        done: false,
+                        error: None,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                    };
+                    self.send_command(chunk).await?;
+                    seq = seq.wrapping_add(1);
+                }
+            }
+
+            if !buf.is_empty() {
+                let chunk = CommandV1::InferenceResultChunk {
+                    task_id: task_id.clone(),
+                    seq,
+                    delta: buf,
+                    done: false,
+                    error: None,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                };
+                self.send_command(chunk).await?;
+                seq = seq.wrapping_add(1);
+            }
+
+            let done_chunk = CommandV1::InferenceResultChunk {
+                task_id,
+                seq,
+                delta: String::new(),
+                done: true,
+                error: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+            };
+            self.send_command(done_chunk).await?;
+            return Ok(());
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let _ = (
+                task_id,
+                prompt,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                repeat_penalty,
+                repeat_last_n,
+                min_keep,
+            );
+            Err(anyhow!("Android streaming is not implemented"))
         }
     }
 
@@ -707,45 +816,112 @@ impl WorkerHandle for TCPWorker {
 
                                 let start_time = std::time::Instant::now();
 
-                                let result = self
-                                    .execute_inference_task(
-                                        &prompt,
-                                        max_tokens,
-                                        temperature,
-                                        top_k,
-                                        top_p,
-                                        repeat_penalty,
-                                        repeat_last_n,
-                                        min_keep,
-                                    )
-                                    .await;
+                                #[cfg(not(target_os = "android"))]
+                                {
+                                    let result = self
+                                        .stream_inference_task_to_server(
+                                            task_id.clone(),
+                                            prompt.clone(),
+                                            max_tokens,
+                                            temperature,
+                                            top_k,
+                                            top_p,
+                                            repeat_penalty,
+                                            repeat_last_n,
+                                            min_keep,
+                                        )
+                                        .await;
 
-                                let execution_time = start_time.elapsed().as_millis() as u64;
-
-                                match result {
-                                    Ok(output) => {
-                                        let result_command = CommandV1::InferenceResult {
+                                    let _execution_time = start_time.elapsed().as_millis() as u64;
+                                    if let Err(e) = result {
+                                        let chunk = CommandV1::InferenceResultChunk {
                                             task_id,
-                                            success: true,
-                                            result: Some(output),
-                                            error: None,
-                                            execution_time_ms: execution_time,
-                                            prompt_tokens: 0,
+                                            seq: 0,
+                                            delta: String::new(),
+                                            done: true,
                                             completion_tokens: 0,
-                                        };
-                                        self.send_command(result_command).await?;
-                                    }
-                                    Err(e) => {
-                                        let result_command = CommandV1::InferenceResult {
-                                            task_id,
-                                            success: false,
-                                            result: None,
+                                            prompt_tokens: 0,
                                             error: Some(e.to_string()),
-                                            execution_time_ms: execution_time,
-                                            prompt_tokens: 0,
-                                            completion_tokens: 0,
                                         };
-                                        self.send_command(result_command).await?;
+                                        self.send_command(chunk).await?;
+                                    }
+                                }
+
+                                #[cfg(target_os = "android")]
+                                {
+                                    let result = self
+                                        .execute_inference_task(
+                                            &prompt,
+                                            max_tokens,
+                                            temperature,
+                                            top_k,
+                                            top_p,
+                                            repeat_penalty,
+                                            repeat_last_n,
+                                            min_keep,
+                                        )
+                                        .await;
+
+                                    let _execution_time = start_time.elapsed().as_millis() as u64;
+
+                                    match result {
+                                        Ok(output) => {
+                                            let mut seq: u32 = 0;
+                                            let max_bytes: usize = self.args.stream_chunk_bytes.max(1);
+                                            let mut start: usize = 0;
+                                            while start < output.len() {
+                                                let mut end = (start + max_bytes).min(output.len());
+                                                while end < output.len()
+                                                    && !output.is_char_boundary(end)
+                                                {
+                                                    end -= 1;
+                                                }
+                                                if end == start {
+                                                    end = output
+                                                        .char_indices()
+                                                        .nth(1)
+                                                        .map(|(i, _)| i)
+                                                        .unwrap_or(output.len());
+                                                }
+
+                                                let delta = output[start..end].to_string();
+                                                let chunk = CommandV1::InferenceResultChunk {
+                                                    task_id: task_id.clone(),
+                                                    seq,
+                                                    delta,
+                                                    done: false,
+                                                    error: None,
+                                                    prompt_tokens: 0,
+                                                    completion_tokens: 0,
+                                                };
+                                                self.send_command(chunk).await?;
+                                                seq = seq.wrapping_add(1);
+                                                start = end;
+                                            }
+
+                                            let done_chunk = CommandV1::InferenceResultChunk {
+                                                task_id,
+                                                seq,
+                                                delta: String::new(),
+                                                done: true,
+                                                error: None,
+                                                prompt_tokens: 0,
+                                                completion_tokens: 0,
+                                            };
+                                            self.send_command(done_chunk).await?;
+                                        }
+                                        Err(e) => {
+                                            let chunk = CommandV1::InferenceResultChunk {
+                                                task_id,
+                                                seq: 0,
+                                                delta: String::new(),
+                                                done: true,
+                                                error: Some(e.to_string()),
+                                                prompt_tokens: 0,
+                                                completion_tokens: 0,
+                                            };
+                                            self.send_command(chunk).await?;
+                                        }
                                     }
                                 }
                             }

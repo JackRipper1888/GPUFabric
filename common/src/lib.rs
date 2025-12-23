@@ -193,6 +193,10 @@ pub enum CommandV1 {
         min_keep: u32,
     },
 
+    CancelInference {
+        task_id: String,
+    },
+
     // Inference result from client to server
     InferenceResult {
         task_id: String,
@@ -200,6 +204,16 @@ pub enum CommandV1 {
         result: Option<String>,
         error: Option<String>,
         execution_time_ms: u64,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
+
+    InferenceResultChunk {
+        task_id: String,
+        seq: u32,
+        delta: String,
+        done: bool,
+        error: Option<String>,
         prompt_tokens: u32,
         completion_tokens: u32,
     },

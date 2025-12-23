@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{oneshot, Mutex};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use uuid::Uuid;
-use tracing::{info, warn,error};
+use tracing::{debug,info, warn,error};
 
 use common::{Command, CommandV1};
 use crate::handle::ActiveClients;
@@ -58,7 +59,7 @@ pub struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
-    // pub usage: CompletionUsage,
+    pub usage: CompletionUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,7 +69,7 @@ pub struct ChatCompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
-    // pub usage: CompletionUsage,
+    pub usage: CompletionUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,7 +87,7 @@ pub struct ChatCompletionChoice {
     pub finish_reason: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct CompletionUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -104,9 +105,20 @@ pub struct ModelInfo {
 // Task result tracking
 type PendingTask = oneshot::Sender<Result<CompletionResponse>>;
 
+#[derive(Debug)]
+pub enum StreamEvent {
+    Delta(String),
+    Finish(Option<CompletionUsage>),
+    Done,
+    Error(String),
+}
+
 // Inference Scheduler
 pub struct InferenceScheduler {
     pending_tasks: Arc<Mutex<HashMap<String, PendingTask>>>,
+    partial_results: Arc<Mutex<HashMap<String, String>>>,
+    pending_streams: Arc<Mutex<HashMap<String, mpsc::Sender<StreamEvent>>>>,
+    stream_usages: Arc<Mutex<HashMap<String, CompletionUsage>>>,
     active_clients: ActiveClients,
 }
 
@@ -114,7 +126,158 @@ impl InferenceScheduler {
     pub fn new(active_clients: ActiveClients) -> Self {
         Self {
             pending_tasks: Arc::new(Mutex::new(HashMap::new())),
+            partial_results: Arc::new(Mutex::new(HashMap::new())),
+            pending_streams: Arc::new(Mutex::new(HashMap::new())),
+            stream_usages: Arc::new(Mutex::new(HashMap::new())),
             active_clients,
+        }
+    }
+
+    pub async fn execute_inference_stream(
+        &self,
+        request: CompletionRequest,
+        allowed_client_ids: Option<&[ClientId]>,
+    ) -> Result<(String, ClientId, mpsc::Receiver<StreamEvent>)> {
+        let task_id = Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::channel::<StreamEvent>(128);
+
+        {
+            let mut streams = self.pending_streams.lock().await;
+            streams.insert(task_id.clone(), tx);
+        }
+
+        let device_id = self.select_best_device(allowed_client_ids).await?;
+        if let Err(e) = self.send_task_to_device(
+            &device_id,
+            task_id.clone(),
+            request.prompt,
+            request.max_tokens.unwrap_or(100),
+            request.temperature.unwrap_or(0.7),
+            request.top_k.unwrap_or(40),
+            request.top_p.unwrap_or(0.9),
+            request.repeat_penalty.unwrap_or(1.1),
+            request.repeat_last_n.unwrap_or(64),
+            request.min_keep.unwrap_or(1),
+        ).await {
+            let mut streams = self.pending_streams.lock().await;
+            streams.remove(&task_id);
+            return Err(e);
+        }
+
+        Ok((task_id, device_id, rx))
+    }
+
+    pub async fn cancel_inference(&self, task_id: &str, device_id: &ClientId) -> Result<()> {
+        debug!("Cancelling inference for task {} on device {}", task_id, device_id);
+        {
+            let mut streams = self.pending_streams.lock().await;
+            streams.remove(task_id);
+        }
+
+        use common::write_command;
+
+        let mut clients = self.active_clients.lock().await;
+        let client_info = clients
+            .get_mut(device_id)
+            .ok_or_else(|| anyhow!("Device {:?} not found or not connected", device_id))?;
+
+        if !client_info.authed {
+            return Err(anyhow!("Device {:?} not authenticated", device_id));
+        }
+
+        let mut writer = client_info.writer.lock().await;
+
+        let cancel = CommandV1::CancelInference {
+            task_id: task_id.to_string(),
+        };
+        let command = Command::V1(cancel);
+        write_command(&mut *writer, &command).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
+    pub async fn handle_inference_result_chunk(
+        &self,
+        task_id: String,
+        _seq: u32,
+        delta: String,
+        done: bool,
+        error: Option<String>,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) {
+        let stream_sender = {
+            let streams = self.pending_streams.lock().await;
+            streams.get(&task_id).cloned()
+        };
+
+        if let Some(sender) = stream_sender {
+            if let Some(err) = error {
+                let _ = sender.send(StreamEvent::Error(err)).await;
+                let _ = sender.send(StreamEvent::Done).await;
+                let mut streams = self.pending_streams.lock().await;
+                streams.remove(&task_id);
+                let mut usages = self.stream_usages.lock().await;
+                usages.remove(&task_id);
+                return;
+            }
+
+            if !delta.is_empty() {
+                let _ = sender.send(StreamEvent::Delta(delta)).await;
+            }
+
+            if done {
+                let usage = CompletionUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens: prompt_tokens.saturating_add(completion_tokens),
+                };
+                {
+                    let mut usages = self.stream_usages.lock().await;
+                    usages.insert(task_id.clone(), usage);
+                }
+
+                let usage_for_finish = {
+                    let usages = self.stream_usages.lock().await;
+                    usages.get(&task_id).cloned()
+                };
+
+                let _ = sender.send(StreamEvent::Finish(usage_for_finish)).await;
+                let _ = sender.send(StreamEvent::Done).await;
+                let mut streams = self.pending_streams.lock().await;
+                streams.remove(&task_id);
+                let mut usages = self.stream_usages.lock().await;
+                usages.remove(&task_id);
+            }
+            return;
+        }
+
+        if let Some(err) = error {
+            self.handle_inference_result(task_id, false, None, Some(err), 0, 0, 0).await;
+            return;
+        }
+
+        {
+            let mut partial = self.partial_results.lock().await;
+            let entry = partial.entry(task_id.clone()).or_insert_with(String::new);
+            entry.push_str(&delta);
+        }
+
+        if done {
+            let result = {
+                let mut partial = self.partial_results.lock().await;
+                partial.remove(&task_id).unwrap_or_default()
+            };
+            self.handle_inference_result(
+                task_id,
+                true,
+                Some(result),
+                None,
+                0,
+                prompt_tokens,
+                completion_tokens,
+            )
+            .await;
         }
     }
 
@@ -125,8 +288,8 @@ impl InferenceScheduler {
         result: Option<String>,
         error: Option<String>,
         _execution_time_ms: u64,
-        _prompt_tokens: u32,
-        _completion_tokens: u32,
+        prompt_tokens: u32,
+        completion_tokens: u32,
     ) {
         info!("Handling inference result for task {} (success: {})", task_id, success);
         
@@ -157,11 +320,11 @@ impl InferenceScheduler {
                         logprobs: None,
                         finish_reason: "stop".to_string(),
                     }],
-                    // usage: CompletionUsage {
-                    //     prompt_tokens,
-                    //     completion_tokens,
-                    //     total_tokens: prompt_tokens + completion_tokens,
-                    // },
+                    usage: CompletionUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+                    },
                 })
             } else {
                 Err(anyhow!("Inference failed: {}", error.unwrap_or_default()))
@@ -171,16 +334,18 @@ impl InferenceScheduler {
                 warn!("Failed to send result for task {}", task_id);
             }
         } else {
-            error!("RACE CONDITION: Task {} not found in pending_tasks!", task_id);
-            error!("This means the task was removed before handle_inference_result was called");
-            error!("Available tasks were: {:?}", all_tasks_before);
-            
-            // Log the inference result for debugging
-            if success {
-                info!("Lost inference result: {}", result.unwrap_or_default());
-            } else {
-                warn!("Lost inference error: {}", error.unwrap_or_default());
+            {
+                let mut partial = self.partial_results.lock().await;
+                partial.remove(&task_id);
             }
+
+            // This commonly happens when the SSE client disconnects and we cancel/remove the
+            // stream sender before the device finishes sending its final chunks.
+            debug!(
+                "Dropping inference result for task {} because it is no longer pending (likely canceled/disconnected). Available tasks were: {:?}",
+                task_id,
+                all_tasks_before
+            );
         }
     }
 

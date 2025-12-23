@@ -2,16 +2,41 @@ use axum::{
     extract::{State, Path, Extension},
     http::{StatusCode, HeaderMap},
     Json,
-    response::{IntoResponse, Response},
+    response::{sse::Event, sse::Sse, IntoResponse, Response},
 };
+use futures_util::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, debug};
 
 use crate::inference::{
     gateway::{InferenceGateway, AuthContext},
-    scheduler::{CompletionRequest, ChatCompletionRequest, ChatCompletionResponse, ModelInfo, DeviceInfo},
+    scheduler::{CompletionRequest, ChatCompletionRequest, ChatCompletionResponse, ModelInfo, DeviceInfo, StreamEvent},
 };
+use crate::util::protoc::ClientId;
+
+struct StreamCancelGuard {
+    scheduler: Arc<crate::inference::InferenceScheduler>,
+    task_id: String,
+    device_id: ClientId,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for StreamCancelGuard {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        let scheduler = self.scheduler.clone();
+        let task_id = self.task_id.clone();
+        let device_id = self.device_id;
+        tokio::spawn(async move {
+            let _ = scheduler.cancel_inference(&task_id, &device_id).await;
+        });
+    }
+}
 
 // OpenAI Compatible API Handlers
 
@@ -31,6 +56,100 @@ pub async fn handle_completion(
         .map(|s| s.to_string());
     
     debug!("Request-ID: {:?}", request_id);
+
+    if request.stream.unwrap_or(false) {
+        let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let stream_res = gateway
+            .scheduler
+            .execute_inference_stream(request, Some(auth.client_ids.as_slice()))
+            .await;
+
+        match stream_res {
+            Ok((task_id, device_id, rx)) => {
+                if auth.access_level == -1 {
+                    let gateway = gateway.clone();
+                    let request_id = request_id.clone();
+                    let access_level = auth.access_level;
+                    tokio::spawn(async move {
+                        if let Err(e) = gateway
+                            .send_request_metrics(request_id, device_id, access_level)
+                            .await
+                        {
+                            error!("Failed to send request metrics: {}", e);
+                        }
+                    });
+                }
+
+                let finished = Arc::new(AtomicBool::new(false));
+                let guard = StreamCancelGuard {
+                    scheduler: gateway.scheduler.clone(),
+                    task_id: task_id.clone(),
+                    device_id,
+                    finished: finished.clone(),
+                };
+                let s = ReceiverStream::new(rx)
+                    .map(move |ev| {
+                        let _guard = &guard;
+                        let data = match ev {
+                            StreamEvent::Delta(text) => {
+                                let payload = json!({
+                                    "id": task_id,
+                                    "object": "text_completion",
+                                    "created": created,
+                                    "model": model_name,
+                                    "choices": [{
+                                        "index": 0,
+                                        "text": text,
+                                        "finish_reason": null
+                                    }]
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Finish(usage) => {
+                                let payload = json!({
+                                    "id": task_id,
+                                    "object": "text_completion",
+                                    "created": created,
+                                    "model": model_name,
+                                    "choices": [{
+                                        "index": 0,
+                                        "text": "",
+                                        "finish_reason": "stop"
+                                    }],
+                                    "usage": usage
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Error(msg) => {
+                                let payload = json!({
+                                    "error": {"message": msg, "type": "api_error", "code": 500}
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Done => {
+                                finished.store(true, Ordering::SeqCst);
+                                "[DONE]".to_string()
+                            }
+                        };
+                        Ok::<Event, std::convert::Infallible>(Event::default().data(data))
+                    });
+
+                return Sse::new(s).into_response();
+            }
+            Err(e) => {
+                error!("Completion request failed: {}", e);
+                let error_response = json!({
+                    "error": {"message": e.to_string(), "type": "api_error", "code": 500}
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            }
+        }
+    }
     
     match gateway
         .scheduler
@@ -39,7 +158,7 @@ pub async fn handle_completion(
     {
         Ok(response) => {
             // Send metrics to Kafka if needed
-            if auth.access_level != -1 {
+            if auth.access_level == -1 {
                 if  let Some(chosen_client_id) = auth.client_ids.first() {
                 if let Err(e) = gateway.send_request_metrics(
                     request_id,
@@ -102,11 +221,22 @@ pub async fn handle_chat_completion(
     debug!("Request-ID: {:?}", request_id);
     
     // Convert chat messages to a single prompt
-    let prompt = request.messages
+    let mut prompt = request
+        .messages
         .iter()
-        .map(|msg| format!("{}: {}", msg.role, msg.content))
+        .map(|msg| {
+            let role = msg.role.as_str();
+            match role {
+                "system" => format!("### System\n{}", msg.content),
+                "user" => format!("### User\n{}", msg.content),
+                "assistant" => format!("### Assistant\n{}", msg.content),
+                _ => format!("### {}\n{}", msg.role, msg.content),
+            }
+        })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n\n");
+
+    prompt.push_str("\n\n### Assistant\n");
 
     let completion_request = CompletionRequest {
         prompt,
@@ -121,6 +251,103 @@ pub async fn handle_chat_completion(
         stream: request.stream,
     };
 
+    if completion_request.stream.unwrap_or(false) {
+        let model_name = completion_request
+            .model
+            .clone()
+            .unwrap_or_else(|| "gpuf".to_string());
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let stream_res = gateway
+            .scheduler
+            .execute_inference_stream(completion_request, Some(auth.client_ids.as_slice()))
+            .await;
+
+        match stream_res {
+            Ok((task_id, device_id, rx)) => {
+                if auth.access_level == -1 {
+                    let gateway = gateway.clone();
+                    let request_id = request_id.clone();
+                    let access_level = auth.access_level;
+                    tokio::spawn(async move {
+                        if let Err(e) = gateway
+                            .send_request_metrics(request_id, device_id, access_level)
+                            .await
+                        {
+                            error!("Failed to send request metrics: {}", e);
+                        }
+                    });
+                }
+
+                let finished = Arc::new(AtomicBool::new(false));
+                let guard = StreamCancelGuard {
+                    scheduler: gateway.scheduler.clone(),
+                    task_id: task_id.clone(),
+                    device_id,
+                    finished: finished.clone(),
+                };
+                let s = ReceiverStream::new(rx)
+                    .map(move |ev| {
+                        let _guard = &guard;
+                        let data = match ev {
+                            StreamEvent::Delta(text) => {
+                                let payload = json!({
+                                    "id": task_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model_name,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"content": text},
+                                        "finish_reason": null
+                                    }]
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Finish(usage) => {
+                                let payload = json!({
+                                    "id": task_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model_name,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "stop"
+                                    }],
+                                    "usage": usage
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Error(msg) => {
+                                let payload = json!({
+                                    "error": {"message": msg, "type": "api_error", "code": 500}
+                                });
+                                payload.to_string()
+                            }
+                            StreamEvent::Done => {
+                                finished.store(true, Ordering::SeqCst);
+                                "[DONE]".to_string()
+                            }
+                        };
+                        Ok::<Event, std::convert::Infallible>(Event::default().data(data))
+                    });
+
+                return Sse::new(s).into_response();
+            }
+            Err(e) => {
+                error!("Chat completion request failed: {}", e);
+                let error_response = json!({
+                    "error": {"message": e.to_string(), "type": "api_error", "code": 500}
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+            }
+        }
+    }
+
     match gateway
         .scheduler
         .execute_inference(completion_request, Some(auth.client_ids.as_slice()))
@@ -128,7 +355,7 @@ pub async fn handle_chat_completion(
     {
         Ok(response) => {
             // Send metrics to Kafka if needed
-            if auth.access_level != -1 {
+            if auth.access_level == -1 {
                 if let Some(chosen_client_id) = auth.client_ids.first() {
                     if let Err(e) = gateway.send_request_metrics(
                             request_id,
@@ -156,7 +383,7 @@ pub async fn handle_chat_completion(
                         finish_reason: choice.finish_reason,
                     }
                 }).collect(),
-                //usage: response.usage,
+                usage: response.usage,
             };
             
             info!("Chat completion request completed successfully");

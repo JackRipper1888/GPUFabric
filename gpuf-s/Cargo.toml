@@ -31,6 +31,7 @@ futures-util = { workspace = true }
 bincode = { workspace = true ,features = ["serde"]}
 httparse = "1.8.0"
 bytes = { workspace = true }
+tokio-stream = { version = "0.1", default-features = false }
 sqlx = { version = "0.8", default-features = false,  features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "derive"] }
 redis = { version = "0.24", features = ["tokio-comp"] }
 validator = { version = "0.20.0", features = ["derive"] }

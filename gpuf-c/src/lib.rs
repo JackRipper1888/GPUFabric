@@ -547,7 +547,7 @@ fn safe_llama_tokenize_with_pool(
 
 #[cfg(target_os = "android")]
 // llama-cpp-rs
-fn safe_tokenize(
+pub(crate) unsafe fn safe_tokenize(
     ctx: *mut llama_context,
     text: *const c_char,
     tokens: *mut LlamaToken,
@@ -3606,6 +3606,7 @@ pub extern "C" fn start_remote_worker(
         llama_model_path: None,
         n_gpu_layers: 99,
         n_ctx: 8192,
+        stream_chunk_bytes: 256,
     };
 
     #[cfg(target_os = "android")]

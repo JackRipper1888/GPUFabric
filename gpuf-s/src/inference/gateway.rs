@@ -86,11 +86,12 @@ impl InferenceGateway {
         chosen_client_id: ClientId,
         access_level: i32,
     ) -> Result<()> {
-        // Skip if access_level is -1 (private API)
+        // Skip unless access_level is -1 (metered API)
         if access_level != -1 {
-            debug!("Send kafka key-value (request_id, client_id) pair");
             return Ok(());
         }
+
+        debug!("Send kafka key-value (request_id, client_id) pair");
 
         // Share API: Send kafka key-value (request_id, client_id) pair
         if let Some(request_id_str) = request_id {
