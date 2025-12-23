@@ -76,6 +76,9 @@ pub struct Args {
     /// Context size for model inference (default: 8192)
     #[arg(long, default_value_t = 8192, help = "Context window size in tokens")]
     pub n_ctx: u32,
+
+    #[arg(long, default_value_t = 256, help = "Max bytes per streamed delta chunk sent to server")]
+    pub stream_chunk_bytes: usize,
 }
 
 impl Args {
@@ -131,6 +134,7 @@ impl Args {
                 llama_model_path: None,
                 n_ctx: config_data.client.n_ctx,
                 n_gpu_layers: config_data.client.n_gpu_layers,
+                stream_chunk_bytes: self.stream_chunk_bytes,
             })
             
         } else {

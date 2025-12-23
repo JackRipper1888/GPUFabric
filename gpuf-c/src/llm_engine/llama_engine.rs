@@ -6,6 +6,10 @@ use tokio::sync::RwLock;
 use tokio::fs;
 use tracing::{debug, info, warn};
 
+use futures_util::Stream;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
 // llama-cpp-2 imports (only for non-Android platforms)
 #[cfg(not(target_os = "android"))]
 use llama_cpp_2::{model::LlamaModel, context::LlamaContext, llama_backend::LlamaBackend};
@@ -311,6 +315,143 @@ impl LlamaEngine {
                 let completion_token_count = output_tokens.len();
                 Ok((output_text, prompt_token_count, completion_token_count))
             }).await?
+        }
+    }
+
+    pub async fn stream_with_cached_model_sampling(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        sampling: &SamplingParams,
+    ) -> Result<impl Stream<Item = Result<String>> + Send + 'static> {
+        if !self.is_initialized {
+            return Err(anyhow!("Engine not initialized - call load_model() first"));
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            use futures_util::StreamExt;
+
+            let _ = (prompt, max_tokens, sampling);
+            let s = futures_util::stream::once(async {
+                Err(anyhow!("Android streaming is not implemented"))
+            })
+            .boxed();
+
+            return Ok(s);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let backend = self
+                .cached_backend
+                .as_ref()
+                .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+                .clone();
+            let model = self
+                .cached_model
+                .as_ref()
+                .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+                .clone();
+
+            let prompt = prompt.to_string();
+            let n_ctx = self.n_ctx;
+            let sampling = sampling.clone();
+
+            let (tx, rx) = mpsc::channel::<Result<String>>(64);
+
+            tokio::task::spawn_blocking(move || {
+                use llama_cpp_2::llama_batch::LlamaBatch;
+                use llama_cpp_2::model::{AddBos, Special};
+                use llama_cpp_2::sampling::LlamaSampler;
+
+                let context_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
+
+                let model_guard = model
+                    .lock()
+                    .map_err(|e| anyhow!("Failed to lock model: {:?}", e))?;
+                let mut context = model_guard
+                    .new_context(&*backend, context_params)
+                    .map_err(|e| anyhow!("Failed to create context: {:?}", e))?;
+
+                let tokens = model_guard
+                    .str_to_token(&prompt, AddBos::Always)
+                    .map_err(|e| anyhow!("Failed to tokenize prompt: {:?}", e))?;
+
+                let mut batch = LlamaBatch::new(tokens.len(), 1);
+                for (i, token) in tokens.iter().enumerate() {
+                    let is_last = i == tokens.len() - 1;
+                    batch
+                        .add(*token, i as i32, &[0], is_last)
+                        .map_err(|e| anyhow!("Failed to add token to batch: {:?}", e))?;
+                }
+
+                context
+                    .decode(&mut batch)
+                    .map_err(|e| anyhow!("Failed to decode batch: {:?}", e))?;
+
+                let mut samplers = Vec::new();
+                if sampling.repeat_penalty != 1.0 {
+                    samplers.push(LlamaSampler::penalties(
+                        sampling.repeat_last_n,
+                        sampling.repeat_penalty,
+                        0.0,
+                        0.0,
+                    ));
+                }
+                if sampling.top_k > 0 {
+                    samplers.push(LlamaSampler::top_k(sampling.top_k));
+                }
+                if sampling.top_p > 0.0 && sampling.top_p < 1.0 {
+                    samplers.push(LlamaSampler::top_p(sampling.top_p, sampling.min_keep));
+                }
+                samplers.push(LlamaSampler::temp(sampling.temperature));
+                if sampling.temperature <= 0.0 {
+                    samplers.push(LlamaSampler::greedy());
+                } else {
+                    samplers.push(LlamaSampler::dist(sampling.seed));
+                }
+
+                let mut sampler = LlamaSampler::chain_simple(samplers);
+                sampler.accept_many(tokens.iter());
+
+                let mut n_cur = tokens.len();
+                for _i in 0..max_tokens {
+                    let new_token = sampler.sample(&context, -1);
+                    sampler.accept(new_token);
+
+                    if new_token == model_guard.token_eos() {
+                        break;
+                    }
+
+                    if let Ok(piece) = model_guard.token_to_str(new_token, Special::Tokenize) {
+                        if piece.contains("<|im_end|>")
+                            || piece.contains("<|eot_id|>")
+                            || piece.contains("<|end_of_text|>")
+                            || piece.contains("</s>")
+                        {
+                            break;
+                        }
+
+                        if tx.blocking_send(Ok(piece)).is_err() {
+                            break;
+                        }
+                    }
+
+                    let mut next_batch = LlamaBatch::new(1, 1);
+                    next_batch
+                        .add(new_token, n_cur as i32, &[0], true)
+                        .map_err(|e| anyhow!("Failed to add token: {:?}", e))?;
+                    context
+                        .decode(&mut next_batch)
+                        .map_err(|e| anyhow!("Failed to decode token: {:?}", e))?;
+                    n_cur += 1;
+                }
+
+                Ok::<(), anyhow::Error>(())
+            });
+
+            Ok(ReceiverStream::new(rx))
         }
     }
     

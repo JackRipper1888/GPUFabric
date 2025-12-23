@@ -38,6 +38,9 @@ CREATE TABLE  IF NOT EXISTS  "public"."gpu_assets" (
     "updated_at" TIMESTAMP DEFAULT NOW()
 );
 
+ CREATE INDEX IF NOT EXISTS idx_gpu_assets_user_id_client_name
+ ON "public"."gpu_assets" ("user_id", "client_name");
+
 CREATE TABLE IF NOT EXISTS "public"."pod_info" (
     "pod_id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     "client_id" BYTEA NOT NULL REFERENCES "public"."gpu_assets" ("client_id") ON DELETE CASCADE,

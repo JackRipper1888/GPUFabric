@@ -247,6 +247,28 @@ async fn handle_single_client(
                     completion_tokens,
                 ).await;
             }
+            Ok(Command::V1(CommandV1::InferenceResultChunk {
+                task_id,
+                seq,
+                delta,
+                done,
+                error,
+                prompt_tokens,
+                completion_tokens,
+            })) => {
+                server_state
+                    .inference_scheduler
+                    .handle_inference_result_chunk(
+                        task_id,
+                        seq,
+                        delta,
+                        done,
+                        error,
+                        prompt_tokens,
+                        completion_tokens,
+                    )
+                    .await;
+            }
             _ => {
                 warn!("Received unexpected command from client addr {}", addr);
             }
