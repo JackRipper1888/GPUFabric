@@ -139,26 +139,29 @@ int main() {
     printf("📊 Status updates every 30 seconds:\n\n");
     
     // Monitor for 1 hour with status updates every 30 seconds
-    // for (int i = 0; i < 120; i++) { // 120 * 30 = 3600 seconds = 1 hour
-    //     sleep(30);
+    for (int i = 0; i < 120; i++) { // 120 * 30 = 3600 seconds = 1 hour
+        sleep(30);
         
-    //     result = get_remote_worker_status(status_buffer, sizeof(status_buffer));
-    //     if (result == 0) {
-    //         printf("[%d/120] 🟢 Status: %s\n", i + 1, status_buffer);
-    //     } else {
-    //         printf("[%d/120] 🔴 Failed to get status (error: %d)\n", i + 1, result);
-    //     }
+        status_buffer[0] = '\0';
+        result = get_remote_worker_status(status_buffer, sizeof(status_buffer));
+        if (result == 0) {
+            printf("[%d/120] 🟢 Status: %s\n", i + 1, status_buffer);
+        } else {
+            printf("[%d/120] 🔴 Failed to get status (error: %d)\n", i + 1, result);
+        }
         
-    //     // Exit early if status indicates problems
-    //     if (strstr(status_buffer, "stopped") != NULL || 
-    //         strstr(status_buffer, "error") != NULL ||
-    //         strstr(status_buffer, "disconnected") != NULL) {
-    //         printf("❌ Device status indicates problems, exiting early\n");
-    //         break;
-    //     }
-    // }
+        // Exit early if status indicates problems
+        if (result == 0) {
+            if (strstr(status_buffer, "stopped") != NULL || 
+                strstr(status_buffer, "error") != NULL ||
+                strstr(status_buffer, "disconnected") != NULL) {
+                printf("❌ Device status indicates problems, exiting early\n");
+                break;
+            }
+        }
+    }
     
-    printf("\n� Test 8: bping remote worker after monitoring period...\n");
+    printf("\n🧪 Test 8: stopping remote worker after monitoring period...\n");
     result = stop_remote_worker();
     
     if (result == 0) {

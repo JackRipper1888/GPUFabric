@@ -171,3 +171,31 @@ INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level
 VALUES 
     (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1)
 ON CONFLICT (key) DO NOTHING;
+
+-- APK version management
+CREATE TABLE IF NOT EXISTS "public"."apk_versions" (
+    "id" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    "package_name" VARCHAR(255) NOT NULL,
+    "version_name" VARCHAR(64) NOT NULL,
+    "version_code" BIGINT NOT NULL,
+    "download_url" TEXT NOT NULL,
+    "channel" VARCHAR(32) DEFAULT 'stable',
+    "min_os_version" VARCHAR(32),
+    "sha256" CHAR(64),
+    "file_size_bytes" BIGINT,
+    "is_active" BOOLEAN NOT NULL DEFAULT TRUE,
+    "released_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (package_name, version_code),
+    CONSTRAINT apk_versions_version_code_check CHECK (version_code > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_apk_versions_package_name
+ON "public"."apk_versions" (package_name);
+
+CREATE INDEX IF NOT EXISTS idx_apk_versions_package_active
+ON "public"."apk_versions" (package_name, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_apk_versions_released_at
+ON "public"."apk_versions" (released_at DESC);

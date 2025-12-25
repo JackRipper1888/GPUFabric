@@ -91,7 +91,7 @@ impl InferenceGateway {
             return Ok(());
         }
 
-        debug!("Send kafka key-value (request_id, client_id) pair");
+        debug!("Send kafka key-value ({:?}, {chosen_client_id}) pair", request_id);
 
         // Share API: Send kafka key-value (request_id, client_id) pair
         if let Some(request_id_str) = request_id {

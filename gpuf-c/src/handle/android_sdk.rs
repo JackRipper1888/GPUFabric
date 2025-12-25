@@ -8,11 +8,14 @@
 use anyhow::{anyhow, Result};
 
 #[cfg(target_os = "android")]
-use common::{Command, CommandV1, OsType, SystemInfo};
+use common::{ChatMessage, Command, CommandV1, Model, OsType, SystemInfo};
 
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(target_os = "android")]
+use std::ffi::{CStr, CString};
+
 #[cfg(target_os = "android")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "android")]
 use super::{Args, AutoWorker, WorkerHandle};
@@ -28,17 +31,238 @@ use tracing::info;
 #[cfg(target_os = "android")]
 use std::time::Duration;
 
+#[cfg(target_os = "android")]
+fn build_chat_prompt(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let role = m.role.as_str();
+        match role {
+            "system" => {
+                out.push_str("System: ");
+                out.push_str(&m.content);
+                out.push('\n');
+            }
+            "user" => {
+                out.push_str("User: ");
+                out.push_str(&m.content);
+                out.push('\n');
+            }
+            "assistant" => {
+                out.push_str("Assistant: ");
+                out.push_str(&m.content);
+                out.push('\n');
+            }
+            _ => {
+                out.push_str(role);
+                out.push_str(": ");
+                out.push_str(&m.content);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str("Assistant: ");
+    out
+}
+
+#[cfg(target_os = "android")]
+extern "C" {
+    fn llama_get_model(ctx: *const crate::llama_context) -> *const crate::llama_model;
+    fn llama_model_get_vocab(model: *const crate::llama_model) -> *const crate::llama_vocab;
+    fn llama_tokenize(
+        vocab: *const crate::llama_vocab,
+        text: *const std::os::raw::c_char,
+        text_len: i32,
+        tokens: *mut i32,
+        n_tokens_max: i32,
+        add_special: bool,
+        parse_special: bool,
+    ) -> i32;
+    fn llama_model_meta_val_str(
+        model: *const crate::llama_model,
+        key: *const std::os::raw::c_char,
+        buf: *mut std::os::raw::c_char,
+        buf_size: usize,
+    ) -> i32;
+    fn llama_chat_apply_template(
+        tmpl: *const std::os::raw::c_char,
+        chat: *const crate::llama_chat_message,
+        n_msg: usize,
+        add_ass: bool,
+        buf: *mut std::os::raw::c_char,
+        length: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "android")]
+fn count_prompt_tokens(ctx: *mut crate::llama_context, prompt: *const std::os::raw::c_char) -> u32 {
+    if ctx.is_null() || prompt.is_null() {
+        return 0;
+    }
+
+    let model = unsafe { llama_get_model(ctx) };
+    if model.is_null() {
+        return 0;
+    }
+    let vocab = unsafe { llama_model_get_vocab(model) };
+    if vocab.is_null() {
+        return 0;
+    }
+
+    let prompt_len = unsafe { std::ffi::CStr::from_ptr(prompt) }.to_bytes().len();
+
+    let mut tokens: Vec<i32> = vec![0; 512];
+    let mut n = unsafe {
+        llama_tokenize(
+            vocab,
+            prompt,
+            prompt_len as i32,
+            tokens.as_mut_ptr(),
+            tokens.len() as i32,
+            true,
+            true,
+        )
+    };
+    if n < 0 {
+        let needed = (-n) as usize;
+        tokens = vec![0; needed.max(1)];
+        n = unsafe {
+            llama_tokenize(
+                vocab,
+                prompt,
+                prompt_len as i32,
+                tokens.as_mut_ptr(),
+                tokens.len() as i32,
+                true,
+                true,
+            )
+        };
+    }
+
+    if n > 0 { n as u32 } else { 0 }
+}
+
+#[cfg(target_os = "android")]
+fn build_chat_prompt_with_gguf_template(
+    ctx: *mut crate::llama_context,
+    messages: &[ChatMessage],
+) -> Option<String> {
+    if ctx.is_null() {
+        return None;
+    }
+
+    let model = unsafe { llama_get_model(ctx) };
+    if model.is_null() {
+        return None;
+    }
+
+    let key = CString::new("tokenizer.chat_template").ok()?;
+    let mut tmpl_buf = vec![0u8; 8192];
+    let got = unsafe {
+        llama_model_meta_val_str(
+            model,
+            key.as_ptr(),
+            tmpl_buf.as_mut_ptr() as *mut std::os::raw::c_char,
+            tmpl_buf.len(),
+        )
+    };
+    if got <= 0 {
+        return None;
+    }
+
+    let tmpl_cstr = unsafe { CStr::from_ptr(tmpl_buf.as_ptr() as *const std::os::raw::c_char) };
+
+    let mut role_cstrs = Vec::with_capacity(messages.len());
+    let mut content_cstrs = Vec::with_capacity(messages.len());
+    let mut chat_msgs = Vec::with_capacity(messages.len());
+
+    for m in messages {
+        let role = CString::new(m.role.as_str()).ok()?;
+        let content = CString::new(m.content.as_str()).ok()?;
+        chat_msgs.push(crate::llama_chat_message {
+            role: role.as_ptr(),
+            content: content.as_ptr(),
+        });
+        role_cstrs.push(role);
+        content_cstrs.push(content);
+    }
+
+    let needed = unsafe {
+        llama_chat_apply_template(
+            tmpl_cstr.as_ptr(),
+            chat_msgs.as_ptr(),
+            chat_msgs.len(),
+            true,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if needed <= 0 {
+        return None;
+    }
+
+    let mut out = vec![0u8; needed as usize + 1];
+    let written = unsafe {
+        llama_chat_apply_template(
+            tmpl_cstr.as_ptr(),
+            chat_msgs.as_ptr(),
+            chat_msgs.len(),
+            true,
+            out.as_mut_ptr() as *mut std::os::raw::c_char,
+            out.len() as i32,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+
+    let s = unsafe { CStr::from_ptr(out.as_ptr() as *const std::os::raw::c_char) }
+        .to_string_lossy()
+        .to_string();
+    Some(s)
+}
+
+#[cfg(target_os = "android")]
+fn token_should_be_suppressed(token: &str) -> bool {
+    token.contains("<|")
+        || token.contains("<assistant")
+        || token.contains("assistantfinal")
+        || token.contains("analysis")
+        || token.contains("The user is speaking")
+        || token.contains("The assistant should")
+        || token.contains("We need to")
+        || token.contains("Thus produce")
+        || token.contains("Ok produce answer")
+}
+
+#[cfg(target_os = "android")]
+fn derive_model_id_from_path(model_path: &str) -> String {
+    let lower = model_path.to_ascii_lowercase();
+    if lower.contains("llama-3") || lower.contains("llama3") {
+        return "llama3".to_string();
+    }
+
+    let file_name = std::path::Path::new(model_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(model_path);
+
+    file_name
+        .trim_end_matches(".gguf")
+        .trim_end_matches(".bin")
+        .to_string()
+}
+
 /// Get real-time system usage information for heartbeat
 #[cfg(target_os = "android")]
 fn get_realtime_system_usage() -> (u32, u32, u32) {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
-    
+
     // Get CPU usage from /proc/stat
     let cpu_usage = if let Ok(file) = File::open("/proc/stat") {
         let reader = BufReader::new(file);
         let mut cpu_percent = 25u32; // fallback
-        
+
         for line in reader.lines().flatten() {
             if line.starts_with("cpu ") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -50,11 +274,11 @@ fn get_realtime_system_usage() -> (u32, u32, u32) {
                             times.push(time);
                         }
                     }
-                    
+
                     if times.len() >= 4 {
                         let total_time: u64 = times.iter().sum();
                         let idle_time = times[3]; // idle time is the 4th value
-                        
+
                         if total_time > 0 {
                             cpu_percent = ((total_time - idle_time) * 100 / total_time) as u32;
                         }
@@ -67,13 +291,13 @@ fn get_realtime_system_usage() -> (u32, u32, u32) {
     } else {
         25 // fallback
     };
-    
+
     // Get memory usage from /proc/meminfo
     let memory_usage = if let Ok(file) = File::open("/proc/meminfo") {
         let reader = BufReader::new(file);
         let mut total_memory = 0u64;
         let mut available_memory = 0u64;
-        
+
         for line in reader.lines().flatten() {
             if line.starts_with("MemTotal:") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -91,7 +315,7 @@ fn get_realtime_system_usage() -> (u32, u32, u32) {
                 }
             }
         }
-        
+
         if total_memory > 0 && available_memory > 0 {
             let used_memory = total_memory - available_memory;
             ((used_memory * 100) / total_memory) as u32
@@ -101,10 +325,10 @@ fn get_realtime_system_usage() -> (u32, u32, u32) {
     } else {
         45 // fallback
     };
-    
+
     // Get real disk usage using statvfs syscall
     let disk_usage = read_disk_usage().unwrap_or(60);
-    
+
     (cpu_usage, memory_usage, disk_usage)
 }
 
@@ -116,49 +340,65 @@ static LAST_NETWORK_USAGE: OnceLock<(u64, u64)> = OnceLock::new();
 fn get_network_usage() -> (u64, u64) {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
-    
+
     let mut current_rx = 0u64;
     let mut current_tx = 0u64;
-    
+
     // Read current network statistics
     if let Ok(file) = File::open("/proc/net/dev") {
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines().flatten() {
             // Skip header lines
             if line.contains("Inter-") || line.contains("face") {
                 continue;
             }
-            
+
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 17 {
                 let interface_name = parts[0].trim_end_matches(':');
-                
+
                 // Skip loopback and virtual interfaces
-                if interface_name == "lo" || interface_name.starts_with("dummy") || 
-                   interface_name.starts_with("virbr") || interface_name.starts_with("docker") {
+                if interface_name == "lo"
+                    || interface_name.starts_with("dummy")
+                    || interface_name.starts_with("virbr")
+                    || interface_name.starts_with("docker")
+                {
                     continue;
                 }
-                
+
                 // Parse rx and tx bytes (columns 1 and 9)
-                if let (Ok(rx_bytes), Ok(tx_bytes)) = (parts[1].parse::<u64>(), parts[9].parse::<u64>()) {
+                if let (Ok(rx_bytes), Ok(tx_bytes)) =
+                    (parts[1].parse::<u64>(), parts[9].parse::<u64>())
+                {
                     current_rx += rx_bytes;
                     current_tx += tx_bytes;
                 }
             }
         }
     }
-    
+
     // Get last recorded values
-    let (last_rx, last_tx) = LAST_NETWORK_USAGE.get().copied().unwrap_or((current_rx, current_tx));
-    
+    let (last_rx, last_tx) = LAST_NETWORK_USAGE
+        .get()
+        .copied()
+        .unwrap_or((current_rx, current_tx));
+
     // Update last values for next call
     let _ = LAST_NETWORK_USAGE.set((current_rx, current_tx));
-    
+
     // Calculate incremental usage (in bytes)
-    let incremental_rx = if current_rx >= last_rx { current_rx - last_rx } else { 0 };
-    let incremental_tx = if current_tx >= last_tx { current_tx - last_tx } else { 0 };
-    
+    let incremental_rx = if current_rx >= last_rx {
+        current_rx - last_rx
+    } else {
+        0
+    };
+    let incremental_tx = if current_tx >= last_tx {
+        current_tx - last_tx
+    } else {
+        0
+    };
+
     // Return raw bytes for more precise network monitoring
     (incremental_rx, incremental_tx)
 }
@@ -168,33 +408,33 @@ fn get_network_usage() -> (u64, u64) {
 fn read_disk_usage() -> Option<u32> {
     use std::ffi::CString;
     use std::mem;
-    
+
     // Try to get disk usage for the data partition
     let path = CString::new("/data").ok()?;
-    
+
     // statvfs structure for Android
     #[repr(C)]
     struct Statvfs {
-        f_bsize: u64,    // File system block size
-        f_frsize: u64,   // Fragment size
-        f_blocks: u64,   // Total blocks
-        f_bfree: u64,    // Free blocks
-        f_bavail: u64,   // Available blocks
-        f_files: u64,    // Total file nodes
-        f_ffree: u64,    // Free file nodes
-        f_favail: u64,   // Available file nodes
-        f_fsid: u64,     // File system ID
-        f_flag: u64,     // Mount flags
-        f_namemax: u64,  // Maximum filename length
+        f_bsize: u64,   // File system block size
+        f_frsize: u64,  // Fragment size
+        f_blocks: u64,  // Total blocks
+        f_bfree: u64,   // Free blocks
+        f_bavail: u64,  // Available blocks
+        f_files: u64,   // Total file nodes
+        f_ffree: u64,   // Free file nodes
+        f_favail: u64,  // Available file nodes
+        f_fsid: u64,    // File system ID
+        f_flag: u64,    // Mount flags
+        f_namemax: u64, // Maximum filename length
     }
-    
+
     extern "C" {
         fn statvfs(path: *const std::os::raw::c_char, buf: *mut Statvfs) -> std::os::raw::c_int;
     }
-    
+
     let mut stat = unsafe { mem::zeroed::<Statvfs>() };
     let result = unsafe { statvfs(path.as_ptr(), &mut stat) };
-    
+
     if result == 0 {
         if stat.f_blocks > 0 {
             let used_blocks = stat.f_blocks - stat.f_bavail;
@@ -208,7 +448,8 @@ fn read_disk_usage() -> Option<u32> {
     }
 }
 /// Global TCP connection storage for Android background tasks
-pub static ANDROID_TCP_STREAM: OnceLock<Mutex<Option<Arc<Mutex<std::net::TcpStream>>>>> = OnceLock::new();
+pub static ANDROID_TCP_STREAM: OnceLock<Mutex<Option<Arc<Mutex<std::net::TcpStream>>>>> =
+    OnceLock::new();
 
 /// Global server address storage for creating separate connections
 pub static ANDROID_SERVER_ADDR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -224,8 +465,14 @@ static ANDROID_ACTIVE_TASK_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new()
 
 #[cfg(target_os = "android")]
 /// Global worker task handle for background operations
-static GLOBAL_WORKER_HANDLES: OnceLock<Mutex<Option<(std::thread::JoinHandle<()>, std::thread::JoinHandle<Result<()>>)>>> =
-    OnceLock::new();
+static GLOBAL_WORKER_HANDLES: OnceLock<
+    Mutex<
+        Option<(
+            std::thread::JoinHandle<()>,
+            std::thread::JoinHandle<Result<()>>,
+        )>,
+    >,
+> = OnceLock::new();
 
 /// Global stop signal for background threads
 #[cfg(target_os = "android")]
@@ -448,7 +695,10 @@ pub async fn start_worker_tasks() -> Result<()> {
             );
 
             // Send heartbeat using independent TCP connection to avoid lock conflicts
-            let server_addr = match ANDROID_SERVER_ADDR.get().and_then(|m| m.lock().ok().and_then(|g| g.clone())) {
+            let server_addr = match ANDROID_SERVER_ADDR
+                .get()
+                .and_then(|m| m.lock().ok().and_then(|g| g.clone()))
+            {
                 Some(addr) => addr,
                 None => {
                     eprintln!("❌ Android: Server address not stored, skipping heartbeat");
@@ -501,16 +751,17 @@ pub async fn start_worker_tasks() -> Result<()> {
             // Close the connection after sending heartbeat
             drop(heartbeat_stream);
             println!("🔧 Android: Heartbeat connection closed, starting next iteration...");
-            
+
             // Sleep with periodic stop signal checks
-            for _ in 0..120 { // 120 seconds / 1 second intervals
+            for _ in 0..120 {
+                // 120 seconds / 1 second intervals
                 thread::sleep(Duration::from_secs(1));
                 if heartbeat_stop_signal.load(Ordering::Relaxed) {
                     println!("🔧 Android: Heartbeat thread received stop signal during sleep");
                     break;
                 }
             }
-            
+
             // Check stop signal after sleep
             if heartbeat_stop_signal.load(Ordering::Relaxed) {
                 println!("🔧 Android: Heartbeat thread received stop signal after sleep");
@@ -533,7 +784,7 @@ pub async fn start_worker_tasks() -> Result<()> {
                 println!("🔧 Android: Handler thread received stop signal");
                 break;
             }
-            
+
             let mut stream = handler_stream.lock().unwrap();
 
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -555,6 +806,32 @@ pub async fn start_worker_tasks() -> Result<()> {
                                 } => {
                                     if success {
                                         println!("✅ Android: Login successful");
+                                        let client_id = ANDROID_CLIENT_ID
+                                            .get()
+                                            .and_then(|m| m.lock().ok().and_then(|g| *g))
+                                            .unwrap_or([0u8; 16]);
+                                        let current_model_path = crate::MODEL_STATUS
+                                            .lock()
+                                            .ok()
+                                            .and_then(|s| s.current_model.clone())
+                                            .unwrap_or_else(|| "android".to_string());
+                                        let model_id =
+                                            derive_model_id_from_path(&current_model_path);
+                                        let models = vec![Model {
+                                            id: model_id,
+                                            object: "model".to_string(),
+                                            created: 0,
+                                            owned_by: "android".to_string(),
+                                        }];
+                                        let model_status = CommandV1::ModelStatus {
+                                            client_id,
+                                            models,
+                                            auto_models_device: Vec::new(),
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(model_status),
+                                        );
                                         if !pods_model.is_empty() {
                                             println!(
                                                 "🔧 Android: Received {} models",
@@ -605,10 +882,13 @@ pub async fn start_worker_tasks() -> Result<()> {
                                     println!("⚙️ Android: Parameters: max_tokens={}, temp={}, top_k={}, top_p={}", 
                                                              max_tokens, temperature, top_k, top_p);
 
-                                    use crate::{gpuf_start_generation_async, GLOBAL_CONTEXT_PTR, GLOBAL_INFERENCE_MUTEX};
+                                    use crate::llama_context;
+                                    use crate::{
+                                        gpuf_start_generation_async, GLOBAL_CONTEXT_PTR,
+                                        GLOBAL_INFERENCE_MUTEX,
+                                    };
                                     use std::ffi::CString;
                                     use std::os::raw::c_void;
-    use crate::llama_context;
                                     let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
                                     if context_ptr.is_null() {
                                         let result_command = CommandV1::InferenceResultChunk {
@@ -616,11 +896,17 @@ pub async fn start_worker_tasks() -> Result<()> {
                                             seq: 0,
                                             delta: String::new(),
                                             done: true,
-                                            error: Some("Model not loaded - please load a model first".to_string()),
+                                            error: Some(
+                                                "Model not loaded - please load a model first"
+                                                    .to_string(),
+                                            ),
                                             prompt_tokens: 0,
                                             completion_tokens: 0,
                                         };
-                                        let _ = common::write_command_sync(&mut *stream, &Command::V1(result_command));
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(result_command),
+                                        );
                                         continue;
                                     }
 
@@ -646,7 +932,10 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 prompt_tokens: 0,
                                                 completion_tokens: 0,
                                             };
-                                            let _ = common::write_command_sync(&mut *stream, &Command::V1(result_command));
+                                            let _ = common::write_command_sync(
+                                                &mut *stream,
+                                                &Command::V1(result_command),
+                                            );
                                             continue;
                                         }
                                     };
@@ -665,6 +954,7 @@ pub async fn start_worker_tasks() -> Result<()> {
                                             max_bytes: usize,
                                             prompt_tokens: u32,
                                             completion_tokens: u32,
+                                            suppress: bool,
                                         }
 
                                         extern "C" fn on_token(
@@ -675,14 +965,35 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 return;
                                             }
 
-                                            let state = unsafe { &mut *(user_data as *mut TokenCallbackState) };
-                                            let token_str = unsafe { std::ffi::CStr::from_ptr(token).to_str() };
+                                            let state = unsafe {
+                                                &mut *(user_data as *mut TokenCallbackState)
+                                            };
+                                            let token_str =
+                                                unsafe { std::ffi::CStr::from_ptr(token).to_str() };
                                             let Ok(token_str) = token_str else {
                                                 return;
                                             };
 
+                                            if state.suppress {
+                                                if token_str.contains("assistantfinal")
+                                                    || token_str.contains("final")
+                                                {
+                                                    state.suppress = false;
+                                                }
+                                                return;
+                                            }
+
+                                            if token_should_be_suppressed(token_str)
+                                                && state.completion_tokens < 128
+                                            {
+                                                state.suppress = true;
+                                                state.buf.clear();
+                                                return;
+                                            }
+
                                             state.buf.push_str(token_str);
-                                            state.completion_tokens = state.completion_tokens.saturating_add(1);
+                                            state.completion_tokens =
+                                                state.completion_tokens.saturating_add(1);
                                             if state.buf.len() < state.max_bytes {
                                                 return;
                                             }
@@ -694,12 +1005,15 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 delta,
                                                 done: false,
                                                 error: None,
-                                                prompt_tokens: 0,
-                                                completion_tokens: 0,
+                                                prompt_tokens: state.prompt_tokens,
+                                                completion_tokens: state.completion_tokens,
                                             };
                                             state.seq = state.seq.wrapping_add(1);
 
-                                            let _ = common::write_command_sync(&mut state.stream, &Command::V1(chunk));
+                                            let _ = common::write_command_sync(
+                                                &mut state.stream,
+                                                &Command::V1(chunk),
+                                            );
                                         }
 
                                         let _lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
@@ -709,34 +1023,26 @@ pub async fn start_worker_tasks() -> Result<()> {
                                             Err(e) => {
                                                 let err = format!("Invalid prompt: {}", e);
                                                 let mut s = writer_stream;
-                                                let result_command = CommandV1::InferenceResultChunk {
-                                                    task_id: task_id_for_thread.clone(),
-                                                    seq: 0,
-                                                    delta: String::new(),
-                                                    done: true,
-                                                    error: Some(err),
-                                                    prompt_tokens: 0,
-                                                    completion_tokens: 0,
-                                                };
-                                                let _ = common::write_command_sync(&mut s, &Command::V1(result_command));
+                                                let result_command =
+                                                    CommandV1::InferenceResultChunk {
+                                                        task_id: task_id_for_thread.clone(),
+                                                        seq: 0,
+                                                        delta: String::new(),
+                                                        done: true,
+                                                        error: Some(err),
+                                                        prompt_tokens: 0,
+                                                        completion_tokens: 0,
+                                                    };
+                                                let _ = common::write_command_sync(
+                                                    &mut s,
+                                                    &Command::V1(result_command),
+                                                );
                                                 return;
                                             }
                                         };
 
-                                        let prompt_tokens: u32 = {
-                                            // Best-effort: tokenize prompt with llama.cpp vocab
-                                            let mut tokens = [0i32; 512];
-                                            let n = unsafe {
-                                                crate::safe_tokenize(
-                                                    context_ptr,
-                                                    prompt_cstr.as_ptr(),
-                                                    tokens.as_mut_ptr(),
-                                                    512,
-                                                    true,
-                                                )
-                                            };
-                                            if n > 0 { n as u32 } else { 0 }
-                                        };
+                                        let prompt_tokens: u32 =
+                                            count_prompt_tokens(context_ptr, prompt_cstr.as_ptr());
 
                                         let mut cb_state = TokenCallbackState {
                                             stream: writer_stream,
@@ -746,9 +1052,10 @@ pub async fn start_worker_tasks() -> Result<()> {
                                             max_bytes: 8,
                                             prompt_tokens,
                                             completion_tokens: 0,
+                                            suppress: false,
                                         };
 
-                                        let _ = unsafe {
+                                        let completion_tokens_i32 = unsafe {
                                             gpuf_start_generation_async(
                                                 context_ptr,
                                                 prompt_cstr.as_ptr(),
@@ -758,9 +1065,14 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 top_p,
                                                 repeat_penalty,
                                                 Some(on_token),
-                                                (&mut cb_state as *mut TokenCallbackState) as *mut c_void,
+                                                (&mut cb_state as *mut TokenCallbackState)
+                                                    as *mut c_void,
                                             )
                                         };
+
+                                        if completion_tokens_i32 > 0 {
+                                            cb_state.completion_tokens = completion_tokens_i32 as u32;
+                                        }
 
                                         if !cb_state.buf.is_empty() {
                                             let delta = std::mem::take(&mut cb_state.buf);
@@ -770,11 +1082,14 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 delta,
                                                 done: false,
                                                 error: None,
-                                                prompt_tokens: 0,
-                                                completion_tokens: 0,
+                                                prompt_tokens: cb_state.prompt_tokens,
+                                                completion_tokens: cb_state.completion_tokens,
                                             };
                                             cb_state.seq = cb_state.seq.wrapping_add(1);
-                                            let _ = common::write_command_sync(&mut cb_state.stream, &Command::V1(chunk));
+                                            let _ = common::write_command_sync(
+                                                &mut cb_state.stream,
+                                                &Command::V1(chunk),
+                                            );
                                         }
 
                                         let done_chunk = CommandV1::InferenceResultChunk {
@@ -786,7 +1101,10 @@ pub async fn start_worker_tasks() -> Result<()> {
                                             prompt_tokens: cb_state.prompt_tokens,
                                             completion_tokens: cb_state.completion_tokens,
                                         };
-                                        let _ = common::write_command_sync(&mut cb_state.stream, &Command::V1(done_chunk));
+                                        let _ = common::write_command_sync(
+                                            &mut cb_state.stream,
+                                            &Command::V1(done_chunk),
+                                        );
 
                                         {
                                             let mut active = ANDROID_ACTIVE_TASK_ID
@@ -794,16 +1112,281 @@ pub async fn start_worker_tasks() -> Result<()> {
                                                 .expect("ANDROID_ACTIVE_TASK_ID is set")
                                                 .lock()
                                                 .unwrap();
-                                            if active.as_deref() == Some(task_id_for_thread.as_str()) {
+                                            if active.as_deref()
+                                                == Some(task_id_for_thread.as_str())
+                                            {
                                                 *active = None;
                                             }
                                         }
 
-                                        let execution_time = start_time.elapsed().as_millis() as u64;
+                                        let execution_time =
+                                            start_time.elapsed().as_millis() as u64;
                                         println!(
                                             "✅ Android: Streaming inference finished in {}ms",
                                             execution_time
                                         );
+                                    });
+                                }
+
+                                CommandV1::ChatInferenceTask {
+                                    task_id,
+                                    model: _,
+                                    messages,
+                                    max_tokens,
+                                    temperature,
+                                    top_k,
+                                    top_p,
+                                    repeat_penalty,
+                                    repeat_last_n: _,
+                                    min_keep: _,
+                                } => {
+                                    println!(
+                                        "🔧 Android: Received chat inference task: {}",
+                                        task_id
+                                    );
+
+                                    use crate::llama_context;
+                                    use crate::{
+                                        gpuf_start_generation_async, GLOBAL_CONTEXT_PTR,
+                                        GLOBAL_INFERENCE_MUTEX,
+                                    };
+                                    use std::ffi::CString;
+                                    use std::os::raw::c_void;
+                                    let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
+                                    if context_ptr.is_null() {
+                                        let result_command = CommandV1::InferenceResultChunk {
+                                            task_id: task_id.clone(),
+                                            seq: 0,
+                                            delta: String::new(),
+                                            done: true,
+                                            error: Some(
+                                                "Model not loaded - please load a model first"
+                                                    .to_string(),
+                                            ),
+                                            prompt_tokens: 0,
+                                            completion_tokens: 0,
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(result_command),
+                                        );
+                                        continue;
+                                    }
+
+                                    let prompt = build_chat_prompt_with_gguf_template(
+                                        context_ptr,
+                                        &messages,
+                                    )
+                                    .unwrap_or_else(|| build_chat_prompt(&messages));
+                                    println!("📝 Android: Prompt: {}", prompt);
+
+                                    {
+                                        let mut active = ANDROID_ACTIVE_TASK_ID
+                                            .get()
+                                            .expect("ANDROID_ACTIVE_TASK_ID is set")
+                                            .lock()
+                                            .unwrap();
+                                        *active = Some(task_id.clone());
+                                    }
+
+                                    let writer_stream = match stream.try_clone() {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            let err = format!("Failed to clone TCP stream: {}", e);
+                                            let result_command = CommandV1::InferenceResultChunk {
+                                                task_id: task_id.clone(),
+                                                seq: 0,
+                                                delta: String::new(),
+                                                done: true,
+                                                error: Some(err.clone()),
+                                                prompt_tokens: 0,
+                                                completion_tokens: 0,
+                                            };
+                                            let _ = common::write_command_sync(
+                                                &mut *stream,
+                                                &Command::V1(result_command),
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                    let task_id_for_thread = task_id.clone();
+                                    let prompt_for_thread = prompt.clone();
+                                    let context_ptr_usize = context_ptr as usize;
+                                    std::thread::spawn(move || {
+                                        let context_ptr = context_ptr_usize as *mut llama_context;
+                                        #[repr(C)]
+                                        struct TokenCallbackState {
+                                            stream: std::net::TcpStream,
+                                            task_id: String,
+                                            seq: u32,
+                                            buf: String,
+                                            max_bytes: usize,
+                                            prompt_tokens: u32,
+                                            completion_tokens: u32,
+                                            suppress: bool,
+                                        }
+
+                                        extern "C" fn on_token(
+                                            token: *const std::os::raw::c_char,
+                                            user_data: *mut c_void,
+                                        ) {
+                                            if token.is_null() || user_data.is_null() {
+                                                return;
+                                            }
+
+                                            let state = unsafe {
+                                                &mut *(user_data as *mut TokenCallbackState)
+                                            };
+                                            let token_str =
+                                                unsafe { std::ffi::CStr::from_ptr(token).to_str() };
+                                            let Ok(token_str) = token_str else {
+                                                return;
+                                            };
+
+                                            if state.suppress {
+                                                if token_str.contains("assistantfinal")
+                                                    || token_str.contains("final")
+                                                {
+                                                    state.suppress = false;
+                                                }
+                                                return;
+                                            }
+
+                                            if token_should_be_suppressed(token_str)
+                                                && state.completion_tokens < 128
+                                            {
+                                                state.suppress = true;
+                                                state.buf.clear();
+                                                return;
+                                            }
+
+                                            state.buf.push_str(token_str);
+                                            state.completion_tokens =
+                                                state.completion_tokens.saturating_add(1);
+                                            if state.buf.len() < state.max_bytes {
+                                                return;
+                                            }
+
+                                            let delta = std::mem::take(&mut state.buf);
+                                            let chunk = CommandV1::InferenceResultChunk {
+                                                task_id: state.task_id.clone(),
+                                                seq: state.seq,
+                                                delta,
+                                                done: false,
+                                                error: None,
+                                                prompt_tokens: state.prompt_tokens,
+                                                completion_tokens: state.completion_tokens,
+                                            };
+                                            state.seq = state.seq.wrapping_add(1);
+
+                                            let _ = common::write_command_sync(
+                                                &mut state.stream,
+                                                &Command::V1(chunk),
+                                            );
+                                        }
+
+                                        let _lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
+                                        let prompt_cstr = match CString::new(prompt_for_thread) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                let err = format!("Invalid prompt: {}", e);
+                                                let mut s = writer_stream;
+                                                let result_command =
+                                                    CommandV1::InferenceResultChunk {
+                                                        task_id: task_id_for_thread.clone(),
+                                                        seq: 0,
+                                                        delta: String::new(),
+                                                        done: true,
+                                                        error: Some(err),
+                                                        prompt_tokens: 0,
+                                                        completion_tokens: 0,
+                                                    };
+                                                let _ = common::write_command_sync(
+                                                    &mut s,
+                                                    &Command::V1(result_command),
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        let prompt_tokens: u32 =
+                                            count_prompt_tokens(context_ptr, prompt_cstr.as_ptr());
+
+                                        let mut cb_state = TokenCallbackState {
+                                            stream: writer_stream,
+                                            task_id: task_id_for_thread.clone(),
+                                            seq: 0,
+                                            buf: String::new(),
+                                            max_bytes: 8,
+                                            prompt_tokens,
+                                            completion_tokens: 0,
+                                            suppress: false,
+                                        };
+
+                                        let completion_tokens_i32 = unsafe {
+                                            gpuf_start_generation_async(
+                                                context_ptr,
+                                                prompt_cstr.as_ptr(),
+                                                max_tokens as i32,
+                                                temperature,
+                                                top_k as i32,
+                                                top_p,
+                                                repeat_penalty,
+                                                Some(on_token),
+                                                (&mut cb_state as *mut TokenCallbackState)
+                                                    as *mut c_void,
+                                            )
+                                        };
+
+                                        if completion_tokens_i32 > 0 {
+                                            cb_state.completion_tokens = completion_tokens_i32 as u32;
+                                        }
+
+                                        if !cb_state.buf.is_empty() {
+                                            let delta = std::mem::take(&mut cb_state.buf);
+                                            let chunk = CommandV1::InferenceResultChunk {
+                                                task_id: task_id_for_thread.clone(),
+                                                seq: cb_state.seq,
+                                                delta,
+                                                done: false,
+                                                error: None,
+                                                prompt_tokens: cb_state.prompt_tokens,
+                                                completion_tokens: cb_state.completion_tokens,
+                                            };
+                                            cb_state.seq = cb_state.seq.wrapping_add(1);
+                                            let _ = common::write_command_sync(
+                                                &mut cb_state.stream,
+                                                &Command::V1(chunk),
+                                            );
+                                        }
+
+                                        let done_chunk = CommandV1::InferenceResultChunk {
+                                            task_id: task_id_for_thread.clone(),
+                                            seq: cb_state.seq,
+                                            delta: String::new(),
+                                            done: true,
+                                            error: None,
+                                            prompt_tokens: cb_state.prompt_tokens,
+                                            completion_tokens: cb_state.completion_tokens,
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut cb_state.stream,
+                                            &Command::V1(done_chunk),
+                                        );
+
+                                        {
+                                            let mut active = ANDROID_ACTIVE_TASK_ID
+                                                .get()
+                                                .expect("ANDROID_ACTIVE_TASK_ID is set")
+                                                .lock()
+                                                .unwrap();
+                                            if active.as_deref()
+                                                == Some(task_id_for_thread.as_str())
+                                            {
+                                                *active = None;
+                                            }
+                                        }
                                     });
                                 }
 
@@ -838,7 +1421,10 @@ pub async fn start_worker_tasks() -> Result<()> {
                 Err(e) => {
                     // If the read timed out, loop again to re-check stop signal
                     if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
-                        if matches!(ioe.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
+                        if matches!(
+                            ioe.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) {
                             drop(stream);
                             continue;
                         }
@@ -868,8 +1454,8 @@ pub async fn start_worker_tasks() -> Result<()> {
 pub async fn start_worker_tasks_with_callback_ptr(
     callback: Option<extern "C" fn(*const std::ffi::c_char, *mut std::ffi::c_void)>,
 ) -> Result<()> {
-    use std::thread;
     use std::ffi::CString;
+    use std::thread;
 
     info!("🔧 Android: Starting background tasks with native threads and callback...");
 
@@ -899,7 +1485,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 Ok(s) => s,
                 Err(_) => return,
             };
-            
+
             // Call the C callback function
             unsafe {
                 callback_fn(combined_cstr.as_ptr(), std::ptr::null_mut());
@@ -914,9 +1500,11 @@ pub async fn start_worker_tasks_with_callback_ptr(
     let (devices_info, device_count) = crate::util::system_info::collect_device_info()
         .await
         .map_err(|e| anyhow!("Failed to collect device info: {}", e))?;
-    
-    println!("✅ Android: Device info collected - {} devices, total memory: {}GB", 
-             devices_info.num, devices_info.memtotal_gb);
+
+    println!(
+        "✅ Android: Device info collected - {} devices, total memory: {}GB",
+        devices_info.num, devices_info.memtotal_gb
+    );
 
     // Get the stored TCP connection from android_login module
     let tcp_stream =
@@ -939,7 +1527,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 println!("🔧 Android: Heartbeat thread received stop signal");
                 break;
             }
-            
+
             println!("🔧 Android: Heartbeat loop - sleeping for 120 seconds...");
 
             println!("💓 Android: Woke up - collecting system info for heartbeat...");
@@ -957,7 +1545,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
 
             // Get real-time system usage information
             let (cpu_usage, memory_usage, disk_usage) = get_realtime_system_usage();
-            
+
             // Get network usage information
             let (network_rx, network_tx) = get_network_usage();
 
@@ -970,7 +1558,10 @@ pub async fn start_worker_tasks_with_callback_ptr(
             );
 
             // Send heartbeat using independent TCP connection to avoid lock conflicts
-            let server_addr = match ANDROID_SERVER_ADDR.get().and_then(|m| m.lock().ok().and_then(|g| g.clone())) {
+            let server_addr = match ANDROID_SERVER_ADDR
+                .get()
+                .and_then(|m| m.lock().ok().and_then(|g| g.clone()))
+            {
                 Some(addr) => addr,
                 None => {
                     eprintln!("❌ Android: Server address not set");
@@ -978,7 +1569,10 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 }
             };
 
-            let control_port = match ANDROID_CONTROL_PORT.get().and_then(|m| m.lock().ok().and_then(|g| *g)) {
+            let control_port = match ANDROID_CONTROL_PORT
+                .get()
+                .and_then(|m| m.lock().ok().and_then(|g| *g))
+            {
                 Some(port) => port,
                 None => {
                     eprintln!("❌ Android: Control port not set");
@@ -986,25 +1580,27 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 }
             };
 
-            let mut stream = match std::net::TcpStream::connect(format!("{}:{}", server_addr, control_port)) {
-                Ok(s) => {
-                    println!("✅ Android: Connected to server for heartbeat");
-                    s
-                }
-                Err(e) => {
-                    eprintln!("❌ Android: Failed to connect for heartbeat: {}", e);
-                    if let Some(callback_fn) = heartbeat_callback {
-                        let error_msg = match CString::new("ERROR - Failed to connect for heartbeat") {
-                            Ok(s) => s,
-                            Err(_) => continue,
-                        };
-                        unsafe {
-                            callback_fn(error_msg.as_ptr(), std::ptr::null_mut());
-                        }
+            let mut stream =
+                match std::net::TcpStream::connect(format!("{}:{}", server_addr, control_port)) {
+                    Ok(s) => {
+                        println!("✅ Android: Connected to server for heartbeat");
+                        s
                     }
-                    continue;
-                }
-            };
+                    Err(e) => {
+                        eprintln!("❌ Android: Failed to connect for heartbeat: {}", e);
+                        if let Some(callback_fn) = heartbeat_callback {
+                            let error_msg =
+                                match CString::new("ERROR - Failed to connect for heartbeat") {
+                                    Ok(s) => s,
+                                    Err(_) => continue,
+                                };
+                            unsafe {
+                                callback_fn(error_msg.as_ptr(), std::ptr::null_mut());
+                            }
+                        }
+                        continue;
+                    }
+                };
 
             // Create heartbeat command
             let client_id = ANDROID_CLIENT_ID
@@ -1027,16 +1623,15 @@ pub async fn start_worker_tasks_with_callback_ptr(
             };
 
             // Send heartbeat using common library function
-            if let Err(e) =
-                common::write_command_sync(&mut stream, &Command::V1(heartbeat_cmd))
-            {
+            if let Err(e) = common::write_command_sync(&mut stream, &Command::V1(heartbeat_cmd)) {
                 eprintln!("❌ Android: Failed to send heartbeat: {}", e);
                 println!("🔧 Android: Continuing heartbeat loop despite send failure...");
                 if let Some(callback_fn) = heartbeat_callback {
-                    let error_msg = match CString::new(format!("ERROR - Failed to send heartbeat: {}", e)) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
+                    let error_msg =
+                        match CString::new(format!("ERROR - Failed to send heartbeat: {}", e)) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
                     unsafe {
                         callback_fn(error_msg.as_ptr(), std::ptr::null_mut());
                     }
@@ -1057,16 +1652,17 @@ pub async fn start_worker_tasks_with_callback_ptr(
             // Close the connection after sending heartbeat
             drop(stream);
             println!("🔧 Android: Heartbeat connection closed, starting next iteration...");
-            
+
             // Sleep with periodic stop signal checks
-            for _ in 0..120 { // 120 seconds / 1 second intervals
+            for _ in 0..120 {
+                // 120 seconds / 1 second intervals
                 thread::sleep(Duration::from_secs(1));
                 if heartbeat_stop_signal.load(Ordering::Relaxed) {
                     println!("🔧 Android: Heartbeat thread received stop signal during sleep");
                     break;
                 }
             }
-            
+
             // Check stop signal after sleep
             if heartbeat_stop_signal.load(Ordering::Relaxed) {
                 println!("🔧 Android: Heartbeat thread received stop signal after sleep");
@@ -1109,13 +1705,13 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 println!("🔧 Android: Handler thread received stop signal");
                 break;
             }
-            
+
             // Try to get stream lock with timeout to avoid deadlock
             let stream_result = {
                 let stream = handler_stream.try_lock();
                 stream
             };
-            
+
             let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(_) => {
@@ -1154,13 +1750,44 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                 } => {
                                     if success {
                                         println!("✅ Android: Login successful");
+                                        let client_id = ANDROID_CLIENT_ID
+                                            .get()
+                                            .and_then(|m| m.lock().ok().and_then(|g| *g))
+                                            .unwrap_or([0u8; 16]);
+                                        let current_model_path = crate::MODEL_STATUS
+                                            .lock()
+                                            .ok()
+                                            .and_then(|s| s.current_model.clone())
+                                            .unwrap_or_else(|| "android".to_string());
+                                        let model_id =
+                                            derive_model_id_from_path(&current_model_path);
+                                        let models = vec![Model {
+                                            id: model_id,
+                                            object: "model".to_string(),
+                                            created: 0,
+                                            owned_by: "android".to_string(),
+                                        }];
+                                        let model_status = CommandV1::ModelStatus {
+                                            client_id,
+                                            models,
+                                            auto_models_device: Vec::new(),
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(model_status),
+                                        );
                                         if let Some(callback_fn) = handler_callback {
-                                            let success_msg = match CString::new("LOGIN_SUCCESS - Login successful") {
+                                            let success_msg = match CString::new(
+                                                "LOGIN_SUCCESS - Login successful",
+                                            ) {
                                                 Ok(s) => s,
                                                 Err(_) => continue,
                                             };
                                             unsafe {
-                                                callback_fn(success_msg.as_ptr(), std::ptr::null_mut());
+                                                callback_fn(
+                                                    success_msg.as_ptr(),
+                                                    std::ptr::null_mut(),
+                                                );
                                             }
                                         }
                                         if !pods_model.is_empty() {
@@ -1183,7 +1810,10 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 Err(_) => break,
                                             };
                                             unsafe {
-                                                callback_fn(error_msg.as_ptr(), std::ptr::null_mut());
+                                                callback_fn(
+                                                    error_msg.as_ptr(),
+                                                    std::ptr::null_mut(),
+                                                );
                                             }
                                         }
                                         break;
@@ -1199,18 +1829,26 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 Err(_) => continue,
                                             };
                                             unsafe {
-                                                callback_fn(error_msg.as_ptr(), std::ptr::null_mut());
+                                                callback_fn(
+                                                    error_msg.as_ptr(),
+                                                    std::ptr::null_mut(),
+                                                );
                                             }
                                         }
                                     } else {
                                         println!("✅ Android: Pull model successful");
                                         if let Some(callback_fn) = handler_callback {
-                                            let success_msg = match CString::new("PULL_MODEL_SUCCESS - Pull model successful") {
+                                            let success_msg = match CString::new(
+                                                "PULL_MODEL_SUCCESS - Pull model successful",
+                                            ) {
                                                 Ok(s) => s,
                                                 Err(_) => continue,
                                             };
                                             unsafe {
-                                                callback_fn(success_msg.as_ptr(), std::ptr::null_mut());
+                                                callback_fn(
+                                                    success_msg.as_ptr(),
+                                                    std::ptr::null_mut(),
+                                                );
                                             }
                                         }
                                         if !pods_model.is_empty() {
@@ -1243,15 +1881,22 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                              max_tokens, temperature, top_k, top_p);
 
                                     // Invoke callback for inference task start
-                                    invoke_callback("INFERENCE_START", &format!("Task: {}", task_id));
+                                    invoke_callback(
+                                        "INFERENCE_START",
+                                        &format!("Task: {}", task_id),
+                                    );
 
-                                    use crate::{gpuf_start_generation_async, GLOBAL_CONTEXT_PTR, GLOBAL_INFERENCE_MUTEX};
+                                    use crate::llama_context;
+                                    use crate::{
+                                        gpuf_start_generation_async, GLOBAL_CONTEXT_PTR,
+                                        GLOBAL_INFERENCE_MUTEX,
+                                    };
                                     use std::ffi::CString;
                                     use std::os::raw::c_void;
-                                    use crate::llama_context;
                                     let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
                                     if context_ptr.is_null() {
-                                        let err = "Model not loaded - please load a model first".to_string();
+                                        let err = "Model not loaded - please load a model first"
+                                            .to_string();
                                         let result_command = CommandV1::InferenceResultChunk {
                                             task_id: task_id.clone(),
                                             seq: 0,
@@ -1261,8 +1906,14 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                             prompt_tokens: 0,
                                             completion_tokens: 0,
                                         };
-                                        let _ = common::write_command_sync(&mut *stream, &Command::V1(result_command));
-                                        invoke_callback("INFERENCE_FAILED", &format!("Task: {} Error: {}", task_id, err));
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(result_command),
+                                        );
+                                        invoke_callback(
+                                            "INFERENCE_FAILED",
+                                            &format!("Task: {} Error: {}", task_id, err),
+                                        );
                                         continue;
                                     }
 
@@ -1288,8 +1939,14 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 prompt_tokens: 0,
                                                 completion_tokens: 0,
                                             };
-                                            let _ = common::write_command_sync(&mut *stream, &Command::V1(result_command));
-                                            invoke_callback("INFERENCE_FAILED", &format!("Task: {} Error: {}", task_id, err));
+                                            let _ = common::write_command_sync(
+                                                &mut *stream,
+                                                &Command::V1(result_command),
+                                            );
+                                            invoke_callback(
+                                                "INFERENCE_FAILED",
+                                                &format!("Task: {} Error: {}", task_id, err),
+                                            );
                                             continue;
                                         }
                                     };
@@ -1306,6 +1963,9 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                             seq: u32,
                                             buf: String,
                                             max_bytes: usize,
+                                            prompt_tokens: u32,
+                                            completion_tokens: u32,
+                                            suppress: bool,
                                         }
 
                                         extern "C" fn on_token(
@@ -1316,13 +1976,35 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 return;
                                             }
 
-                                            let state = unsafe { &mut *(user_data as *mut TokenCallbackState) };
-                                            let token_str = unsafe { std::ffi::CStr::from_ptr(token).to_str() };
+                                            let state = unsafe {
+                                                &mut *(user_data as *mut TokenCallbackState)
+                                            };
+                                            let token_str =
+                                                unsafe { std::ffi::CStr::from_ptr(token).to_str() };
                                             let Ok(token_str) = token_str else {
                                                 return;
                                             };
 
+                                            if state.suppress {
+                                                if token_str.contains("assistantfinal")
+                                                    || token_str.contains("final")
+                                                {
+                                                    state.suppress = false;
+                                                }
+                                                return;
+                                            }
+
+                                            if token_should_be_suppressed(token_str)
+                                                && state.completion_tokens < 128
+                                            {
+                                                state.suppress = true;
+                                                state.buf.clear();
+                                                return;
+                                            }
+
                                             state.buf.push_str(token_str);
+                                            state.completion_tokens =
+                                                state.completion_tokens.saturating_add(1);
                                             if state.buf.len() < state.max_bytes {
                                                 return;
                                             }
@@ -1334,12 +2016,15 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 delta,
                                                 done: false,
                                                 error: None,
-                                                prompt_tokens: 0,
-                                                completion_tokens: 0,
+                                                prompt_tokens: state.prompt_tokens,
+                                                completion_tokens: state.completion_tokens,
                                             };
                                             state.seq = state.seq.wrapping_add(1);
 
-                                            let _ = common::write_command_sync(&mut state.stream, &Command::V1(chunk));
+                                            let _ = common::write_command_sync(
+                                                &mut state.stream,
+                                                &Command::V1(chunk),
+                                            );
                                         }
 
                                         let _lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
@@ -1349,20 +2034,33 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                             Err(e) => {
                                                 let err = format!("Invalid prompt: {}", e);
                                                 let mut s = writer_stream;
-                                                let result_command = CommandV1::InferenceResultChunk {
-                                                    task_id: task_id_for_thread.clone(),
-                                                    seq: 0,
-                                                    delta: String::new(),
-                                                    done: true,
-                                                    error: Some(err.clone()),
-                                                    prompt_tokens: 0,
-                                                    completion_tokens: 0,
-                                                };
-                                                let _ = common::write_command_sync(&mut s, &Command::V1(result_command));
-                                                invoke_callback("INFERENCE_FAILED", &format!("Task: {} Error: {}", task_id_for_thread, err));
+                                                let result_command =
+                                                    CommandV1::InferenceResultChunk {
+                                                        task_id: task_id_for_thread.clone(),
+                                                        seq: 0,
+                                                        delta: String::new(),
+                                                        done: true,
+                                                        error: Some(err.clone()),
+                                                        prompt_tokens: 0,
+                                                        completion_tokens: 0,
+                                                    };
+                                                let _ = common::write_command_sync(
+                                                    &mut s,
+                                                    &Command::V1(result_command),
+                                                );
+                                                invoke_callback(
+                                                    "INFERENCE_FAILED",
+                                                    &format!(
+                                                        "Task: {} Error: {}",
+                                                        task_id_for_thread, err
+                                                    ),
+                                                );
                                                 return;
                                             }
                                         };
+
+                                        let prompt_tokens: u32 =
+                                            count_prompt_tokens(context_ptr, prompt_cstr.as_ptr());
 
                                         let mut cb_state = TokenCallbackState {
                                             stream: writer_stream,
@@ -1370,9 +2068,12 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                             seq: 0,
                                             buf: String::new(),
                                             max_bytes: 8,
+                                            prompt_tokens,
+                                            completion_tokens: 0,
+                                            suppress: false,
                                         };
 
-                                        let _ = unsafe {
+                                        let completion_tokens_i32 = unsafe {
                                             gpuf_start_generation_async(
                                                 context_ptr,
                                                 prompt_cstr.as_ptr(),
@@ -1382,9 +2083,14 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 top_p,
                                                 repeat_penalty,
                                                 Some(on_token),
-                                                (&mut cb_state as *mut TokenCallbackState) as *mut c_void,
+                                                (&mut cb_state as *mut TokenCallbackState)
+                                                    as *mut c_void,
                                             )
                                         };
+
+                                        if completion_tokens_i32 > 0 {
+                                            cb_state.completion_tokens = completion_tokens_i32 as u32;
+                                        }
 
                                         if !cb_state.buf.is_empty() {
                                             let delta = std::mem::take(&mut cb_state.buf);
@@ -1394,11 +2100,14 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 delta,
                                                 done: false,
                                                 error: None,
-                                                prompt_tokens: 0,
-                                                completion_tokens: 0,
+                                                prompt_tokens: cb_state.prompt_tokens,
+                                                completion_tokens: cb_state.completion_tokens,
                                             };
                                             cb_state.seq = cb_state.seq.wrapping_add(1);
-                                            let _ = common::write_command_sync(&mut cb_state.stream, &Command::V1(chunk));
+                                            let _ = common::write_command_sync(
+                                                &mut cb_state.stream,
+                                                &Command::V1(chunk),
+                                            );
                                         }
 
                                         let done_chunk = CommandV1::InferenceResultChunk {
@@ -1407,10 +2116,13 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                             delta: String::new(),
                                             done: true,
                                             error: None,
-                                            prompt_tokens: 0,
-                                            completion_tokens: 0,
+                                            prompt_tokens: cb_state.prompt_tokens,
+                                            completion_tokens: cb_state.completion_tokens,
                                         };
-                                        let _ = common::write_command_sync(&mut cb_state.stream, &Command::V1(done_chunk));
+                                        let _ = common::write_command_sync(
+                                            &mut cb_state.stream,
+                                            &Command::V1(done_chunk),
+                                        );
 
                                         {
                                             let mut active = ANDROID_ACTIVE_TASK_ID
@@ -1418,17 +2130,317 @@ pub async fn start_worker_tasks_with_callback_ptr(
                                                 .expect("ANDROID_ACTIVE_TASK_ID is set")
                                                 .lock()
                                                 .unwrap();
-                                            if active.as_deref() == Some(task_id_for_thread.as_str()) {
+                                            if active.as_deref()
+                                                == Some(task_id_for_thread.as_str())
+                                            {
                                                 *active = None;
                                             }
                                         }
 
-                                        let execution_time = start_time.elapsed().as_millis() as u64;
+                                        let execution_time =
+                                            start_time.elapsed().as_millis() as u64;
                                         invoke_callback(
                                             "INFERENCE_SUCCESS",
-                                            &format!("Task: {} in {}ms", task_id_for_thread, execution_time),
+                                            &format!(
+                                                "Task: {} in {}ms",
+                                                task_id_for_thread, execution_time
+                                            ),
                                         );
-                                        invoke_callback("SUCCESS", "Inference result sent successfully");
+                                        invoke_callback(
+                                            "SUCCESS",
+                                            "Inference result sent successfully",
+                                        );
+                                    });
+                                }
+
+                                CommandV1::ChatInferenceTask {
+                                    task_id,
+                                    model: _,
+                                    messages,
+                                    max_tokens,
+                                    temperature,
+                                    top_k,
+                                    top_p,
+                                    repeat_penalty,
+                                    repeat_last_n: _,
+                                    min_keep: _,
+                                } => {
+                                    println!(
+                                        "🔧 Android: Received chat inference task: {}",
+                                        task_id
+                                    );
+
+                                    invoke_callback(
+                                        "INFERENCE_START",
+                                        &format!("Task: {}", task_id),
+                                    );
+
+                                    use crate::llama_context;
+                                    use crate::{
+                                        gpuf_start_generation_async, GLOBAL_CONTEXT_PTR,
+                                        GLOBAL_INFERENCE_MUTEX,
+                                    };
+                                    use std::ffi::CString;
+                                    use std::os::raw::c_void;
+
+                                    let context_ptr = GLOBAL_CONTEXT_PTR.load(Ordering::SeqCst);
+                                    if context_ptr.is_null() {
+                                        let err =
+                                            "Model not loaded - please load a model first".to_string();
+                                        let result_command = CommandV1::InferenceResultChunk {
+                                            task_id: task_id.clone(),
+                                            seq: 0,
+                                            delta: String::new(),
+                                            done: true,
+                                            error: Some(err.clone()),
+                                            prompt_tokens: 0,
+                                            completion_tokens: 0,
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut *stream,
+                                            &Command::V1(result_command),
+                                        );
+                                        invoke_callback(
+                                            "INFERENCE_FAILED",
+                                            &format!("Task: {} Error: {}", task_id, err),
+                                        );
+                                        continue;
+                                    }
+
+                                    let prompt = build_chat_prompt_with_gguf_template(
+                                        context_ptr,
+                                        &messages,
+                                    )
+                                    .unwrap_or_else(|| build_chat_prompt(&messages));
+
+                                    {
+                                        let mut active = ANDROID_ACTIVE_TASK_ID
+                                            .get()
+                                            .expect("ANDROID_ACTIVE_TASK_ID is set")
+                                            .lock()
+                                            .unwrap();
+                                        *active = Some(task_id.clone());
+                                    }
+
+                                    let writer_stream = match stream.try_clone() {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            let err = format!("Failed to clone TCP stream: {}", e);
+                                            let result_command = CommandV1::InferenceResultChunk {
+                                                task_id: task_id.clone(),
+                                                seq: 0,
+                                                delta: String::new(),
+                                                done: true,
+                                                error: Some(err.clone()),
+                                                prompt_tokens: 0,
+                                                completion_tokens: 0,
+                                            };
+                                            let _ = common::write_command_sync(
+                                                &mut *stream,
+                                                &Command::V1(result_command),
+                                            );
+                                            invoke_callback(
+                                                "INFERENCE_FAILED",
+                                                &format!("Task: {} Error: {}", task_id, err),
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                    let task_id_for_thread = task_id.clone();
+                                    let prompt_for_thread = prompt.clone();
+                                    let context_ptr_usize = context_ptr as usize;
+                                    std::thread::spawn(move || {
+                                        let context_ptr = context_ptr_usize as *mut llama_context;
+
+                                        #[repr(C)]
+                                        struct TokenCallbackState {
+                                            stream: std::net::TcpStream,
+                                            task_id: String,
+                                            seq: u32,
+                                            buf: String,
+                                            max_bytes: usize,
+                                            prompt_tokens: u32,
+                                            completion_tokens: u32,
+                                            suppress: bool,
+                                        }
+
+                                        extern "C" fn on_token(
+                                            token: *const std::os::raw::c_char,
+                                            user_data: *mut c_void,
+                                        ) {
+                                            if token.is_null() || user_data.is_null() {
+                                                return;
+                                            }
+
+                                            let state = unsafe {
+                                                &mut *(user_data as *mut TokenCallbackState)
+                                            };
+                                            let token_str =
+                                                unsafe { std::ffi::CStr::from_ptr(token).to_str() };
+                                            let Ok(token_str) = token_str else {
+                                                return;
+                                            };
+
+                                            if state.suppress {
+                                                if token_str.contains("assistantfinal")
+                                                    || token_str.contains("final")
+                                                {
+                                                    state.suppress = false;
+                                                }
+                                                return;
+                                            }
+
+                                            if token_should_be_suppressed(token_str)
+                                                && state.completion_tokens < 128
+                                            {
+                                                state.suppress = true;
+                                                state.buf.clear();
+                                                return;
+                                            }
+
+                                            state.buf.push_str(token_str);
+                                            state.completion_tokens =
+                                                state.completion_tokens.saturating_add(1);
+                                            if state.buf.len() < state.max_bytes {
+                                                return;
+                                            }
+
+                                            let delta = std::mem::take(&mut state.buf);
+                                            let chunk = CommandV1::InferenceResultChunk {
+                                                task_id: state.task_id.clone(),
+                                                seq: state.seq,
+                                                delta,
+                                                done: false,
+                                                error: None,
+                                                prompt_tokens: state.prompt_tokens,
+                                                completion_tokens: state.completion_tokens,
+                                            };
+                                            state.seq = state.seq.wrapping_add(1);
+
+                                            let _ = common::write_command_sync(
+                                                &mut state.stream,
+                                                &Command::V1(chunk),
+                                            );
+                                        }
+
+                                        let _lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
+                                        let start_time = std::time::Instant::now();
+                                        let prompt_cstr = match CString::new(prompt_for_thread) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                let err = format!("Invalid prompt: {}", e);
+                                                let mut s = writer_stream;
+                                                let result_command =
+                                                    CommandV1::InferenceResultChunk {
+                                                        task_id: task_id_for_thread.clone(),
+                                                        seq: 0,
+                                                        delta: String::new(),
+                                                        done: true,
+                                                        error: Some(err.clone()),
+                                                        prompt_tokens: 0,
+                                                        completion_tokens: 0,
+                                                    };
+                                                let _ = common::write_command_sync(
+                                                    &mut s,
+                                                    &Command::V1(result_command),
+                                                );
+                                                invoke_callback(
+                                                    "INFERENCE_FAILED",
+                                                    &format!(
+                                                        "Task: {} Error: {}",
+                                                        task_id_for_thread, err
+                                                    ),
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        let prompt_tokens: u32 =
+                                            count_prompt_tokens(context_ptr, prompt_cstr.as_ptr());
+
+                                        let mut cb_state = TokenCallbackState {
+                                            stream: writer_stream,
+                                            task_id: task_id_for_thread.clone(),
+                                            seq: 0,
+                                            buf: String::new(),
+                                            max_bytes: 8,
+                                            prompt_tokens,
+                                            completion_tokens: 0,
+                                            suppress: false,
+                                        };
+
+                                        let completion_tokens = unsafe {
+                                            gpuf_start_generation_async(
+                                                context_ptr,
+                                                prompt_cstr.as_ptr(),
+                                                max_tokens as i32,
+                                                temperature,
+                                                top_k as i32,
+                                                top_p,
+                                                repeat_penalty,
+                                                Some(on_token),
+                                                (&mut cb_state as *mut TokenCallbackState)
+                                                    as *mut c_void,
+                                            )
+                                        };
+
+                                        cb_state.completion_tokens = completion_tokens as u32;
+
+                                        if !cb_state.buf.is_empty() {
+                                            let delta = std::mem::take(&mut cb_state.buf);
+                                            let chunk = CommandV1::InferenceResultChunk {
+                                                task_id: task_id_for_thread.clone(),
+                                                seq: cb_state.seq,
+                                                delta,
+                                                done: false,
+                                                error: None,
+                                                prompt_tokens: cb_state.prompt_tokens,
+                                                completion_tokens: cb_state.completion_tokens,
+                                            };
+                                            cb_state.seq = cb_state.seq.wrapping_add(1);
+                                            let _ = common::write_command_sync(
+                                                &mut cb_state.stream,
+                                                &Command::V1(chunk),
+                                            );
+                                        }
+
+                                        let done_chunk = CommandV1::InferenceResultChunk {
+                                            task_id: task_id_for_thread.clone(),
+                                            seq: cb_state.seq,
+                                            delta: String::new(),
+                                            done: true,
+                                            error: None,
+                                            prompt_tokens: cb_state.prompt_tokens,
+                                            completion_tokens: cb_state.completion_tokens,
+                                        };
+                                        let _ = common::write_command_sync(
+                                            &mut cb_state.stream,
+                                            &Command::V1(done_chunk),
+                                        );
+
+                                        {
+                                            let mut active = ANDROID_ACTIVE_TASK_ID
+                                                .get()
+                                                .expect("ANDROID_ACTIVE_TASK_ID is set")
+                                                .lock()
+                                                .unwrap();
+                                            if active.as_deref()
+                                                == Some(task_id_for_thread.as_str())
+                                            {
+                                                *active = None;
+                                            }
+                                        }
+
+                                        let execution_time =
+                                            start_time.elapsed().as_millis() as u64;
+                                        invoke_callback(
+                                            "INFERENCE_SUCCESS",
+                                            &format!(
+                                                "Task: {} in {}ms",
+                                                task_id_for_thread, execution_time
+                                            ),
+                                        );
                                     });
                                 }
 
@@ -1464,7 +2476,12 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 }
                 Err(e) => {
                     if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
-                        if matches!(ioe.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) {
+                        if matches!(
+                            ioe.kind(),
+                            std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::Interrupted
+                        ) {
                             drop(stream);
                             continue;
                         }

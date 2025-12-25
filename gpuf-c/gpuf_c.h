@@ -147,6 +147,11 @@ typedef struct llama_token_data_array {
   bool sorted;
 } llama_token_data_array;
 
+typedef struct llama_chat_message {
+  const char *role;
+  const char *content;
+} llama_chat_message;
+
 typedef struct gpuf_multimodal_model {
   struct llama_model *text_model;
   struct MtmdContext *mtmd_context;
@@ -314,6 +319,13 @@ extern void ggml_backend_load_all(void);
 extern struct llama_model_params llama_model_default_params(void);
 
 extern struct llama_context_params llama_context_default_params(void);
+
+extern int llama_chat_apply_template(const char *tmpl,
+                                     const struct llama_chat_message *chat,
+                                     uintptr_t n_msg,
+                                     bool add_ass,
+                                     char *buf,
+                                     int length);
 
 struct llama_context *gpuf_create_context(struct llama_model *model);
 
@@ -553,6 +565,30 @@ int stop_remote_worker(void);
  * Caller must ensure `buffer` is valid and can hold `buffer_size` bytes
  */
 int get_remote_worker_status(char *buffer, size_t buffer_size);
+
+extern const struct llama_model *llama_get_model(const struct llama_context *ctx);
+
+extern const struct llama_vocab *llama_model_get_vocab(const struct llama_model *model);
+
+extern int32_t llama_tokenize(const struct llama_vocab *vocab,
+                              const char *text,
+                              int32_t text_len,
+                              int32_t *tokens,
+                              int32_t n_tokens_max,
+                              bool add_special,
+                              bool parse_special);
+
+extern int32_t llama_model_meta_val_str(const struct llama_model *model,
+                                        const char *key,
+                                        char *buf,
+                                        uintptr_t buf_size);
+
+extern int32_t llama_chat_apply_template(const char *tmpl,
+                                         const struct llama_chat_message *chat,
+                                         uintptr_t n_msg,
+                                         bool add_ass,
+                                         char *buf,
+                                         int32_t length);
 
 /**
  * Sets the model path for the remote worker (hot swapping support)

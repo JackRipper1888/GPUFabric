@@ -46,7 +46,7 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -151,7 +151,7 @@ impl InferenceScheduler {
             &device_id,
             task_id.clone(),
             request.prompt,
-            request.max_tokens.unwrap_or(100),
+            request.max_tokens.unwrap_or(4090),
             request.temperature.unwrap_or(0.7),
             request.top_k.unwrap_or(40),
             request.top_p.unwrap_or(0.9),
@@ -159,6 +159,119 @@ impl InferenceScheduler {
             request.repeat_last_n.unwrap_or(64),
             request.min_keep.unwrap_or(1),
         ).await {
+            let mut streams = self.pending_streams.lock().await;
+            streams.remove(&task_id);
+            return Err(e);
+        }
+
+        Ok((task_id, device_id, rx))
+    }
+
+    async fn select_best_device_for_model(
+        &self,
+        model_name: &str,
+        allowed_client_ids: Option<&[ClientId]>,
+    ) -> Result<ClientId> {
+        let clients = self.active_clients.lock().await;
+
+        let mut best_device: Option<(ClientId, u16)> = None;
+
+        for (client_id, client_info) in clients.iter() {
+            if let Some(allowed) = allowed_client_ids {
+                if !allowed.iter().any(|id| id == client_id) {
+                    continue;
+                }
+            }
+
+            if !client_info.authed {
+                continue;
+            }
+
+            let Some(models) = &client_info.models else {
+                continue;
+            };
+            if !models.iter().any(|m| m.id == model_name) {
+                continue;
+            }
+
+            let Some(system_info) = &client_info.system_info else {
+                continue;
+            };
+            let total_load: u16 = (system_info.cpu_usage + system_info.memory_usage) as u16;
+
+            match best_device {
+                None => best_device = Some((*client_id, total_load)),
+                Some((_best_id, best_load)) if total_load < best_load => {
+                    best_device = Some((*client_id, total_load))
+                }
+                _ => {}
+            }
+        }
+
+        best_device
+            .map(|(id, _)| id)
+            .ok_or_else(|| anyhow!("No compatible client found for model '{model_name}'"))
+    }
+
+    pub async fn execute_chat_inference_stream(
+        &self,
+        model: String,
+        messages: Vec<ChatMessage>,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+        allowed_client_ids: Option<&[ClientId]>,
+    ) -> Result<(String, ClientId, mpsc::Receiver<StreamEvent>)> {
+        let task_id = Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::channel::<StreamEvent>(128);
+
+        {
+            let mut streams = self.pending_streams.lock().await;
+            streams.insert(task_id.clone(), tx);
+        }
+
+        let device_id = match self
+            .select_best_device_for_model(&model, allowed_client_ids)
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    "No model-compatible device found for model '{}': {}. Falling back to generic device selection.",
+                    model, e
+                );
+                self.select_best_device(allowed_client_ids).await?
+            }
+        };
+        debug!("Selected device {} for model {}", device_id, model);
+        let common_messages = messages
+            .into_iter()
+            .map(|m| common::ChatMessage {
+                role: m.role,
+                content: m.content,
+            })
+            .collect::<Vec<_>>();
+
+        if let Err(e) = self
+            .send_chat_task_to_device(
+                &device_id,
+                task_id.clone(),
+                model,
+                common_messages,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                repeat_penalty,
+                repeat_last_n,
+                min_keep,
+            )
+            .await
+        {
             let mut streams = self.pending_streams.lock().await;
             streams.remove(&task_id);
             return Err(e);
@@ -191,6 +304,57 @@ impl InferenceScheduler {
             task_id: task_id.to_string(),
         };
         let command = Command::V1(cancel);
+        write_command(&mut *writer, &command).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
+    async fn send_chat_task_to_device(
+        &self,
+        device_id: &ClientId,
+        task_id: String,
+        model: String,
+        messages: Vec<common::ChatMessage>,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+    ) -> Result<()> {
+        use common::write_command;
+
+        let mut clients = self.active_clients.lock().await;
+        let client_info = clients
+            .get_mut(device_id)
+            .ok_or_else(|| anyhow!("Device {:?} not found or not connected", device_id))?;
+
+        if !client_info.authed {
+            error!("Device {:?} not authenticated", device_id);
+            return Err(anyhow!("Device {:?} not authenticated", device_id));
+        }
+
+        let mut writer = client_info
+            .writer
+            .try_lock()
+            .map_err(|_| anyhow!("Device {:?} is busy, please try again", device_id))?;
+
+        let chat_task = CommandV1::ChatInferenceTask {
+            task_id: task_id.clone(),
+            model,
+            messages,
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            repeat_penalty,
+            repeat_last_n,
+            min_keep,
+        };
+
+        let command = Command::V1(chat_task);
+        info!("sent chat inference task {} to device {:?} :{:?}", task_id, device_id, command);
         write_command(&mut *writer, &command).await?;
         writer.flush().await?;
         Ok(())
@@ -472,7 +636,7 @@ impl InferenceScheduler {
             &device_id,
             task_id.clone(),
             request.prompt,
-            request.max_tokens.unwrap_or(100),
+            request.max_tokens.unwrap_or(1024),
             request.temperature.unwrap_or(0.7),
             request.top_k.unwrap_or(40),
             request.top_p.unwrap_or(0.9),
@@ -500,9 +664,18 @@ impl InferenceScheduler {
         }
 
         // Wait for result with timeout
-        info!("Waiting for result of task {} with 60s timeout...", task_id);
+        let timeout_secs: u64 = std::env::var("GPUF_INFERENCE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(300);
+
+        info!(
+            "Waiting for result of task {} with {}s timeout...",
+            task_id, timeout_secs
+        );
         match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(timeout_secs),
             receiver
         ).await {
             Ok(Ok(response)) => {
@@ -517,8 +690,8 @@ impl InferenceScheduler {
                 // Clean up pending task on timeout
                 let mut tasks = self.pending_tasks.lock().await;
                 tasks.remove(&task_id);
-                warn!("Task {} timed out after 60 seconds", task_id);
-                Err(anyhow!("Inference task timed out after 60 seconds"))
+                warn!("Task {} timed out after {} seconds", task_id, timeout_secs);
+                Err(anyhow!("Inference task timed out after {} seconds", timeout_secs))
             }
         }
     }
