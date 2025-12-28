@@ -178,7 +178,7 @@ async fn completions(
     }
 
     let start_time = std::time::Instant::now();
-    let max_tokens = request.max_tokens.unwrap_or(256);
+    let max_tokens = request.max_tokens.unwrap_or(1024);
 
     // Simulate text generation
     let text = format!("Generated response for: {} (simulated, max_tokens: {})", &request.prompt[..request.prompt.len().min(50)], max_tokens);

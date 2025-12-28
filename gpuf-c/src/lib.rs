@@ -20,14 +20,59 @@ use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 #[cfg(target_os = "android")]
 use std::os::raw::c_ulonglong;
-#[cfg(target_os = "android")]
-use libc::size_t;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(target_os = "android")]
-use std::io::{self, Write};
-#[cfg(target_os = "android")]
-use libc;
+use std::io::Write;
+use libc::size_t;
+struct Utf8EmitBuffer {
+    buf: Vec<u8>,
+}
+
+impl Utf8EmitBuffer {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    fn push_and_take_valid(&mut self, bytes: &[u8]) -> String {
+        // Filter NULs because they break C strings and aren't useful in text output.
+        self.buf.extend(bytes.iter().copied().filter(|b| *b != 0));
+
+        match std::str::from_utf8(&self.buf) {
+            Ok(s) => {
+                let out = s.to_string();
+                self.buf.clear();
+                out
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to == 0 {
+                    // Avoid unbounded growth if we keep getting bytes that never form UTF-8.
+                    if self.buf.len() > 8192 {
+                        let s = String::from_utf8_lossy(&self.buf).to_string();
+                        self.buf.clear();
+                        return s;
+                    }
+                    return String::new();
+                }
+
+                // Split at a known UTF-8 boundary.
+                let valid = String::from_utf8_lossy(&self.buf[..valid_up_to]).to_string();
+                let rest = self.buf[valid_up_to..].to_vec();
+                self.buf = rest;
+                valid
+            }
+        }
+    }
+
+    fn flush_lossy(&mut self) -> String {
+        if self.buf.is_empty() {
+            return String::new();
+        }
+        let s = String::from_utf8_lossy(&self.buf).to_string();
+        self.buf.clear();
+        s
+    }
+}
 
 // Global Tokio Runtime for async operations
 #[cfg(target_os = "android")]
@@ -66,6 +111,12 @@ pub struct llama_model {
 #[repr(C)]
 pub struct llama_context {
     _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct llama_chat_message {
+    pub role: *const c_char,
+    pub content: *const c_char,
 }
 
 // 🆕 Callback function types for streaming output
@@ -483,6 +534,15 @@ extern "C" {
     fn ggml_backend_load_all();
     fn llama_model_default_params() -> llama_model_params;
     fn llama_context_default_params() -> llama_context_params;
+
+    fn llama_chat_apply_template(
+        tmpl: *const c_char,
+        chat: *const llama_chat_message,
+        n_msg: usize,
+        add_ass: bool,
+        buf: *mut c_char,
+        length: c_int,
+    ) -> c_int;
 }
 
 // ============================================================================
@@ -2805,6 +2865,7 @@ fn generate_multimodal_response_with_callbacks(
         let mut n_past = initial_n_past;
         let mut generated_text = String::new();
         let mut generated_count = 0;
+        let mut utf8_buf = Utf8EmitBuffer::new();
 
         // Generation loop with callbacks
         while generated_count < max_tokens && n_past < n_ctx {
@@ -2836,18 +2897,20 @@ fn generate_multimodal_response_with_callbacks(
             );
 
             if token_len > 0 {
-                let token_str = std::str::from_utf8_unchecked(&token_buf[..token_len as usize]);
-                generated_text.push_str(token_str);
+                let emitted = utf8_buf.push_and_take_valid(&token_buf[..token_len as usize]);
+                if !emitted.is_empty() {
+                    generated_text.push_str(&emitted);
 
-                // 🔑 Call token callback with safety checks
-                if let Some(callback) = on_token {
-                    match CString::new(token_str) {
-                        Ok(token_cstr) => {
-                            callback(user_data, token_cstr.as_ptr(), new_token_id);
-                        }
-                        Err(_) => {
-                            // If CString creation fails, skip this token
-                            println!("⚠️ Warning: Failed to create CString for token");
+                    // 🔑 Call token callback with safety checks
+                    if let Some(callback) = on_token {
+                        match CString::new(emitted.as_str()) {
+                            Ok(token_cstr) => {
+                                callback(user_data, token_cstr.as_ptr(), new_token_id);
+                            }
+                            Err(_) => {
+                                // If CString creation fails (e.g. embedded NUL), skip.
+                                println!("⚠️ Warning: Failed to create CString for token");
+                            }
                         }
                     }
                 }
@@ -2867,6 +2930,11 @@ fn generate_multimodal_response_with_callbacks(
 
         llama_sampler_free(sampler);
         println!("✅ Streaming generation completed: {} tokens", generated_count);
+
+        let tail = utf8_buf.flush_lossy();
+        if !tail.is_empty() {
+            generated_text.push_str(&tail);
+        }
 
         generated_text
     }
@@ -3243,8 +3311,41 @@ pub extern "C" fn gpuf_start_generation_async(
         println!("✅ KV cache cleared for clean generation");
 
         // Tokenize prompt using real llama.cpp tokenizer
-        let mut tokens = [0i32; 512];
-        let token_count = safe_tokenize(ctx, prompt, tokens.as_mut_ptr(), 512, true);
+        let model = llama_get_model(ctx);
+        if model.is_null() {
+            println!("🔍 Early return due to null model");
+            return -1;
+        }
+
+        let vocab = llama_model_get_vocab(model);
+        if vocab.is_null() {
+            println!("🔍 Early return due to null vocab");
+            return -1;
+        }
+
+        let mut tokens: Vec<i32> = vec![0; 512];
+        let mut token_count = llama_tokenize(
+            vocab,
+            prompt,
+            prompt_str.len() as c_int,
+            tokens.as_mut_ptr(),
+            tokens.len() as c_int,
+            true,
+            true,
+        );
+        if token_count < 0 {
+            let needed = (-token_count) as usize;
+            tokens = vec![0; needed.max(1)];
+            token_count = llama_tokenize(
+                vocab,
+                prompt,
+                prompt_str.len() as c_int,
+                tokens.as_mut_ptr(),
+                tokens.len() as c_int,
+                true,
+                true,
+            );
+        }
 
         println!("🔍 After tokenization: token_count={}", token_count);
 
@@ -3253,54 +3354,53 @@ pub extern "C" fn gpuf_start_generation_async(
             return -1;
         }
 
-        // Always start from position 0 for clean generation
-        let current_pos = 0;
-        let mut batch_pos_array = [0i32; 512];
-        let mut logits_array = [0i8; 512]; // Logits request array
-        
-        for i in 0..token_count {
-            batch_pos_array[i as usize] = current_pos + i;
-            // Request logits for the last token only (for sampling)
-            logits_array[i as usize] = if i == token_count - 1 { 1 } else { 0 };
-        }
-
-        println!("🔍 Creating initial batch with {} tokens (logits for last token)", token_count);
-
-        let initial_batch = llama_batch {
-            n_tokens: token_count,
-            token: tokens.as_ptr(),
-            embd: std::ptr::null(),
-            pos: batch_pos_array.as_ptr(),
-            n_seq_id: std::ptr::null(),
-            seq_id: std::ptr::null(),
-            logits: logits_array.as_ptr(), // Request logits for last token
-            all_pos_0: current_pos,
-            all_pos_1: current_pos + token_count - 1,
-            all_seq_id: 0,
+        // Prefill prompt in chunks to respect ctx n_batch (llama.cpp asserts otherwise)
+        let n_batch = {
+            let nb = llama_n_batch(ctx);
+            if nb > 0 { nb } else { 128 }
         };
 
-        println!("🔍 Initial batch created, about to decode...");
+        println!("🔍 Prefill: token_count={}, n_batch={}", token_count, n_batch);
 
-        // Initial decode
-        println!("🔍 About to call llama_decode...");
-        let decode_result = llama_decode(ctx, &initial_batch);
-        println!("🔍 llama_decode returned: {}", decode_result);
-        
-        if decode_result != 0 {
-            println!("🔍 Early return due to decode failure: {}", decode_result);
-            return -1;
+        let mut batch_pos_array = [0i32; 512];
+        let mut logits_array = [0i8; 512];
+
+        let mut n_past: i32 = 0;
+        let mut start: i32 = 0;
+        while start < token_count {
+            let end = std::cmp::min(start + n_batch, token_count);
+            let n = end - start;
+
+            for i in 0..n {
+                batch_pos_array[i as usize] = n_past + i;
+                // Request logits only for the last token of the final chunk
+                logits_array[i as usize] = if end == token_count && i == n - 1 { 1 } else { 0 };
+            }
+
+            let batch = llama_batch {
+                n_tokens: n,
+                token: tokens.as_ptr().add(start as usize),
+                embd: std::ptr::null(),
+                pos: batch_pos_array.as_ptr(),
+                n_seq_id: std::ptr::null(),
+                seq_id: std::ptr::null(),
+                logits: logits_array.as_ptr(),
+                all_pos_0: n_past,
+                all_pos_1: n_past + n - 1,
+                all_seq_id: 0,
+            };
+
+            println!("🔍 Prefill llama_decode: start={}, end={}, n_tokens={}, n_past={}", start, end, n, n_past);
+            let decode_result = llama_decode(ctx, &batch);
+            if decode_result != 0 {
+                println!("🔍 Early return due to decode failure: {}", decode_result);
+                return -1;
+            }
+
+            n_past += n;
+            start = end;
         }
 
-        println!("🔍 Getting model and vocab for token conversion...");
-        // Get model and vocab for token conversion
-        let model = llama_get_model(ctx);
-        let vocab = llama_model_get_vocab(model);
-        
-        if vocab.is_null() {
-            println!("🔍 Early return due to null vocab");
-            return -1;
-        }
-        
         println!("🔍 Model and vocab ready, starting generation loop...");
 
         // Initialize sampler
@@ -3322,11 +3422,13 @@ pub extern "C" fn gpuf_start_generation_async(
         llama_sampler_chain_add(sampler, dist_sampler);
 
         // Generate tokens with streaming callbacks
-        let context_available = 4096 - current_pos - token_count;
-        let safe_generation_limit =
-            std::cmp::min(max_tokens, std::cmp::min(4096, context_available));
-        let mut next_pos = current_pos + token_count;
+        let n_ctx = llama_n_ctx(ctx) as i32;
+        let context_available = n_ctx - n_past;
+        let safe_generation_limit = std::cmp::min(max_tokens, context_available);
+        let mut next_pos = n_past;
+        let mut utf8_buf = Utf8EmitBuffer::new();
 
+        let mut completion_tokens: c_int = 0;
         for _i in 0..safe_generation_limit {
             // Check for stop signal
             if should_stop_generation() {
@@ -3345,6 +3447,8 @@ pub extern "C" fn gpuf_start_generation_async(
                 break;
             }
 
+            completion_tokens = completion_tokens.saturating_add(1);
+
             // Convert token to text
             let mut token_buf = [0u8; 32];
             let token_len = llama_token_to_piece(
@@ -3359,27 +3463,33 @@ pub extern "C" fn gpuf_start_generation_async(
             println!("🔍 Token debug: sampled_token={}, token_len={}", sampled_token, token_len);
             
             if token_len > 0 {
-                let token_str = std::str::from_utf8_unchecked(&token_buf[..token_len as usize]);
-                println!("🔍 Token content: \"{}\" (bytes: {:?})", token_str, &token_buf[..token_len as usize]);
+                let emitted = utf8_buf.push_and_take_valid(&token_buf[..token_len as usize]);
+                println!(
+                    "🔍 Token content: \"{}\" (bytes: {:?})",
+                    emitted,
+                    &token_buf[..token_len as usize]
+                );
                 
                 // Call callback only if it's not None
-                if let Some(callback) = on_token_callback {
-                    println!("🔍 Calling callback with token...");
-                    match std::ffi::CString::new(token_str) {
-                        Ok(token_cstr) => {
-                            callback(token_cstr.as_ptr(), user_data);
-                            println!("🔍 Callback completed");
+                if !emitted.is_empty() {
+                    if let Some(callback) = on_token_callback {
+                        println!("🔍 Calling callback with token...");
+                        match std::ffi::CString::new(emitted.as_str()) {
+                            Ok(token_cstr) => {
+                                callback(token_cstr.as_ptr(), user_data);
+                                println!("🔍 Callback completed");
+                            }
+                            Err(_) => {
+                                println!("⚠️ Token callback skipped - CString conversion failed");
+                            }
                         }
-                        Err(_) => {
-                            println!("⚠️ Token callback skipped - CString conversion failed");
-                        }
+                    } else {
+                        // Just print the token if no callback provided
+                        println!("🔍 No callback - printing directly");
+                        print!("{}", emitted);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
                     }
-                } else {
-                    // Just print the token if no callback provided
-                    println!("🔍 No callback - printing directly");
-                    print!("{}", token_str);
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
                 }
             } else {
                 println!("🔍 Empty token skipped");
@@ -3410,12 +3520,22 @@ pub extern "C" fn gpuf_start_generation_async(
         // Cleanup sampler
         llama_sampler_free(sampler);
 
+        // Flush any remaining buffered bytes (best-effort)
+        let tail = utf8_buf.flush_lossy();
+
+        if !tail.is_empty() {
+            if let Some(callback) = on_token_callback {
+                if let Ok(token_cstr) = std::ffi::CString::new(tail.as_str()) {
+                    callback(token_cstr.as_ptr(), user_data);
+                }
+            }
+        }
+
         // Cleanup
         cleanup_generation_control();
-        println!("✅ Streaming generation completed (generated {} tokens)", next_pos - current_pos - token_count);
+        println!("✅ Streaming generation completed (generated {} tokens)", completion_tokens);
+        completion_tokens
     }
-
-    0
 }
 
 

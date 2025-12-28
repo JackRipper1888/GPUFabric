@@ -9,7 +9,7 @@ use axum::{
 use std::sync::{Arc};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use crate::api_server::{client, models};
+use crate::api_server::{apk, client, models};
 
 #[allow(dead_code)] // API server utility methods
 impl ApiServer {
@@ -48,6 +48,10 @@ impl ApiServer {
             // Model Management APIs
             .route("/api/models/insert", post(models::create_or_update_model))
             .route("/api/models/get", get(models::get_models))
+            // APK Management APIs
+            .route("/api/apk/upsert", post(apk::upsert_apk))
+            .route("/api/apk/get", get(apk::get_apk))
+            .route("/api/apk/list", get(apk::list_apk))
             .layer(CorsLayer::permissive())
             .with_state(state)
     }

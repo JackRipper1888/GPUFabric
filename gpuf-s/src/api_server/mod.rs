@@ -1,6 +1,7 @@
 pub mod handle_api;
 pub mod client;
 pub mod models;
+pub mod apk;
 
 use redis::Client as RedisClient;
 use sqlx::Pool; 

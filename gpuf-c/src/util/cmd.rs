@@ -77,7 +77,7 @@ pub struct Args {
     #[arg(long, default_value_t = 8192, help = "Context window size in tokens")]
     pub n_ctx: u32,
 
-    #[arg(long, default_value_t = 256, help = "Max bytes per streamed delta chunk sent to server")]
+    #[arg(long, default_value_t = 1, help = "Max bytes per streamed delta chunk sent to server")]
     pub stream_chunk_bytes: usize,
 }
 

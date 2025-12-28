@@ -24,6 +24,9 @@ use tokio::net::TcpStream;
 #[cfg(not(target_os = "android"))]
 use crate::llm_engine::AnyEngine;
 
+use std::collections::HashSet;
+use tokio::sync::Notify;
+
 pub trait WorkerHandle: Send + Sync {
     fn login(&self) -> impl Future<Output = Result<()>> + Send;
     fn handler(&self) -> impl Future<Output = Result<()>> + Send;
@@ -44,10 +47,16 @@ pub struct TCPWorker {
     os_type: OsType,
     engine_type: ClientEngineType,
     args: Args,
+    cancel_state: Arc<CancelState>,
     #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
     #[cfg(any(target_os = "macos", target_os = "android"))]
     _engine: PhantomData<()>,
+}
+
+pub struct CancelState {
+    pub cancelled: Mutex<HashSet<String>>,
+    pub notify: Notify,
 }
 
 // WS worker

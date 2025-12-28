@@ -54,8 +54,13 @@ pub struct DevicesInfo {
 #[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
 pub struct PodModel {
     pub pod_id: u16,
-    // pub auto_models: bool,
     pub model_name: Option<String>,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
 impl Default for DevicesInfo {
@@ -184,6 +189,20 @@ pub enum CommandV1 {
     InferenceTask {
         task_id: String,
         prompt: String,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+    },
+
+    // Chat inference task from server to client
+    ChatInferenceTask {
+        task_id: String,
+        model: String,
+        messages: Vec<ChatMessage>,
         max_tokens: u32,
         temperature: f32,
         top_k: u32,
