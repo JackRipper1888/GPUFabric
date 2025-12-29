@@ -895,7 +895,7 @@ impl WorkerHandle for TCPWorker {
                     };
 
                     // TODO: device_info is remote device info
-                    info!("Sending heartbeat to server cpu_usage {}% memory_usage {}% disk_usage {}% device_memtotal {}mb", cpu_usage, memory_usage, disk_usage, device_memtotal_mb);
+                    info!("heartbeat: cpu_usage {}% memory_usage {}% disk_usage {}% device_memtotal {}mb", cpu_usage, memory_usage, disk_usage, device_memtotal_mb);
 
                     let (stats, session_stats) = {
                         let mut monitor = network_monitor.lock().await;
@@ -904,7 +904,7 @@ impl WorkerHandle for TCPWorker {
                         (stats, session_stats)
                     };
                     info!(
-                        "Network stats - Current: up {} down {} | Session Total: up {} down {} | Duration: {} ", 
+                        "network_stats: up {} down {} | session_total: up {} down {} | duration: {} ", 
                         format_bytes!(stats.1),
                         format_bytes!(stats.0),
                         format_bytes!(session_stats.1),
