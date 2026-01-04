@@ -14,6 +14,31 @@ fn main() {
         // println!("cargo:warning=CUDA feature enabled - adding -fPIC flag"); // Commented out to reduce warning noise
     }
 
+    // Bundle CUDA runtime DLLs on Windows so gpuf-c.exe can run without requiring users to edit PATH.
+    // This is best-effort: if DLLs are not found, we only emit warnings.
+    if target_os == "windows" && cfg!(feature = "cuda") {
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
+        println!("cargo:rerun-if-env-changed=GPUF_BUNDLE_CUDA_DLLS");
+
+        let bundle_enabled = env::var("GPUF_BUNDLE_CUDA_DLLS")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+
+        if bundle_enabled {
+            if let Err(e) = bundle_cuda_dlls_windows() {
+                println!("cargo:warning=CUDA DLL bundling failed: {}", e);
+            }
+        }
+    }
+
+    if target_os == "windows" && (cfg!(feature = "cuda") || cfg!(feature = "nvml")) {
+        println!("cargo:rerun-if-env-changed=NVML_LIB_PATH");
+        if let Err(e) = bundle_nvml_dll_windows() {
+            println!("cargo:warning=NVML DLL bundling failed: {}", e);
+        }
+    }
+
     // Configure NVML library path for Windows target
     if target_os == "windows" {
         // Common NVIDIA NVML library locations on Windows
@@ -275,4 +300,154 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+fn bundle_cuda_dlls_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn is_truthy(name: &OsStr) -> bool {
+        let s = name.to_string_lossy().to_ascii_lowercase();
+        s.ends_with(".dll")
+            && (s.starts_with("cublas64_")
+                || s.starts_with("cublaslt64_")
+                || s.starts_with("cudart64_")
+                || s.starts_with("curand64_")
+                || s.starts_with("cufft64_")
+                || s.starts_with("cusolver64_")
+                || s.starts_with("cusparse64_"))
+    }
+
+    // Figure out where cargo will place the final binary.
+    // OUT_DIR looks like: <target>/<profile>/build/<crate>/out
+    // or: <target>/<triple>/<profile>/build/<crate>/out
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let profile = env::var("PROFILE")?;
+
+    let mut p: &Path = out_dir.as_path();
+    let mut output_dir: Option<PathBuf> = None;
+    while let Some(parent) = p.parent() {
+        if p.file_name().and_then(|s| s.to_str()) == Some(profile.as_str()) {
+            output_dir = Some(p.to_path_buf());
+            break;
+        }
+        p = parent;
+    }
+
+    let output_dir = output_dir.ok_or("Failed to detect target output directory from OUT_DIR")?;
+
+    // Candidate CUDA bin directories
+    let mut cuda_bin_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(cuda_path) = env::var("CUDA_PATH") {
+        cuda_bin_dirs.push(PathBuf::from(cuda_path).join("bin"));
+    }
+
+    // Common install locations (best-effort)
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin"));
+    cuda_bin_dirs.push(PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"));
+
+    // Find a bin dir that actually exists
+    let cuda_bin = cuda_bin_dirs.into_iter().find(|p| p.exists());
+    let Some(cuda_bin) = cuda_bin else {
+        return Err("CUDA bin directory not found. Set CUDA_PATH or install CUDA Toolkit.".into());
+    };
+
+    // Copy all relevant DLLs from CUDA bin to output dir
+    let mut copied = 0usize;
+    for entry in fs::read_dir(&cuda_bin)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        if !is_truthy(&file_name) {
+            continue;
+        }
+        let src = entry.path();
+        let dst = output_dir.join(&file_name);
+        // Always overwrite to keep incremental builds consistent.
+        if let Err(e) = fs::copy(&src, &dst) {
+            println!(
+                "cargo:warning=Failed to copy CUDA DLL {} -> {}: {}",
+                src.display(),
+                dst.display(),
+                e
+            );
+            continue;
+        }
+        copied += 1;
+    }
+
+    if copied == 0 {
+        println!(
+            "cargo:warning=No CUDA runtime DLLs were copied from {}. gpuf-c.exe may fail to run without PATH configured.",
+            cuda_bin.display()
+        );
+    } else {
+        println!(
+            "cargo:warning=Bundled {} CUDA runtime DLL(s) into {}",
+            copied,
+            output_dir.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn bundle_nvml_dll_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let profile = env::var("PROFILE")?;
+
+    let mut p: &Path = out_dir.as_path();
+    let mut output_dir: Option<PathBuf> = None;
+    while let Some(parent) = p.parent() {
+        if p.file_name().and_then(|s| s.to_str()) == Some(profile.as_str()) {
+            output_dir = Some(p.to_path_buf());
+            break;
+        }
+        p = parent;
+    }
+
+    let output_dir = output_dir.ok_or("Failed to detect target output directory from OUT_DIR")?;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(nvml_path) = env::var("NVML_LIB_PATH") {
+        candidates.push(PathBuf::from(&nvml_path).join("nvml.dll"));
+        candidates.push(PathBuf::from(&nvml_path).join("nvml.lib"));
+    }
+
+    candidates.push(PathBuf::from(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvml.dll"));
+    candidates.push(PathBuf::from(r"C:\Windows\System32\nvml.dll"));
+
+    if let Ok(cuda_path) = env::var("CUDA_PATH") {
+        candidates.push(PathBuf::from(cuda_path).join("bin").join("nvml.dll"));
+    }
+
+    let src = candidates
+        .into_iter()
+        .find(|p| p.is_file() && p.file_name().and_then(|s| s.to_str()) == Some("nvml.dll"));
+
+    let Some(src) = src else {
+        return Err("nvml.dll not found. Install NVIDIA driver (NVSMI) or set NVML_LIB_PATH.".into());
+    };
+
+    let dst = output_dir.join("nvml.dll");
+    fs::copy(&src, &dst)?;
+
+    println!(
+        "cargo:warning=Bundled nvml.dll into {} (from {})",
+        output_dir.display(),
+        src.display()
+    );
+
+    Ok(())
 }
