@@ -17,6 +17,92 @@ macro_rules! debug_println {
     };
 }
 
+#[cfg(target_os = "macos")]
+fn try_macos_gpu_metrics() -> std::result::Result<(u64, u64, u64, u64), Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    // This typically requires sudo privileges on macOS.
+    // If sudo is not available or requires TTY/password, return Err so caller can fallback.
+    let output = Command::new("sudo")
+        .args([
+            "powermetrics",
+            "--samplers",
+            "gpu_power,thermal",
+            "-i",
+            "1000",
+            "-n",
+            "1",
+            "--format",
+            "plist",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("powermetrics failed: {}", stderr.trim()).into());
+    }
+
+    let plist_gpu = plist::Value::from_reader_xml(output.stdout.as_slice())?;
+
+    let mut gpu_busy: f64 = 0.0;
+    let mut gpu_power_mw: u64 = 0;
+    let mut thermal_level: String = "Unknown".to_string();
+
+    if let Some(dict) = plist_gpu.as_dictionary() {
+        if let Some(gpu_dict) = dict.get("gpu").and_then(|v| v.as_dictionary()) {
+            // idle_ratio: 0..1
+            let idle_ratio = gpu_dict
+                .get("idle_ratio")
+                .and_then(|v| v.as_real())
+                .unwrap_or(1.0);
+            gpu_busy = (1.0 - idle_ratio).clamp(0.0, 1.0);
+
+            // On some systems this can be present as an energy/power metric.
+            // We keep the same convention used in system_info.rs (treat as mW).
+            gpu_power_mw = gpu_dict
+                .get("gpu_energy")
+                .and_then(|v| v.as_unsigned_integer())
+                .unwrap_or(0) as u64;
+        }
+
+        if let Some(level) = dict
+            .get("thermal_pressure")
+            .and_then(|v| v.as_string())
+        {
+            thermal_level = level.to_string();
+        }
+    }
+
+    // Memory usage (unified memory approximation)
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_memory();
+    let total_memory = sys.total_memory();
+    let used_memory = sys.used_memory();
+    let mem_usage_percent: u64 = if total_memory > 0 {
+        ((used_memory as f64 / total_memory as f64) * 100.0).round() as u64
+    } else {
+        0
+    };
+
+    let temp_c: u64 = match thermal_level.as_str() {
+        "Nominal" => 60,
+        "Light" => 70,
+        "Moderate" => 80,
+        "Heavy" => 90,
+        "Trapping" | "Critical" => 100,
+        _ => 0,
+    };
+
+    let usage_percent: u64 = (gpu_busy * 100.0).round() as u64;
+    let power_w: u64 = (gpu_power_mw as f64 / 1000.0).round() as u64;
+
+    if usage_percent == 0 && mem_usage_percent == 0 && power_w == 0 && temp_c == 0 {
+        return Err("powermetrics did not provide usable GPU metrics".into());
+    }
+
+    Ok((usage_percent.min(100), mem_usage_percent.min(100), power_w, temp_c))
+}
+
 #[cfg(feature = "vulkan")]
 pub async fn collect_device_info_vulkan_cross_platform() -> Result<(DevicesInfo, u16)> {
     #[allow(unused)]

@@ -980,7 +980,7 @@ pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
         device_id: get_device_id().unwrap_or(0) as u128,
         memsize_gb: (total_memory / 1024 / 1024) as u128,
         powerlimit_w: gpu_power as u128,
-        total_tflops: to_tflops(get_device_id().unwrap_or(0)).unwrap_or_default() as u16,
+        total_tflops: common::to_tflops(get_device_id().unwrap_or(0)).unwrap_or_default() as u16,
     };
     debug!("device_info: {:?}", device_info);
     debug!("total_memory: {} bytes", total_memory);
