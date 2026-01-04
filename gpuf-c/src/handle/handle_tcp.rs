@@ -1732,9 +1732,9 @@ impl ClientWorker {
             EngineType::OLLAMA => ClientEngineType::Ollama,
             EngineType::LLAMA => ClientEngineType::Llama,
         };
-        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         let mut engine: Option<AnyEngine> = None;
-        #[cfg(any(target_os = "macos", target_os = "android"))]
+        #[cfg(target_os = "android")]
         let mut engine: Option<()> = None;
         #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
         {
@@ -1869,9 +1869,9 @@ impl ClientWorker {
         let stats = network_monitor.lock().await.refresh().unwrap_or((0, 0));
         let worker = ClientWorker {
             addr: ip_addr,
-            #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+            #[cfg(not(target_os = "android"))]
             engine: Arc::new(Mutex::new(engine)),
-            #[cfg(any(target_os = "macos", target_os = "android"))]
+            #[cfg(target_os = "android")]
             _engine: PhantomData,
             //TODO: only one device
             devices_info: Arc::new(vec![device_info]),

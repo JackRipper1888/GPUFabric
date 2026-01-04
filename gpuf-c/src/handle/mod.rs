@@ -48,9 +48,9 @@ pub struct ClientWorker {
     engine_type: ClientEngineType,
     args: Args,
     cancel_state: Arc<CancelState>,
-    #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+    #[cfg(not(target_os = "android"))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
-    #[cfg(any(target_os = "macos", target_os = "android"))]
+    #[cfg(target_os = "android")]
     _engine: PhantomData<()>,
 }
 
