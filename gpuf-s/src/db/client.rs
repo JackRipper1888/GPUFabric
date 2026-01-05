@@ -1,6 +1,7 @@
 use crate::util::protoc::ClientId;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use common::Model;
 use redis::{AsyncCommands, Client as RedisClient, Commands};
 use sqlx::{postgres::Postgres, FromRow, Pool};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -134,7 +135,55 @@ pub struct ClientDeviceInfo {
     pub last_online: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub uptime_days: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_models: Option<Vec<Model>>,
     //pub os_type: Option<String>,
+}
+
+pub async fn get_loaded_models_batch_from_redis(
+    redis_client: &RedisClient,
+    client_ids: &[String],
+) -> Result<std::collections::HashMap<String, Vec<Model>>> {
+    let mut out: std::collections::HashMap<String, Vec<Model>> =
+        std::collections::HashMap::new();
+
+    if client_ids.is_empty() {
+        return Ok(out);
+    }
+
+    let Ok(mut conn) = redis_client.get_async_connection().await else {
+        return Ok(out);
+    };
+
+    let keys: Vec<String> = client_ids
+        .iter()
+        .map(|cid| format!("client:{}:models", cid))
+        .collect();
+
+    // MGET
+    let values: Vec<Option<String>> = conn.get(keys).await.unwrap_or_default();
+
+    for (cid, v) in client_ids.iter().zip(values.into_iter()) {
+        let Some(json) = v else {
+            continue;
+        };
+        if json.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Vec<Model>>(&json) {
+            Ok(models) => {
+                out.insert(cid.clone(), models);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to parse redis client models JSON for client {}: {}",
+                    cid, e
+                );
+            }
+        }
+    }
+
+    Ok(out)
 }
 #[allow(dead_code)]
 pub async fn get_user_client_status_list(
@@ -267,6 +316,7 @@ pub async fn get_user_client_status_list(
                 last_online: row.last_online,
                 created_at: row.created_at,
                 uptime_days: row.uptime_days.unwrap_or(0) as u32,
+                loaded_models: None,
             }
         })
         .collect();

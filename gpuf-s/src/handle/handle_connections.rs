@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use common::{os_type_str, CommandV2, Model, OsType, PodModel};
 use redis::Client as RedisClient;
+use redis::AsyncCommands;
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use tokio::net::{tcp::OwnedWriteHalf, TcpListener};
 use bincode::config;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -201,6 +202,8 @@ async fn handle_single_client(
                     auto_models_device.len()
                 );
 
+                upsert_client_models_in_redis(&redis_client, &ClientId(id), &models).await;
+
                 let pods_model = match handle_models_status(
                     &hot_models,
                     &active_clients,
@@ -225,7 +228,7 @@ async fn handle_single_client(
                 write_command(&mut *writer.lock().await, &Command::V1(pods_model)).await?;
             }
             Err(e) => {
-                info!("Client addr {} disconnected. {}", addr, e);
+                info!("Client {} addr {} disconnected: {}", session_client_id, addr, e);
                 active_clients.lock().await.remove(&session_client_id);
                 client::upsert_client_status(&db_pool, &session_client_id, "offline").await?;
                 return Ok(());
@@ -550,6 +553,29 @@ async fn handle_models_status(
     }
 
     Ok(pods_model)
+}
+
+async fn upsert_client_models_in_redis(
+    redis_client: &Arc<RedisClient>,
+    client_id: &ClientId,
+    models: &[Model],
+) {
+    let Ok(mut conn) = redis_client.get_async_connection().await else {
+        return;
+    };
+
+    let key = format!("client:{}:models", client_id);
+    let payload = match serde_json::to_string(models) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to serialize client models to JSON: {}", e);
+            return;
+        }
+    };
+
+    // Keep this fairly short so it's "realtime".
+    let _: std::result::Result<(), _> = conn.set(&key, payload).await;
+    let _: std::result::Result<(), _> = conn.expire(&key, 300).await;
 }
 
 async fn handle_heartbeat(

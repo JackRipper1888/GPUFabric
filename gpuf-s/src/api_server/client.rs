@@ -86,7 +86,7 @@ pub async fn get_user_clients(
     Query(query): Query<ClientListQuery>,
 ) -> Result<Json<ApiResponse<ClientListResponse>>, StatusCode> {
     // Get database connection
-    let devices = client::get_user_client_status_list(
+    let mut devices = client::get_user_client_status_list(
         &app_state.db_pool,
         &query.user_id,
         query.client_id.as_ref(),
@@ -99,6 +99,16 @@ pub async fn get_user_clients(
         tracing::error!("Failed to get user clients: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    let client_ids: Vec<String> = devices.iter().map(|d| d.client_id.clone()).collect();
+    let models_map = client::get_loaded_models_batch_from_redis(&app_state.redis_client, &client_ids)
+        .await
+        .unwrap_or_default();
+    for d in &mut devices {
+        if let Some(models) = models_map.get(&d.client_id) {
+            d.loaded_models = Some(models.clone());
+        }
+    }
     let response = ClientListResponse {
         total: devices.len(),
         devices,
@@ -110,7 +120,7 @@ pub async fn get_user_client_status_list(
     State(app_state): State<Arc<ApiServer>>,
     Query(query): Query<ClientListQuery>,
 ) -> Result<Json<ApiResponse<ClientListResponse>>, StatusCode> {
-    let devices = client::get_user_client_status_list(
+    let mut devices = client::get_user_client_status_list(
         &app_state.db_pool,
         &query.user_id,
         query.client_id.as_ref(),
@@ -123,6 +133,16 @@ pub async fn get_user_client_status_list(
         tracing::error!("Failed to get user status clients: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    let client_ids: Vec<String> = devices.iter().map(|d| d.client_id.clone()).collect();
+    let models_map = client::get_loaded_models_batch_from_redis(&app_state.redis_client, &client_ids)
+        .await
+        .unwrap_or_default();
+    for d in &mut devices {
+        if let Some(models) = models_map.get(&d.client_id) {
+            d.loaded_models = Some(models.clone());
+        }
+    }
     let response = ClientListResponse {
         total: devices.len(),
         devices,
