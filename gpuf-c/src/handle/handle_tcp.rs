@@ -130,10 +130,26 @@ fn derive_model_id_from_path(model_path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(model_path);
 
-    file_name
+    let base = file_name
         .trim_end_matches(".gguf")
-        .trim_end_matches(".bin")
-        .to_string()
+        .trim_end_matches(".bin");
+
+    // Rule B: keep file name, but strip shard suffix like "-00001-of-00002".
+    // This avoids exposing split file indices as the model id.
+    if let Some(of_pos) = base.rfind("-of-") {
+        let right = &base[of_pos + 4..];
+        if !right.is_empty() && right.chars().all(|c| c.is_ascii_digit()) {
+            let left_all = &base[..of_pos];
+            if let Some(left_dash) = left_all.rfind('-') {
+                let left_digits = &left_all[left_dash + 1..];
+                if !left_digits.is_empty() && left_digits.chars().all(|c| c.is_ascii_digit()) {
+                    return left_all[..left_dash].to_string();
+                }
+            }
+        }
+    }
+
+    base.to_string()
 }
 
 const CURRENT_VERSION: u32 = 1;
@@ -1823,19 +1839,6 @@ impl ClientWorker {
         }
         #[cfg(target_os = "macos")]
         {
-            // if args.engine_type == EngineType::OLLAMA {
-            //     let mut llvm_worker = llm_engine::create_engine(
-            //         args.engine_type.clone(),
-            //         args.hugging_face_hub_token.clone(),
-            //         args.chat_template_path.clone(),
-            //     );
-            //     match llvm_worker.init().await {
-            //         Ok(_) => info!("VLLM init success"),
-            //         Err(e) => error!("VLLM init failed: {}", e),
-            //     }
-            //     engine = Some(llvm_worker);
-            // }
-
             if args.engine_type == EngineType::OLLAMA {
                 if let Err(e) = check_and_restart_ollama().await {
                     error!("Failed to manage Ollama process: {}", e);
@@ -1911,6 +1914,31 @@ impl ClientWorker {
             network_rx: stats.0,
             network_tx: stats.1,
         })
+    }
+
+    pub async fn deal_with_model(&self, model_name: &str) -> Result<()> {
+        match self.engine_type {
+            common::EngineType::Ollama => {
+                pull_ollama_model(&model_name, self.args.local_port).await?
+            }
+            common::EngineType::Vllm => {
+                #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+                if let Some(_engine) = self.engine.lock().await.as_mut() {
+                    // Engine functionality disabled in lightweight version
+                }
+            }
+            common::EngineType::Llama => {
+
+            }
+            _ => {}
+        }
+        // match run_model(self.args.local_port, &model_name, "hello world").await {
+        //     Ok(output) => {
+        //         info!("Model {} output: {}", model_name, output)
+        //     }
+        //     Err(e) => error!("run_model Error: {}", e),
+        // }
+        Ok(())
     }
 }
 
@@ -2029,28 +2057,14 @@ impl WorkerHandle for ClientWorker {
         }
     }
 
-    fn model_task(&self, get_last_models: &str) -> impl Future<Output = Result<()>> + Send {
+    fn model_task(&self) -> impl Future<Output = Result<()>> + Send {
         async move {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
             // let device_memtotal_gb = self.device_memtotal_gb;
             // let auto_models = self.args.auto_models;
             let engine_type = self.engine_type.clone();
-
-            if self.args.auto_models {
-                match engine_type {
-                    common::EngineType::Ollama => {
-                        pull_ollama_model(get_last_models, self.args.local_port).await?
-                    }
-                    common::EngineType::Vllm => {
-                        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
-                        if let Some(_engine) = self.engine.lock().await.as_mut() {
-                            // Engine functionality disabled in lightweight version
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            info!("✅ Model task started");
             let local_port = self.args.local_port;
             let devices_info = self.devices_info.clone();
             tokio::spawn(async move {
@@ -2077,7 +2091,7 @@ impl WorkerHandle for ClientWorker {
                                 .lock()
                                 .ok()
                                 .and_then(|s| s.current_model.clone());
-
+                            debug!("current_model_path {:?}", current_model_path);
                             match current_model_path {
                                 Some(model_path) => {
                                     let model_id = derive_model_id_from_path(&model_path);
@@ -2093,6 +2107,7 @@ impl WorkerHandle for ClientWorker {
                         }
                         _ => Vec::new(),
                     };
+                    debug!("Successfully fetched {:?} models from engine.", models);
                     let model_cmd = CommandV1::ModelStatus {
                         client_id: *client_id,
                         models,
@@ -2217,17 +2232,27 @@ impl WorkerHandle for ClientWorker {
                             } => {
                                 if success {
                                     if pods_model.is_empty() {
-                                        error!("Received empty models from server");
-                                        return Err(anyhow!(
-                                            "device is not compatible with the model"
-                                        ));
-                                    }
-                                    //TODO models is local models
-                                    for pod_model in pods_model {
-                                        if let Some(model_name) = pod_model.model_name {
-                                            self.model_task(&model_name).await?;
+                                        warn!("Received empty models from server");
+                                        let current_model_path = crate::MODEL_STATUS
+                                            .lock()
+                                            .ok()
+                                            .and_then(|s| s.current_model.clone());
+                                        if current_model_path.is_none() {
+                                            return Err(anyhow!(
+                                                "device is not compatible with the model"
+                                            ));
                                         }
                                     }
+                                    // If server assigned models, ensure they are pulled/ready.
+                                    for pod_model in pods_model {
+                                        if let Some(model_name) = pod_model.model_name {
+                                            if self.args.auto_models {
+                                                self.deal_with_model(&model_name).await?;
+                                            }
+                                        }
+                                    }
+                                                                        // Start model reporting task immediately after login (choice A).
+                                    self.model_task().await?;
                                     self.heartbeat_task().await?;
                                     debug!("Successfully logged in.");
                                     continue;
@@ -2245,39 +2270,10 @@ impl WorkerHandle for ClientWorker {
                                     error!("device is not compatible with the model");
                                     return Err(anyhow!("device is not compatible with the model"));
                                 }
-                                // TODO: pull model
                                 for pod_model in pods_model {
                                     if let Some(model_name) = pod_model.model_name {
-                                        match self.engine_type {
-                                            common::EngineType::Ollama => {
-                                                pull_ollama_model(&model_name, self.args.local_port)
-                                                    .await?
-                                            }
-                                            common::EngineType::Vllm => {
-                                                #[cfg(all(
-                                                    not(target_os = "macos"),
-                                                    not(target_os = "android")
-                                                ))]
-                                                if let Some(_engine) =
-                                                    self.engine.lock().await.as_mut()
-                                                {
-                                                    // Engine functionality disabled in lightweight version
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        match run_model(
-                                            self.args.local_port,
-                                            &model_name,
-                                            "hello world",
-                                        )
-                                        .await
-                                        {
-                                            Ok(output) => {
-                                                info!("Model {} output: {}", model_name, output)
-                                            }
-                                            Err(e) => error!("run_model Error: {}", e),
-                                        }
+                                        self.deal_with_model(&model_name).await?;
+                                        
                                     }
                                 }
                             }
