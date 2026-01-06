@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
@@ -94,6 +95,61 @@ fn main() {
         std::fs::write("icon.rc", icon_rc_content).expect("Failed to write icon.rc file");
 
         embed_resource::compile("icon.rc", &[] as &[&str]);
+
+        if cfg!(feature = "cuda") {
+            let cuda_path = env::var("CUDA_PATH_V12")
+                .ok()
+                .or_else(|| env::var("CUDA_PATH").ok())
+                .or_else(|| env::var("CUDA_HOME").ok());
+
+            if let Some(cuda_path) = cuda_path {
+                let cuda_bin_dir = PathBuf::from(&cuda_path).join("bin");
+                let target_triple = env::var("TARGET").unwrap_or_default();
+                let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
+                let build_target = env::var("CARGO_BUILD_TARGET").ok();
+
+                let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+                let workspace_root = PathBuf::from(&manifest_dir)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(&manifest_dir));
+
+                let target_dir = env::var("CARGO_TARGET_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| workspace_root.join("target"));
+
+                let out_dir = if build_target.is_some() {
+                    target_dir.join(&target_triple).join(&profile)
+                } else {
+                    target_dir.join(&profile)
+                };
+
+                let dlls = ["cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll"];
+                for dll in dlls {
+                    let src = cuda_bin_dir.join(dll);
+                    let dst = out_dir.join(dll);
+                    if src.exists() {
+                        if let Err(err) = fs::copy(&src, &dst) {
+                            println!(
+                                "cargo:warning=Failed to copy CUDA DLL {} to {}: {}",
+                                src.display(),
+                                dst.display(),
+                                err
+                            );
+                        }
+                    } else {
+                        println!(
+                            "cargo:warning=CUDA DLL not found (skipping): {}",
+                            src.display()
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "cargo:warning=CUDA_PATH_V12/CUDA_PATH/CUDA_HOME not set; skipping CUDA DLL bundling"
+                );
+            }
+        }
     }
 
     // Link OpenMP on Linux target explicitly (LLVM OpenMP)

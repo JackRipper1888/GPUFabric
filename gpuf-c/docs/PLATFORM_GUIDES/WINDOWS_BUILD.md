@@ -70,6 +70,22 @@ After successful build, verify:
 .\target\release\gpuf-c.exe --version
 ```
 
+## CUDA 12 Build + Bundle DLLs (Recommended for Distribution)
+
+To build a CUDA 12-based `gpuf-c.exe` and bundle the required CUDA 12 runtime DLLs next to the executable:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\build_windows_cuda12.ps1 -CudaPath "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" -TargetDir "dist\windows-cuda12"
+```
+
+Output:
+- **Executable**: `dist\windows-cuda12\gpuf-c.exe`
+- **Bundled DLLs (if present in your CUDA Toolkit)**:
+  - `cublas64_12.dll`
+  - `cublasLt64_12.dll`
+  - `cudart64_12.dll`
+
 ## Notes
 
 - The build.rs has been updated to automatically search for nvml.lib in common CUDA Toolkit locations

@@ -701,7 +701,7 @@ async fn test_command_serialization_roundtrip() {
             port: 0,
             ip: 0,
             os_type: OsType::MACOS,
-            engine_type: EngineType::Ollama,
+            engine_type: EngineType::Llama,
             memsize_gb: 0,
             powerlimit_w: 0,
             vendor_id: 0,

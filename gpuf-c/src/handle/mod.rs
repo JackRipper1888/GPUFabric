@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 pub trait WorkerHandle: Send + Sync {
     fn login(&self) -> impl Future<Output = Result<()>> + Send;
     fn handler(&self) -> impl Future<Output = Result<()>> + Send;
-    fn model_task(&self, get_last_models: &str) -> impl Future<Output = Result<()>> + Send;
+    fn model_task(&self) -> impl Future<Output = Result<()>> + Send;
     fn heartbeat_task(&self) -> impl Future<Output = Result<()>> + Send;
 }
 
@@ -101,10 +101,10 @@ impl WorkerHandle for AutoWorker {
         }
     }
 
-    async fn model_task(&self, get_last_models: &str) -> Result<()> {
+    async fn model_task(&self) -> Result<()> {
         match self {
-            AutoWorker::TCP(worker) => worker.model_task(get_last_models).await,
-            AutoWorker::WS(worker) => worker.model_task(get_last_models).await,
+            AutoWorker::TCP(worker) => worker.model_task().await,
+            AutoWorker::WS(worker) => worker.model_task().await,
         }
     }
 

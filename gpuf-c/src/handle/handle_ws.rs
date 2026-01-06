@@ -33,7 +33,7 @@ impl WorkerHandle for WSWorker {
         async move { todo!() }
     }
 
-    fn model_task(&self, _get_last_models: &str) -> impl Future<Output = Result<()>> + Send {
+    fn model_task(&self) -> impl Future<Output = Result<()>> + Send {
         async move { todo!() }
     }
 
