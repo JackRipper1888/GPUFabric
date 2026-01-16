@@ -44,7 +44,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // If model file doesn't exist, create a simulated engine
     let mut engine = if Path::new(model_path).exists() {
         println!("📁 Model file found: {}", model_path);
-        LlamaEngine::with_config(model_path.to_string(), 2048, 0)
+        LlamaEngine::with_config(
+            model_path.to_string(),
+            2048,
+            0,
+            gpuf_c::util::cmd::LlamaSplitModeArg::Layer,
+            0,
+            None,
+        )
     } else {
         println!("⚠️  Model file doesn't exist, using simulation mode");
         return simulate_usage();

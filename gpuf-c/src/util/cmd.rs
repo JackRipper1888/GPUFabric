@@ -4,6 +4,32 @@ use clap::{Parser, ValueEnum};
 use crate::util::config::Config;
 use tracing::info;
 
+#[derive(ValueEnum, Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum LlamaSplitModeArg {
+    #[clap(name = "none")]
+    None,
+    #[clap(name = "layer")]
+    Layer,
+    #[clap(name = "row")]
+    Row,
+}
+
+impl std::str::FromStr for LlamaSplitModeArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "layer" => Ok(Self::Layer),
+            "row" => Ok(Self::Row),
+            other => Err(format!(
+                "Invalid llama_split_mode '{}'. Must be one of: none, layer, row",
+                other
+            )),
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -92,6 +118,27 @@ pub struct Args {
 
     #[arg(
         long,
+        default_value = "layer",
+        help = "Llama multi-GPU split mode: none, layer, row"
+    )]
+    pub llama_split_mode: LlamaSplitModeArg,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Main GPU index for llama.cpp (scratch/small tensors)"
+    )]
+    pub llama_main_gpu: i32,
+
+    #[arg(
+        long,
+        default_value = None,
+        help = "Comma-separated ggml backend device indices to use (e.g. '0,1'); empty uses default"
+    )]
+    pub llama_devices: Option<String>,
+
+    #[arg(
+        long,
         default_value_t = 1,
         help = "Max bytes per streamed delta chunk sent to server"
     )]
@@ -133,6 +180,17 @@ impl Args {
 
             info!("client_id: {:?}", client_id);
 
+            let llama_split_mode = match config_data
+                .client
+                .llama_split_mode
+                .as_deref()
+                .map(|s| s.parse::<LlamaSplitModeArg>())
+            {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Err(anyhow::anyhow!(e)),
+                None => self.llama_split_mode.clone(),
+            };
+
             Ok(Args {
                 config: Some(config_path.clone()),
                 client_id: Some(client_id),
@@ -153,6 +211,13 @@ impl Args {
                 llama_model_path: None,
                 n_ctx: config_data.client.n_ctx,
                 n_gpu_layers: config_data.client.n_gpu_layers,
+                llama_split_mode,
+                llama_main_gpu: config_data.client.llama_main_gpu.unwrap_or(self.llama_main_gpu),
+                llama_devices: config_data
+                    .client
+                    .llama_devices
+                    .clone()
+                    .or_else(|| self.llama_devices.clone()),
                 stream_chunk_bytes: self.stream_chunk_bytes,
             })
         } else {
