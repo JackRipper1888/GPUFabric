@@ -120,6 +120,7 @@ pub async fn download_multiple_models() -> Result<()> {
 /// Example of integrating with LlamaEngine
 pub async fn download_and_initialize_llama() -> Result<()> {
     use crate::llm_engine::llama_engine::LlamaEngine;
+    use crate::util::cmd::LlamaSplitModeArg;
 
     // Download the model first
     let model_url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf";
@@ -158,6 +159,9 @@ pub async fn download_and_initialize_llama() -> Result<()> {
         model_path.to_string_lossy().to_string(),
         2048, // context size
         35,   // GPU layers
+        LlamaSplitModeArg::Layer,
+        0,
+        None,
     );
 
     engine.init().await?;

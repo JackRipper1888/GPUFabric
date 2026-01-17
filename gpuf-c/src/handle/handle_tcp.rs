@@ -1281,17 +1281,22 @@ impl ClientWorker {
                     info!("Creating LLAMA engine with model: {}", model_path);
                     llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
                         model_path.clone(),
-                        4096,              // context size
-                        args.n_gpu_layers, // GPU layers
+                        args.n_ctx,
+                        args.n_gpu_layers,
+                        args.llama_split_mode.clone(),
+                        args.llama_main_gpu,
+                        args.llama_devices.clone(),
                     ))
                 } else {
                     // Create engine without model (will be set later)
                     info!("Creating LLAMA engine without model (will be set later)");
-                    llm_engine::create_engine(
-                        args.engine_type.clone(),
-                        args.hugging_face_hub_token.clone(),
-                        args.chat_template_path.clone(),
-                    )
+                    llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
+                        args.n_ctx,
+                        args.n_gpu_layers,
+                        args.llama_split_mode.clone(),
+                        args.llama_main_gpu,
+                        args.llama_devices.clone(),
+                    ))
                 };
 
                 // Initialize the engine (only once)

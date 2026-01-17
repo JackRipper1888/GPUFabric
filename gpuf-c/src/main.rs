@@ -100,6 +100,9 @@ async fn run_standalone_llama(mut args: Args) -> Result<()> {
         model_path.clone(),
         args.n_ctx,        // context size from args
         args.n_gpu_layers, // GPU layers from args
+        args.llama_split_mode.clone(),
+        args.llama_main_gpu,
+        args.llama_devices.clone(),
     );
 
     engine.init().await?;

@@ -10,6 +10,8 @@ use futures_util::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::util::cmd::LlamaSplitModeArg;
+
 // llama-cpp-2 imports (only for non-Android platforms)
 #[cfg(not(target_os = "android"))]
 use llama_cpp_2::{context::params::LlamaContextParams, model::params::LlamaModelParams};
@@ -26,6 +28,9 @@ pub struct LlamaEngine {
     pub model_path: Option<String>,
     pub n_ctx: u32,
     pub n_gpu_layers: u32,
+    pub llama_split_mode: LlamaSplitModeArg,
+    pub llama_main_gpu: i32,
+    pub llama_devices: Option<String>,
     pub is_initialized: bool,
     pub models_dir: PathBuf,
     // Added: model loading status tracking
@@ -127,6 +132,9 @@ impl LlamaEngine {
                 }
             }
             let n_gpu_layers = self.n_gpu_layers;
+            let llama_split_mode = self.llama_split_mode.clone();
+            let llama_main_gpu = self.llama_main_gpu;
+            let llama_devices = self.llama_devices.clone();
             let model_path_for_closure = resolved_model_path_str.clone();
             let model_path_for_cache = model_path_for_closure.clone();
 
@@ -140,7 +148,45 @@ impl LlamaEngine {
                 let backend = LlamaBackend::init()
                     .map_err(|e| anyhow!("Failed to initialize backend: {:?}", e))?;
 
-                let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+                use llama_cpp_2::model::params::LlamaSplitMode as LlamaCppSplitMode;
+
+                let mut model_params =
+                    LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+
+                let split_mode = match llama_split_mode {
+                    LlamaSplitModeArg::None => LlamaCppSplitMode::None,
+                    LlamaSplitModeArg::Layer => LlamaCppSplitMode::Layer,
+                    LlamaSplitModeArg::Row => LlamaCppSplitMode::Row,
+                };
+                model_params = model_params
+                    .with_split_mode(split_mode)
+                    .with_main_gpu(llama_main_gpu);
+
+                info!(
+                    "llama.cpp model params: n_gpu_layers={}, split_mode={:?}, main_gpu={}, devices={:?}",
+                    n_gpu_layers,
+                    split_mode,
+                    llama_main_gpu,
+                    llama_devices
+                );
+
+                if let Some(devs) = llama_devices {
+                    let devs = devs.trim();
+                    if !devs.is_empty() {
+                        let parsed = devs
+                            .split(',')
+                            .map(|v| v.trim())
+                            .filter(|v| !v.is_empty())
+                            .map(|v| v.parse::<usize>())
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .map_err(|e| anyhow!("Invalid llama_devices '{}': {}", devs, e))?;
+                        if !parsed.is_empty() {
+                            model_params = model_params
+                                .with_devices(&parsed)
+                                .map_err(|e| anyhow!("Failed to set llama devices: {:?}", e))?;
+                        }
+                    }
+                }
 
                 let model =
                     LlamaModel::load_from_file(&backend, &model_path_for_closure, &model_params)
@@ -508,6 +554,9 @@ impl LlamaEngine {
             model_path: None,
             n_ctx: 2048,
             n_gpu_layers: 99,
+            llama_split_mode: LlamaSplitModeArg::Layer,
+            llama_main_gpu: 0,
+            llama_devices: None,
             is_initialized: false,
             models_dir,
             loading_status: Arc::new(RwLock::new("not_loaded".to_string())),
@@ -522,7 +571,49 @@ impl LlamaEngine {
         }
     }
 
-    pub fn with_config(model_path: String, n_ctx: u32, n_gpu_layers: u32) -> Self {
+    pub fn with_runtime_config(
+        n_ctx: u32,
+        n_gpu_layers: u32,
+        llama_split_mode: LlamaSplitModeArg,
+        llama_main_gpu: i32,
+        llama_devices: Option<String>,
+    ) -> Self {
+        let models_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".llama")
+            .join("models");
+
+        LlamaEngine {
+            models: Arc::new(RwLock::new(Vec::new())),
+            models_name: Vec::new(),
+            model_path: None,
+            n_ctx,
+            n_gpu_layers,
+            llama_split_mode,
+            llama_main_gpu,
+            llama_devices,
+            is_initialized: false,
+            models_dir,
+            loading_status: Arc::new(RwLock::new("not_loaded".to_string())),
+            current_loading_model: Arc::new(RwLock::new(None)),
+
+            #[cfg(not(target_os = "android"))]
+            cached_backend: None,
+            #[cfg(not(target_os = "android"))]
+            cached_model: None,
+            #[cfg(not(target_os = "android"))]
+            cached_model_path: None,
+        }
+    }
+
+    pub fn with_config(
+        model_path: String,
+        n_ctx: u32,
+        n_gpu_layers: u32,
+        llama_split_mode: LlamaSplitModeArg,
+        llama_main_gpu: i32,
+        llama_devices: Option<String>,
+    ) -> Self {
         let models_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".llama")
@@ -534,6 +625,9 @@ impl LlamaEngine {
             model_path: Some(model_path.clone()),
             n_ctx,
             n_gpu_layers,
+            llama_split_mode,
+            llama_main_gpu,
+            llama_devices,
             is_initialized: false,
             models_dir,
             loading_status: Arc::new(RwLock::new("not_loaded".to_string())),

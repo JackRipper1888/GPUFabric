@@ -47,6 +47,15 @@ pub struct ClientConfig {
     pub n_ctx: u32,
     #[serde(rename = "n_gpu_layers")]
     pub n_gpu_layers: u32,
+
+    #[serde(rename = "llama_split_mode")]
+    pub llama_split_mode: Option<String>,
+
+    #[serde(rename = "llama_main_gpu")]
+    pub llama_main_gpu: Option<i32>,
+
+    #[serde(rename = "llama_devices")]
+    pub llama_devices: Option<String>,
 }
 
 impl Config {
