@@ -1,7 +1,8 @@
 param(
     [string]$BaseUrl = "https://oss.gpunexus.com/client",
     [string]$InstallDir = "$env:USERPROFILE\AppData\Local\Programs\gpuf-c",
-    [string]$PackageName = "v1.0.0-windows-gpuf-c.tar.gz"
+    [string]$PackageName = "v1.0.1-windows-gpuf-c.tar.gz",
+    [string]$DownloadDir = "C:\gpuf"
 )
 
 # check if running as administrator
@@ -68,6 +69,52 @@ function Verify-Md5PrefixIfPossible([string]$Path) {
     Write-Host "md5 prefix match ok: $md5" -ForegroundColor Green
 }
 
+function Get-PeMachine([string]$Path) {
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $br = New-Object System.IO.BinaryReader($fs)
+            $mz = $br.ReadUInt16()
+            if ($mz -ne 0x5A4D) { return $null }
+            $fs.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $br.ReadInt32()
+            if ($peOffset -lt 0) { return $null }
+            $fs.Seek($peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peSig = $br.ReadUInt32()
+            if ($peSig -ne 0x00004550) { return $null }
+            return $br.ReadUInt16()
+        } finally {
+            $fs.Close()
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Assert-ExeCompatible([string]$Path) {
+    $machine = Get-PeMachine $Path
+    if (-not $machine) {
+        Write-Host "error: extracted file is not a valid Windows executable: $Path" -ForegroundColor Red
+        exit 1
+    }
+
+    $is64 = [Environment]::Is64BitOperatingSystem
+    if (-not $is64 -and $machine -eq 0x8664) {
+        Write-Host "error: this package contains an x64 executable but your Windows appears to be 32-bit" -ForegroundColor Red
+        Write-Host "hint: install a 32-bit build or use a 64-bit Windows" -ForegroundColor Yellow
+        exit 1
+    }
+
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    $arch2 = $env:PROCESSOR_ARCHITEW6432
+    $isArm = ($arch -eq 'ARM64' -or $arch2 -eq 'ARM64')
+    if (-not $isArm -and $machine -eq 0xAA64) {
+        Write-Host "error: this package contains an ARM64 executable but your Windows is not ARM64" -ForegroundColor Red
+        Write-Host "hint: install the x64 build" -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 $hasVulkan = Has-Vulkan
 $cudaVersionStr = Get-CudaVersion
 $cudaVersion = $null
@@ -94,14 +141,32 @@ if (-not $hasVulkan -and -not $cudaOk) {
 }
 
 $pkgUrl = "$BaseUrl/$PackageName"
-$archivePath = Join-Path $env:TEMP $PackageName
+$archivePath = Join-Path $DownloadDir $PackageName
 
 try {
+    if (-not (Test-Path $DownloadDir)) {
+        New-Item -ItemType Directory -Path $DownloadDir -Force | Out-Null
+    }
+
+    try {
+        $testPath = Join-Path $DownloadDir (".gpuf_write_test_" + [Guid]::NewGuid().ToString("N"))
+        Set-Content -Path $testPath -Value "1" -Encoding Ascii -Force
+        Remove-Item -Path $testPath -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "error: cannot write to DownloadDir: $DownloadDir" -ForegroundColor Red
+        Write-Host "hint: use -DownloadDir C:\\gpuf or a directory you can write to" -ForegroundColor Yellow
+        exit 1
+    }
+
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
     Write-Host "Downloading: $pkgUrl" -ForegroundColor Yellow
+    Write-Host "DownloadPath: $archivePath" -ForegroundColor Yellow
+    if (Test-Path $archivePath) {
+        Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
+    }
     (New-Object System.Net.WebClient).DownloadFile($pkgUrl, $archivePath)
 
     # Extract (.tar.gz) using tar.exe (available on most Windows 10/11)
@@ -132,6 +197,8 @@ try {
             Get-ChildItem -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 50 FullName
             exit 1
         }
+
+        Assert-ExeCompatible $candidate.FullName
 
         Verify-Md5PrefixIfPossible $candidate.FullName
 
