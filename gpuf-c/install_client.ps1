@@ -18,6 +18,60 @@ function Parse-Version([string]$v) {
     try { return [version]$v } catch { return $null }
 }
 
+function Get-ExpectedVersionFromPackageName([string]$Name) {
+    try {
+        $m = [regex]::Match($Name, "^v?([0-9]+\.[0-9]+\.[0-9]+)")
+        if ($m.Success) {
+            return $m.Groups[1].Value
+        }
+    } catch {
+    }
+    return $null
+}
+
+function Get-InstalledVersionMarker([string]$Dir) {
+    try {
+        $marker = Join-Path $Dir ".gpuf_version"
+        if (Test-Path $marker) {
+            $v = (Get-Content -Path $marker -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($v) {
+                $m = [regex]::Match($v, "([0-9]+\.[0-9]+\.[0-9]+)")
+                if ($m.Success) {
+                    return $m.Groups[1].Value
+                }
+            }
+        }
+    } catch {
+    }
+    return $null
+}
+
+function Get-InstalledGpufVersion([string]$ExePath) {
+    if (-not (Test-Path $ExePath)) {
+        return $null
+    }
+
+    try {
+        $out = & $ExePath --version 2>&1
+        $s = ($out | Out-String)
+        $m = [regex]::Match($s, "([0-9]+\.[0-9]+\.[0-9]+)")
+        if ($m.Success) {
+            return $m.Groups[1].Value
+        }
+    } catch {
+    }
+
+    return $null
+}
+
+function Ensure-InstallDirOnPath([string]$Dir) {
+    $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($currentPath -notlike "*$Dir*") {
+        [Environment]::SetEnvironmentVariable('Path', "$currentPath;$Dir", 'User')
+        $env:Path += ";$Dir"
+    }
+}
+
 function Get-CudaVersion {
     # Prefer nvcc if available
     $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
@@ -115,6 +169,190 @@ function Assert-ExeCompatible([string]$Path) {
     }
 }
 
+function Write-DownloadProgress([int64]$Done, [int64]$Total) {
+    if (-not $script:__gpuf_lastProgressLen) {
+        $script:__gpuf_lastProgressLen = 0
+    }
+
+    $width = 50
+    try {
+        $w = $Host.UI.RawUI.WindowSize.Width
+        if ($w -gt 40) {
+            $width = [math]::Max(10, [math]::Min(70, $w - 40))
+        }
+    } catch {
+    }
+
+    $pct = 0
+    if ($Total -gt 0) {
+        $pct = [math]::Min(100, [math]::Floor(($Done * 100.0) / $Total))
+    }
+
+    $filled = [math]::Floor(($pct * $width) / 100)
+    $empty = $width - $filled
+
+    $fillChar = [string][char]0x2588
+    $emptyChar = [string][char]0x2591
+    $bar = (($fillChar * $filled) + ($emptyChar * $empty))
+
+    $doneMb = [math]::Round($Done / 1MB, 2)
+    if ($Total -gt 0) {
+        $totalMb = [math]::Round($Total / 1MB, 2)
+        $line = "Downloading [$bar] $pct% ($doneMb/$totalMb MB)"
+    } else {
+        $line = "Downloading [$bar] $doneMb MB"
+    }
+
+    $pad = ""
+    if ($script:__gpuf_lastProgressLen -gt $line.Length) {
+        $pad = (' ' * ($script:__gpuf_lastProgressLen - $line.Length))
+    }
+    $script:__gpuf_lastProgressLen = $line.Length
+
+    Write-Host -NoNewline ("`r" + $line + $pad)
+}
+
+function Complete-DownloadProgress {
+    if (-not $script:__gpuf_lastProgressLen) {
+        $script:__gpuf_lastProgressLen = 0
+    }
+    if ($script:__gpuf_lastProgressLen -gt 0) {
+        Write-Host ""
+    }
+    $script:__gpuf_lastProgressLen = 0
+}
+
+function Get-RemoteContentLength([string]$Url) {
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method = 'HEAD'
+        $req.AllowAutoRedirect = $true
+        $resp = $req.GetResponse()
+        try {
+            return [int64]$resp.ContentLength
+        } finally {
+            try { $resp.Close() } catch { }
+        }
+    } catch {
+        return [int64]-1
+    }
+}
+
+function Download-FileWithProgress([string]$Url, [string]$OutFile) {
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = 'GET'
+    $req.AllowAutoRedirect = $true
+
+    $resp = $req.GetResponse()
+    try {
+        $total = $resp.ContentLength
+    } catch {
+        $total = -1
+    }
+
+    $inStream = $resp.GetResponseStream()
+    $outStream = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+
+    try {
+        $buffer = New-Object byte[] (1024 * 1024)
+        $done = [int64]0
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $lastUpdateMs = [int64]0
+        while (($read = $inStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $outStream.Write($buffer, 0, $read)
+            $done += $read
+
+            if (($sw.ElapsedMilliseconds - $lastUpdateMs) -ge 500) {
+                Write-DownloadProgress $done $total
+
+                $lastUpdateMs = $sw.ElapsedMilliseconds
+            }
+        }
+    } finally {
+        try { $outStream.Close() } catch { }
+        try { $inStream.Close() } catch { }
+        try { $resp.Close() } catch { }
+        Complete-DownloadProgress
+    }
+}
+
+function Download-FilePreferCurl([string]$Url, [string]$OutFile) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        try {
+            $total = Get-RemoteContentLength $Url
+
+            if ($total -gt 0 -and (Test-Path $OutFile)) {
+                try {
+                    $existingLen = (Get-Item $OutFile).Length
+                    if ($existingLen -ge $total) {
+                        if ($existingLen -gt $total) {
+                            Remove-Item -Path $OutFile -Force -ErrorAction SilentlyContinue
+                        } else {
+                            Write-DownloadProgress $existingLen $total
+                            Complete-DownloadProgress
+                            return
+                        }
+                    }
+                } catch {
+                }
+            }
+
+            $args = @(
+                '-L',
+                '-C', '-',
+                '--fail',
+                '--retry', '5',
+                '--retry-delay', '2',
+                '--silent',
+                '--show-error',
+                '-o', $OutFile,
+                $Url
+            )
+
+            $p = Start-Process -FilePath $curl.Source -ArgumentList $args -NoNewWindow -PassThru
+            while (-not $p.HasExited) {
+                $done = [int64]0
+                try {
+                    if (Test-Path $OutFile) {
+                        $done = (Get-Item $OutFile).Length
+                    }
+                } catch {
+                }
+
+                Write-DownloadProgress $done $total
+                Start-Sleep -Milliseconds 500
+            }
+
+            $done = [int64]0
+            try {
+                if (Test-Path $OutFile) {
+                    $done = (Get-Item $OutFile).Length
+                }
+            } catch {
+            }
+            Write-DownloadProgress $done $total
+            Complete-DownloadProgress
+
+            if ($total -gt 0 -and $done -ge $total) {
+                return
+            }
+
+            if ($p.ExitCode -ne 0) {
+                throw "curl.exe exited with code $($p.ExitCode)"
+            }
+
+            return
+        } catch {
+            Write-Host "warning: curl.exe download failed, fallback to direct download: $_" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "warning: curl.exe not found, fallback to direct download" -ForegroundColor Yellow
+    }
+
+    Download-FileWithProgress $Url $OutFile
+}
+
 $hasVulkan = Has-Vulkan
 $cudaVersionStr = Get-CudaVersion
 $cudaVersion = $null
@@ -162,12 +400,53 @@ try {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
+    $expectedVer = Get-ExpectedVersionFromPackageName $PackageName
+    $installedExe = Join-Path $InstallDir "gpuf-c.exe"
+    $installedVer = Get-InstalledVersionMarker $InstallDir
+    if (-not $installedVer) {
+        $installedVer = Get-InstalledGpufVersion $installedExe
+    }
+    if ($expectedVer -and $installedVer -and (Test-Path $installedExe) -and ((Parse-Version $installedVer) -eq (Parse-Version $expectedVer))) {
+        Ensure-InstallDirOnPath $InstallDir
+        Write-Host "gpuf-c is already installed and up to date (version $installedVer). Skip download." -ForegroundColor Green
+        exit 0
+    }
+
+    if (-not $expectedVer) {
+        Write-Host "warning: cannot parse expected version from PackageName: $PackageName (will reinstall)" -ForegroundColor Yellow
+    } else {
+        $markerPath = Join-Path $InstallDir ".gpuf_version"
+        if (Test-Path $markerPath) {
+            $markerVer = Get-InstalledVersionMarker $InstallDir
+            if ((-not (Test-Path $installedExe)) -and $markerVer -and ((Parse-Version $markerVer) -eq (Parse-Version $expectedVer))) {
+                Write-Host "warning: version marker indicates up-to-date ($markerVer) but gpuf-c.exe is missing; will reinstall" -ForegroundColor Yellow
+            } elseif ($markerVer -and ((Parse-Version $markerVer) -ne (Parse-Version $expectedVer))) {
+                Write-Host "warning: installed version marker ($markerVer) != expected ($expectedVer), will reinstall" -ForegroundColor Yellow
+            }
+        } elseif ($installedVer) {
+            Write-Host "warning: detected installed version ($installedVer) but expected ($expectedVer), will reinstall" -ForegroundColor Yellow
+        } elseif (Test-Path $installedExe) {
+            Write-Host "warning: gpuf-c.exe exists but version cannot be determined (marker missing and --version parse failed), will reinstall" -ForegroundColor Yellow
+        }
+    }
+
     Write-Host "Downloading: $pkgUrl" -ForegroundColor Yellow
     Write-Host "DownloadPath: $archivePath" -ForegroundColor Yellow
     if (Test-Path $archivePath) {
         Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
     }
-    (New-Object System.Net.WebClient).DownloadFile($pkgUrl, $archivePath)
+    $tmpArchivePath = "$archivePath.part"
+    Download-FilePreferCurl $pkgUrl $tmpArchivePath
+    if (Test-Path $archivePath) {
+        Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
+    }
+    try {
+        Move-Item -Path $tmpArchivePath -Destination $archivePath -Force
+    } catch {
+        Write-Host "error: failed to finalize archive move to $archivePath" -ForegroundColor Red
+        Write-Host "hint: the destination file may be locked by another process; archive remains at: $tmpArchivePath" -ForegroundColor Yellow
+        throw
+    }
 
     # Extract (.tar.gz) using tar.exe (available on most Windows 10/11)
     $tar = Get-Command tar -ErrorAction SilentlyContinue
@@ -222,10 +501,14 @@ try {
     }
 
     # add to PATH
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($currentPath -notlike "*$InstallDir*") {
-        [Environment]::SetEnvironmentVariable('Path', "$currentPath;$InstallDir", 'User')
-        $env:Path += ";$InstallDir"
+    Ensure-InstallDirOnPath $InstallDir
+
+    try {
+        $expectedVer = Get-ExpectedVersionFromPackageName $PackageName
+        if ($expectedVer) {
+            Set-Content -Path (Join-Path $InstallDir ".gpuf_version") -Value $expectedVer -Encoding Ascii -Force
+        }
+    } catch {
     }
 
     Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue

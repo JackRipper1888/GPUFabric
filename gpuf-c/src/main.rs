@@ -28,8 +28,16 @@ async fn main() -> Result<()> {
     // Normal GPUFabric worker mode
     let worker = new_worker(args).await;
 
-    worker.login().await?;
-    worker.handler().await?;
+    if let Err(e) = worker.login().await {
+        tracing::error!(error = %e, "gpuf-c login failed");
+        return Err(e);
+    }
+
+    if let Err(e) = worker.handler().await {
+        tracing::error!(error = %e, "gpuf-c handler exited");
+        return Err(e);
+    }
+
     Ok(())
 }
 
