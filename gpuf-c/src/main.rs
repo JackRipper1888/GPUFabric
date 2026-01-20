@@ -17,6 +17,10 @@ use tokio::sync::RwLock;
 async fn main() -> Result<()> {
     init_logging();
 
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("gpuf-c panic: {info}");
+    }));
+
     let args = Args::parse().load_config()?;
 
     // Check if running in standalone LLAMA mode
@@ -26,19 +30,23 @@ async fn main() -> Result<()> {
     }
 
     // Normal GPUFabric worker mode
-    let worker = new_worker(args).await;
+    loop {
+        let worker = new_worker(args.clone()).await;
 
-    if let Err(e) = worker.login().await {
-        tracing::error!(error = %e, "gpuf-c login failed");
-        return Err(e);
+        if let Err(e) = worker.login().await {
+            tracing::error!(error = %e, "gpuf-c login failed");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        }
+
+        if let Err(e) = worker.handler().await {
+            tracing::error!(error = %e, "gpuf-c handler exited");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
-
-    if let Err(e) = worker.handler().await {
-        tracing::error!(error = %e, "gpuf-c handler exited");
-        return Err(e);
-    }
-
-    Ok(())
 }
 
 #[cfg(not(target_os = "android"))]

@@ -1824,6 +1824,12 @@ impl WorkerHandle for ClientWorker {
                                 repeat_last_n,
                                 min_keep,
                             } => {
+                                info!(
+                                    "Received chat inference task: {} messages: {} max_tokens: {}",
+                                    task_id,
+                                    messages.len(),
+                                    max_tokens
+                                );
                                 let prompt = {
                                     #[cfg(target_os = "android")]
                                     {

@@ -124,3 +124,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.release-unwind]
+inherits = "release"
+panic = "unwind"
