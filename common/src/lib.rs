@@ -55,6 +55,17 @@ pub struct DevicesInfo {
 pub struct PodModel {
     pub pod_id: u16,
     pub model_name: Option<String>,
+    pub download_url: Option<String>,
+    pub checksum: Option<String>,
+    pub expected_size: Option<u64>,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadStatus {
+    Pending,
+    Downloading,
+    Completed,
+    Failed,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -250,6 +261,18 @@ pub enum CommandV1 {
         completion_tokens: u32,
         analysis_tokens: u32,
         final_tokens: u32,
+    },
+
+    // Model download progress from client to server
+    ModelDownloadProgress {
+        client_id: [u8; 16],
+        model_name: String,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+        percentage: f32,
+        speed_bps: u64,
+        status: DownloadStatus,
+        error: Option<String>,
     },
 }
 

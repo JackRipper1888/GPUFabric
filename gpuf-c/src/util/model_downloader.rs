@@ -424,22 +424,57 @@ impl ModelDownloader {
     async fn simple_download(&self) -> Result<()> {
         info!("Starting simple download (no Content-Length)");
 
-        let response = self.client.get(&self.config.url).send().await?;
+        // Check if we can resume from existing file
+        let resume_from = if self.config.resume && self.config.output_path.exists() {
+            let metadata = tokio::fs::metadata(&self.config.output_path).await?;
+            let size = metadata.len();
+            info!("Found existing file with {} bytes, attempting resume", size);
+            size
+        } else {
+            0
+        };
 
-        if !response.status().is_success() {
+        // Send request with Range header if resuming
+        let response = if resume_from > 0 {
+            self.client
+                .get(&self.config.url)
+                .header("Range", format!("bytes={}-", resume_from))
+                .send()
+                .await?
+        } else {
+            self.client.get(&self.config.url).send().await?
+        };
+
+        if !response.status().is_success() && response.status() != 206 {
             return Err(anyhow!("Download failed: {}", response.status()));
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        info!("Actual content length: {} bytes", total_size);
+        let actual_total = if resume_from > 0 && response.status() == 206 {
+            resume_from + total_size
+        } else {
+            total_size
+        };
+        info!("Actual content length: {} bytes (resume from: {})", actual_total, resume_from);
 
         // Create output directory
         if let Some(parent) = self.config.output_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut file = tokio::fs::File::create(&self.config.output_path).await?;
-        let mut downloaded_bytes = 0u64;
+        // Open file for append if resuming, otherwise create new
+        let mut file = if resume_from > 0 && response.status() == 206 {
+            use tokio::fs::OpenOptions;
+            OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&self.config.output_path)
+                .await?
+        } else {
+            tokio::fs::File::create(&self.config.output_path).await?
+        };
+        
+        let mut downloaded_bytes = resume_from;
         let start_time = std::time::Instant::now();
 
         // Use streaming download
@@ -455,25 +490,25 @@ impl ModelDownloader {
             if let Some(callback) = &self.progress_callback {
                 let progress = DownloadProgress {
                     downloaded_bytes,
-                    total_bytes: if total_size > 0 {
-                        total_size
+                    total_bytes: if actual_total > 0 {
+                        actual_total
                     } else {
                         downloaded_bytes
                     },
-                    percentage: if total_size > 0 {
-                        (downloaded_bytes as f64) / (total_size as f64)
+                    percentage: if actual_total > 0 {
+                        (downloaded_bytes as f64) / (actual_total as f64) * 100.0
                     } else {
                         0.0 // Can't calculate percentage without total size
                     },
                     speed_bps: if start_time.elapsed().as_secs() > 0 {
-                        downloaded_bytes / start_time.elapsed().as_secs()
+                        (downloaded_bytes - resume_from) / start_time.elapsed().as_secs()
                     } else {
                         0
                     },
-                    eta_seconds: if total_size > 0 && start_time.elapsed().as_secs() > 0 {
-                        let avg_speed = downloaded_bytes / start_time.elapsed().as_secs();
+                    eta_seconds: if actual_total > 0 && start_time.elapsed().as_secs() > 0 {
+                        let avg_speed = (downloaded_bytes - resume_from) / start_time.elapsed().as_secs();
                         if avg_speed > 0 {
-                            Some((total_size - downloaded_bytes) / avg_speed)
+                            Some((actual_total - downloaded_bytes) / avg_speed)
                         } else {
                             None
                         }

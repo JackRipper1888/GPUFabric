@@ -102,6 +102,11 @@ CREATE TABLE  IF NOT EXISTS  client_models (
     UNIQUE(name, version_code),
     CONSTRAINT version_code_check CHECK (version_code > 0)
 );
+-- Add download_url, checksum, expected_size columns to client_models table
+ALTER TABLE client_models 
+ADD COLUMN IF NOT EXISTS download_url TEXT,
+ADD COLUMN IF NOT EXISTS checksum VARCHAR(128),
+ADD COLUMN IF NOT EXISTS expected_size BIGINT;
 
 CREATE TABLE IF NOT EXISTS heartbeat (
   id SERIAL,
@@ -159,11 +164,16 @@ CREATE INDEX IF NOT EXISTS idx_device_daily_stats_client_id ON device_daily_stat
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_device_index ON device_daily_stats (device_index);
 
 -- Insert test data for client_models
-INSERT INTO client_models (name, version, version_code, is_active, created_at, engine_type, min_memory_mb, min_gpu_memory_gb) 
+-- engine_type: 1=Ollama, 2=Vllm, 3=TensorRT, 4=ONNX, 5=None, 6=Llama
+-- expected_size unit: bytes
+INSERT INTO client_models (name, version, version_code, is_active, created_at, engine_type, min_memory_mb, min_gpu_memory_gb, download_url, checksum, expected_size) 
 VALUES 
-    ('llama3.2:latest', 'latest', 12314, true, '2025-10-14 16:19:31.846481+08', 1, NULL, 8),
-    ('TheBloke/gemma-3-12b-it-GPTQ', 'GPTQ', 12315, true, '2025-10-14 23:34:40.663107+08', 2, NULL, 8),
-    ('facebook/opt-125m', 'latest', 12316, true, '2025-10-15 11:06:15.912991+08', 2, NULL, 8)
+    ('llama3.2:latest', 'latest', 12314, true, '2025-10-14 16:19:31.846481+08', 1, NULL, 8, NULL, NULL, NULL),
+    ('TheBloke/gemma-3-12b-it-GPTQ', 'GPTQ', 12315, true, '2025-10-14 23:34:40.663107+08', 2, NULL, 8, NULL, NULL, NULL),
+    ('facebook/opt-125m', 'latest', 12316, true, '2025-10-15 11:06:15.912991+08', 2, NULL, 8, NULL, NULL, NULL),
+    ('Qwen3-32B-Q6_K.gguf', 'Q6_K', 12317, true, CURRENT_TIMESTAMP, 6, NULL, 24, 'https://modelscope.cn/models/Qwen/Qwen3-32B-GGUF/resolve/master/Qwen3-32B-Q6_K.gguf', 'c4c7c3cb6da260df1fe1d3cfd090a32dc7cc348f1278158be18e301f390d6f6e', 26369368064),
+    ('Qwen3-14B-Q8_0.gguf', 'Q8_0', 12318, true, CURRENT_TIMESTAMP, 6, NULL, 16, 'https://modelscope.cn/models/Qwen/Qwen3-14B-GGUF/resolve/master/Qwen3-14B-Q8_0.gguf', 'a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d', 15927754752),
+    ('Qwen3-8B-Q8_0.gguf', 'Q8_0', 12319, true, CURRENT_TIMESTAMP, 6, NULL, 12, 'https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q8_0.gguf', '408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6', 8988692480)
 ON CONFLICT (name, version) DO NOTHING;
 
 -- Insert test data for tokens

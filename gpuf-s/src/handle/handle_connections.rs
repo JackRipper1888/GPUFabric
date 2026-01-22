@@ -9,7 +9,7 @@ use bytes::BytesMut;
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use common::{os_type_str, CommandV2, Model, OsType, PodModel};
+use common::{os_type_str, format_bytes, CommandV2, Model, OsType, PodModel};
 use redis::Client as RedisClient;
 use redis::AsyncCommands;
 use sqlx::{Pool, Postgres};
@@ -290,6 +290,42 @@ async fn handle_single_client(
                     .await;
             }
 
+            Ok(Command::V1(CommandV1::ModelDownloadProgress {
+                client_id: id,
+                model_name,
+                downloaded_bytes,
+                total_bytes,
+                percentage,
+                speed_bps,
+                status,
+                error,
+            })) => {
+                info!(
+                    "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
+                    ClientId(id),
+                    model_name,
+                    percentage,
+                    format_bytes!(downloaded_bytes),
+                    format_bytes!(total_bytes),
+                    format_bytes!(speed_bps),
+                    status,
+                    error
+                );
+                
+                // Store or delete progress in Redis
+                update_model_download_progress_in_redis(
+                    &redis_client,
+                    &ClientId(id),
+                    &model_name,
+                    downloaded_bytes,
+                    total_bytes,
+                    percentage,
+                    speed_bps,
+                    &status,
+                    error.as_deref(),
+                ).await;
+            }
+
             Ok(Command::V2(CommandV2::P2PConnectionRequest {
                 source_client_id,
                 target_client_id,
@@ -539,19 +575,25 @@ async fn handle_models_status(
 
     for device in auto_models_device {
         match hot_models
-            .get_hot_model(device.memtotal_gb as u32, device.engine_type.to_i16())
+            .get_hot_model_with_details(device.memtotal_gb as u32, device.engine_type.to_i16())
             .await
         {
-            Ok(model_name) => {
+            Ok(model_info) => {
                 pods_model.push(PodModel {
                     pod_id: device.pod_id,
-                    model_name: Some(model_name),
+                    model_name: if model_info.name.is_empty() { None } else { Some(model_info.name) },
+                    download_url: model_info.download_url,
+                    checksum: model_info.checksum,
+                    expected_size: model_info.expected_size.map(|s| s as u64),
                 });
             }
             Err(e) => {
                 pods_model.push(PodModel {
                     pod_id: device.pod_id,
                     model_name: None,
+                    download_url: None,
+                    checksum: None,
+                    expected_size: None,
                 });
                 error!("Failed to get hot model: {}", e);
             }
@@ -620,6 +662,66 @@ async fn handle_heartbeat(
     {
         error!("Failed to send heartbeat to Kafka: {:?}", e);
     };
+}
+
+/// Update model download progress in Redis
+/// Simplified version: one key per client, 60 seconds TTL
+/// If download is completed, delete the key; otherwise, update with current progress
+async fn update_model_download_progress_in_redis(
+    redis_client: &Arc<RedisClient>,
+    client_id: &ClientId,
+    model_name: &str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    percentage: f32,
+    speed_bps: u64,
+    status: &common::DownloadStatus,
+    error: Option<&str>,
+) {
+    use redis::AsyncCommands;
+    
+    let Ok(mut conn) = redis_client.get_async_connection().await else {
+        error!("Failed to get Redis connection for model download progress");
+        return;
+    };
+
+    // Simplified key format: one key per client
+    let key = format!("client:{}:model_download", client_id);
+
+    // If download is completed or failed, delete the key
+    if matches!(status, common::DownloadStatus::Completed | common::DownloadStatus::Failed) {
+        if let Err(e) = conn.del::<_, ()>(&key).await {
+            error!("Failed to delete model download progress from Redis: {}", e);
+        } else {
+            info!("Deleted model download progress from Redis for client {}", client_id);
+        }
+        return;
+    }
+
+    // Otherwise, update the progress
+    let timestamp = chrono::Utc::now().timestamp();
+    let status_str = format!("{:?}", status);
+    
+    let mut fields: Vec<(&str, String)> = vec![
+        ("model_name", model_name.to_string()),
+        ("downloaded_bytes", downloaded_bytes.to_string()),
+        ("total_bytes", total_bytes.to_string()),
+        ("percentage", format!("{:.2}", percentage)),
+        ("speed_bps", speed_bps.to_string()),
+        ("status", status_str),
+        ("timestamp", timestamp.to_string()),
+    ];
+
+    if let Some(err) = error {
+        fields.push(("error", err.to_string()));
+    }
+
+    if let Err(e) = conn.hset_multiple::<_, _, _, ()>(&key, &fields).await {
+        error!("Failed to update model download progress in Redis: {}", e);
+    } else {
+        // Set expiration to 60 seconds for auto-cleanup
+        let _: Result<(), _> = conn.expire(&key, 60).await;
+    }
 }
 
 #[cfg(test)]

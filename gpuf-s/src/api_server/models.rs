@@ -22,6 +22,9 @@ pub struct CreateOrUpdateModelRequest {
     pub is_active: Option<bool>,
     pub min_memory_mb: Option<i32>,
     pub min_gpu_memory_gb: Option<i32>,
+    pub download_url: Option<String>,
+    pub checksum: Option<String>,
+    pub expected_size: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,6 +37,9 @@ pub struct ModelResponse {
     pub min_memory_mb: Option<i32>,
     pub min_gpu_memory_gb: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub download_url: Option<String>,
+    pub checksum: Option<String>,
+    pub expected_size: Option<i64>,
 }
 
 // Create or update a model
@@ -54,6 +60,9 @@ pub async fn create_or_update_model(
         payload.is_active,
         payload.min_memory_mb,
         payload.min_gpu_memory_gb,
+        payload.download_url,
+        payload.checksum,
+        payload.expected_size,
     )
     .await
     {
@@ -88,6 +97,9 @@ pub async fn get_models(
                     min_memory_mb: model.min_memory_mb,
                     min_gpu_memory_gb: model.min_gpu_memory_gb,
                     created_at: model.created_at,
+                    download_url: model.download_url,
+                    checksum: model.checksum,
+                    expected_size: model.expected_size,
                 })
                 .collect();
             Ok(Json(ApiResponse::success(models)))
