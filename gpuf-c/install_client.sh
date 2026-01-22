@@ -389,184 +389,6 @@ install_from_extracted_dir() {
     fi
 }
 
-# Function to install on Windows
-install_windows() {
-    log "${YELLOW}installing gpuf-c (llama.cpp) on Windows...${NC}"
-
-    local temp_script="/tmp/install_gpuf_c_llamacpp_$(date +%s).ps1"
-
-    cat << 'EOFWIN' > "$temp_script"
-# PowerShell script
-param(
-    [string]$BaseUrl = "https://oss.gpunexus.com/client",
-    [string]$InstallDir = "$env:USERPROFILE\\AppData\\Local\\Programs\\gpuf-c"
-)
-
-# check if running as administrator
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Host "error: please run this script as administrator" -ForegroundColor Red
-    exit 1
-}
-
-$ErrorActionPreference = 'Stop'
-
-function Parse-Version([string]$v) {
-    try { return [version]$v } catch { return $null }
-}
-
-function Get-CudaVersion {
-    # Prefer nvcc if available
-    $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
-    if ($nvcc) {
-        $out = & nvcc --version 2>$null
-        $m = [regex]::Match(($out | Out-String), "release\s+([0-9]+\.[0-9]+)")
-        if ($m.Success) { return $m.Groups[1].Value }
-    }
-
-    # Prefer nvidia-smi (works even without CUDA Toolkit)
-    $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    if ($smi) {
-        $out = & nvidia-smi 2>$null
-        $m = [regex]::Match(($out | Out-String), "CUDA Version:\s*([0-9]+\.[0-9]+)")
-        if ($m.Success) { return $m.Groups[1].Value }
-    }
-
-    # Fallback: registry check (may not exist)
-    $paths = @(
-        "HKLM:\\SOFTWARE\\NVIDIA Corporation\\CUDA Toolkit",
-        "HKLM:\\SOFTWARE\\WOW6432Node\\NVIDIA Corporation\\CUDA Toolkit"
-    )
-    foreach ($p in $paths) {
-        if (Test-Path $p) {
-            $props = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
-            if ($props -and $props.Version) { return $props.Version }
-        }
-    }
-
-    return $null
-}
-
-function Has-Vulkan {
-    $dll1 = Join-Path $env:WINDIR "System32\\vulkan-1.dll"
-    $dll2 = Join-Path $env:WINDIR "SysWOW64\\vulkan-1.dll"
-    return (Test-Path $dll1) -or (Test-Path $dll2)
-}
-
-$hasVulkan = Has-Vulkan
-$cudaVersionStr = Get-CudaVersion
-$cudaVersion = $null
-if ($cudaVersionStr) { $cudaVersion = Parse-Version $cudaVersionStr }
-
-$cudaOk = $false
-if ($cudaVersion) {
-    $cudaOk = $cudaVersion -ge (Parse-Version "13.0")
-}
-
-if (-not $hasVulkan -and -not $cudaOk) {
-    Write-Host "error: Windows requires Vulkan runtime OR CUDA version >= 13.0" -ForegroundColor Red
-    if ($hasVulkan) {
-        Write-Host "Vulkan detected" -ForegroundColor Green
-    } else {
-        Write-Host "Vulkan not detected (vulkan-1.dll not found)" -ForegroundColor Yellow
-    }
-    if ($cudaVersionStr) {
-        Write-Host "CUDA detected: $cudaVersionStr (require >= 13.0)" -ForegroundColor Yellow
-    } else {
-        Write-Host "CUDA not detected (nvidia-smi/nvcc/registry not found)" -ForegroundColor Yellow
-    }
-    exit 1
-}
-
-# Choose package name
-$pkgName = "v1.0.0-windows-gpuf-c.tar.gz"
-$pkgUrl = "$BaseUrl/$pkgName"
-$md5Url = "$BaseUrl/$pkgName.md5"
-
-$archivePath = Join-Path $env:TEMP $pkgName
-$md5Path = Join-Path $env:TEMP "$pkgName.md5"
-
-try {
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
-
-    Write-Host "Downloading: $pkgUrl" -ForegroundColor Yellow
-    (New-Object System.Net.WebClient).DownloadFile($pkgUrl, $archivePath)
-
-    # Optional checksum hint (no manual env var needed). If this file exists, verify archive MD5 contains the hint.
-    try {
-        (New-Object System.Net.WebClient).DownloadFile($md5Url, $md5Path)
-        $hintLine = (Get-Content -Path $md5Path -TotalCount 1) -replace "\r", ""
-        $hint = ($hintLine -replace ".*=\s*", "").Split(" ")[0].Trim().ToLower()
-        if ($hint -and $hint.Length -gt 0) {
-            $md5 = (Get-FileHash -Algorithm MD5 -Path $archivePath).Hash.ToLower()
-            if ($md5.IndexOf($hint) -lt 0) {
-                Write-Host "error: MD5 mismatch for downloaded archive" -ForegroundColor Red
-                Write-Host "expected contains: $hint" -ForegroundColor Yellow
-                Write-Host "actual md5:        $md5" -ForegroundColor Yellow
-                exit 1
-            }
-            Write-Host "Archive MD5 match ok: $md5" -ForegroundColor Green
-        }
-    } catch {
-        # ignore missing md5 file
-    }
-
-    # Extract (.tar.gz) using tar.exe (available on most Windows 10/11)
-    $tar = Get-Command tar -ErrorAction SilentlyContinue
-    if (-not $tar) {
-        Write-Host "error: tar command not found. Please install tar/bsdtar or use a zip-based package." -ForegroundColor Red
-        exit 1
-    }
-
-    Write-Host "Extracting to: $InstallDir" -ForegroundColor Yellow
-    & tar -xzf $archivePath -C $InstallDir
-
-    # Expect gpuf-c.exe inside root of the archive.
-    # If the release uses a versioned exe name, auto-fallback to the first .exe we can find.
-    $exe = Join-Path $InstallDir "gpuf-c.exe"
-    if (-not (Test-Path $exe)) {
-        $candidate = Get-ChildItem -Path $InstallDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $candidate) {
-            Write-Host "error: no .exe found after extraction in $InstallDir" -ForegroundColor Red
-            exit 1
-        }
-        Copy-Item -Path $candidate.FullName -Destination $exe -Force
-    }
-
-    # Note: MD5 verification is done via optional $pkgName.md5 sidecar file.
-
-    # add to PATH
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($currentPath -notlike "*$InstallDir*") {
-        [Environment]::SetEnvironmentVariable('Path', "$currentPath;$InstallDir", 'User')
-        $env:Path += ";$InstallDir"
-    }
-
-    Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
-
-    Write-Host "gpuf-c (llama.cpp) installed successfully!" -ForegroundColor Green
-    Write-Host "Please restart terminal to make PATH changes take effect." -ForegroundColor Yellow
-
-} catch {
-    Write-Host "installation failed: $_" -ForegroundColor Red
-    exit 1
-}
-EOFWIN
-
-    log "${YELLOW} executing Windows install script...${NC}"
-    if ! powershell -ExecutionPolicy Bypass -File "$temp_script" >> "$LOG_FILE" 2>&1; then
-        log "${RED}Windows install script execution failed, please check log: $LOG_FILE${NC}"
-        rm -f "$temp_script"
-        exit 1
-    fi
-
-    rm -f "$temp_script"
-
-    log "${GREEN}gpuf-c Windows install completed${NC}"
-}
-
 verify_installation() {
     log "${GREEN}=== installation completed ===${NC}"
     log "${YELLOW}verify installation:${NC}"
@@ -613,12 +435,12 @@ main() {
             fi
 
             local legacy_archive_name
-            legacy_archive_name="v1.0.0-${pkg_os}-gpuf-c.tar.gz"
+            legacy_archive_name="v1.0.1-${pkg_os}-gpuf-c.tar.gz"
 
             local arch_archive_name
             arch_archive_name="$legacy_archive_name"
             if [ "$OS" = "darwin" ]; then
-                arch_archive_name="v1.0.0-${pkg_os}-${arch_norm}-gpuf-c.tar.gz"
+                arch_archive_name="v1.0.1-${pkg_os}-${arch_norm}-gpuf-c.tar.gz"
             fi
 
             ARCHIVE_NAME="${GPUF_C_CLIENT_ARCHIVE_NAME:-$arch_archive_name}"
@@ -668,9 +490,6 @@ main() {
             install_from_extracted_dir "$payload"
 
             rm -rf "$tmp_dir"
-            ;;
-        windows|cygwin*|mingw*|msys*|nt|win*)
-            install_windows
             ;;
         *)
             log "${RED}not support os: $OS${NC}"

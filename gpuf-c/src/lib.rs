@@ -3752,7 +3752,7 @@ pub extern "C" fn start_remote_worker(
     client_id: *const c_char,
 ) -> c_int {
     use crate::handle::android_sdk::init_global_worker;
-    use crate::util::cmd::{Args, EngineType, WorkerType};
+    use crate::util::cmd::{Args, EngineType, LlamaSplitModeArg, WorkerType};
 
     println!("🔥 GPUFabric C API: Starting remote worker");
 
@@ -3837,6 +3837,9 @@ pub extern "C" fn start_remote_worker(
         llama_model_path: None,
         n_gpu_layers: 99,
         n_ctx: 8192,
+        llama_split_mode: LlamaSplitModeArg::Layer,
+        llama_main_gpu: 0,
+        llama_devices: None,
         stream_chunk_bytes: 256,
     };
 

@@ -8,7 +8,7 @@ use sqlx::{Pool, Postgres};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, debug};
 
 #[derive(Clone)]
 pub struct HotModelClass {
@@ -32,16 +32,11 @@ impl HotModelClass {
         (mem_mb / GB50_IN_MB) * GB50_IN_MB
     }
     pub async fn get_hot_model(&self, mem_total_gb: u32, engine_type: i16) -> Result<String> {
-        // TODO:
-        // let aligned_mem = Self::align_gpu_memory(mem_total_mb);
-        // {
-        //     let cache = self.cache.read().await;
-        //     if let Some(model) = cache.peek(&aligned_mem) {  // Use peek instead of get
-        //         debug!("Found model for memory {} MB: {}", mem_total_mb, model);
-        //         return Ok(model.cloneReceived empty models from server());
-        //     }
-        // }
+        let model_info = self.get_hot_model_with_details(mem_total_gb, engine_type).await?;
+        Ok(model_info.name)
+    }
 
+    pub async fn get_hot_model_with_details(&self, mem_total_gb: u32, engine_type: i16) -> Result<ModelInfo> {
         let model = match get_models_list(
             &self.pool,
             Some(true),
@@ -58,15 +53,25 @@ impl HotModelClass {
         };
         if model.is_empty() {
             warn!("No compatible models found for memory {} GB", mem_total_gb);
-            return Ok("".to_string());
+            return Ok(ModelInfo::default());
         }
 
-        // TODO:
-        // let mut cache = self.cache.write().await;
-        // cache.put(aligned_mem, format!("{}:{}", model[0].name, model[0].version));
-
-        Ok(model[0].name.clone())
+        Ok(ModelInfo {
+            name: model[0].name.clone(),
+            download_url: model[0].download_url.clone(),
+            checksum: model[0].checksum.clone(),
+            expected_size: model[0].expected_size,
+        })
     }
+}
+
+/// Model information including download details
+#[derive(Default, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub download_url: Option<String>,
+    pub checksum: Option<String>,
+    pub expected_size: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -161,20 +166,26 @@ pub async fn create_or_update_model(
     is_active: Option<bool>,
     min_memory_mb: Option<i32>,
     min_gpu_memory_gb: Option<i32>,
+    download_url: Option<String>,
+    checksum: Option<String>,
+    expected_size: Option<i64>,
 ) -> Result<()> {
-    let _result   = sqlx::query(
-        &format!("
-        INSERT INTO {} (name, version, version_code, is_active, min_memory_mb, engine_type, min_gpu_memory_gb)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    let _result = sqlx::query(
+        "
+        INSERT INTO client_models (name, version, version_code, is_active, min_memory_mb, engine_type, min_gpu_memory_gb, download_url, checksum, expected_size)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (name, version) 
         DO UPDATE SET 
             version_code = EXCLUDED.version_code,
             is_active = COALESCE(EXCLUDED.is_active, client_models.is_active),
             min_memory_mb = EXCLUDED.min_memory_mb,
             engine_type = EXCLUDED.engine_type,
-            min_gpu_memory_gb = EXCLUDED.min_gpu_memory_gb
-        RETURNING id, name, version, version_code, is_active, min_memory_mb, engine_type, min_gpu_memory_gb, created_at
-        ",GPU_ASSETS_TABLE)
+            min_gpu_memory_gb = EXCLUDED.min_gpu_memory_gb,
+            download_url = EXCLUDED.download_url,
+            checksum = EXCLUDED.checksum,
+            expected_size = EXCLUDED.expected_size
+        RETURNING id
+        ",
     )
     .bind(name)
     .bind(version)
@@ -183,6 +194,9 @@ pub async fn create_or_update_model(
     .bind(min_memory_mb)
     .bind(engine_type)
     .bind(min_gpu_memory_gb)
+    .bind(download_url)
+    .bind(checksum)
+    .bind(expected_size)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -202,6 +216,9 @@ pub struct Models {
     pub min_memory_mb: Option<i32>,
     pub min_gpu_memory_gb: Option<i32>,
     pub created_at: DateTime<Utc>,
+    pub download_url: Option<String>,
+    pub checksum: Option<String>,
+    pub expected_size: Option<i64>,
 }
 
 pub async fn get_models_list(
@@ -210,7 +227,8 @@ pub async fn get_models_list(
     engine_type: Option<i16>,
     min_gpu_memory_gb: Option<i32>,
 ) -> Result<Vec<Models>> {
-    let mut query_builder = sqlx::QueryBuilder::new("SELECT id,name,version,version_code,is_active,min_memory_mb,min_gpu_memory_gb,created_at  FROM client_models WHERE 1=1");
+    debug!("get_models_list is_active: {:?}, engine_type: {:?}, min_gpu_memory_gb: {:?}", is_active, engine_type, min_gpu_memory_gb);
+    let mut query_builder = sqlx::QueryBuilder::new("SELECT id,name,version,version_code,is_active,min_memory_mb,min_gpu_memory_gb,created_at,download_url,checksum,expected_size FROM client_models WHERE 1=1");
 
     if let Some(active) = is_active {
         query_builder.push(" AND is_active = ").push_bind(active);
@@ -227,7 +245,7 @@ pub async fn get_models_list(
             .push(" AND engine_type = ")
             .push_bind(engine_type);
     }
-    query_builder.push(" ORDER BY version_code DESC, created_at DESC");
+    query_builder.push(" ORDER BY CASE WHEN min_gpu_memory_gb IS NULL THEN 0 ELSE min_gpu_memory_gb END DESC, version_code DESC, created_at DESC");
     let models = query_builder
         .build_query_as::<Models>()
         .fetch_all(pool)
@@ -250,26 +268,35 @@ pub async fn get_models_batch(
             pod_model.push(PodModel {
                 pod_id: device_info.pod_id,
                 model_name: None,
+                download_url: None,
+                checksum: None,
+                expected_size: None,
             });
             continue;
         }
         match hot_models
-            .get_hot_model(
+            .get_hot_model_with_details(
                 device_info.memtotal_gb as u32,
                 device_info.engine_type.to_i16(),
             )
             .await
         {
-            Ok(model) => {
-                if model.is_empty() {
+            Ok(model_info) => {
+                if model_info.name.is_empty() {
                     pod_model.push(PodModel {
                         pod_id: device_info.pod_id,
                         model_name: None,
+                        download_url: None,
+                        checksum: None,
+                        expected_size: None,
                     });
                 } else {
                     pod_model.push(PodModel {
                         pod_id: device_info.pod_id,
-                        model_name: Some(model),
+                        model_name: Some(model_info.name),
+                        download_url: model_info.download_url,
+                        checksum: model_info.checksum,
+                        expected_size: model_info.expected_size.map(|s| s as u64),
                     });
                 }
             }
@@ -278,6 +305,9 @@ pub async fn get_models_batch(
                 pod_model.push(PodModel {
                     pod_id: device_info.pod_id,
                     model_name: None,
+                    download_url: None,
+                    checksum: None,
+                    expected_size: None,
                 });
             }
         }

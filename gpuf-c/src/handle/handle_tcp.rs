@@ -9,8 +9,9 @@ use crate::util::system_info::{
 use anyhow::{anyhow, Result};
 use common::{
     format_bytes, format_duration, join_streams, read_command, write_command, Command, CommandV1,
-    CommandV2, EngineType as ClientEngineType, Model, OsType, OutputPhase, P2PCandidate,
-    P2PCandidateType, P2PConnectionType, P2PTransport, SystemInfo, MAX_MESSAGE_SIZE,
+    CommandV2, DownloadStatus, EngineType as ClientEngineType, Model, OsType, OutputPhase,
+    P2PCandidate, P2PCandidateType, P2PConnectionType, P2PTransport, PodModel, SystemInfo,
+    MAX_MESSAGE_SIZE,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -1306,7 +1307,7 @@ impl ClientWorker {
                         // Start worker
                         match llama_worker.start_worker().await {
                             Ok(_) => info!("LLAMA worker started"),
-                            Err(e) => error!("LLAMA worker start failed: {}", e),
+                            Err(e) => warn!("LLAMA worker start failed: {}", e),
                         }
                     }
                     Err(e) => error!("LLAMA init failed: {}", e),
@@ -1442,17 +1443,223 @@ impl ClientWorker {
                 }
             }
             common::EngineType::Llama => {
-
+                // Llama engine model management is handled via deal_with_pod_model
             }
             _ => {}
         }
-        // match run_model(self.args.local_port, &model_name, "hello world").await {
-        //     Ok(output) => {
-        //         info!("Model {} output: {}", model_name, output)
-        //     }
-        //     Err(e) => error!("run_model Error: {}", e),
-        // }
         Ok(())
+    }
+
+    /// Download and manage model for Llama engine with progress reporting
+    pub async fn deal_with_pod_model(&self, pod_model: &PodModel) -> Result<()> {
+        let model_name = match &pod_model.model_name {
+            Some(name) => name.clone(),
+            None => return Ok(()),
+        };
+
+        let download_url = match &pod_model.download_url {
+            Some(url) => url.clone(),
+            None => {
+                info!("No download URL for model {}, skipping download", model_name);
+                return Ok(());
+            }
+        };
+
+        // Get models directory (same level as executable)
+        let models_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("models");
+
+        // Create models directory if it doesn't exist
+        tokio::fs::create_dir_all(&models_dir).await?;
+
+        let model_path = models_dir.join(&model_name);
+
+        // Check if model already exists
+        if model_path.exists() {
+            if let Some(expected_size) = pod_model.expected_size {
+                let metadata = tokio::fs::metadata(&model_path).await?;
+                if metadata.len() == expected_size {
+                    info!("Model {} already exists and size matches, skipping download", model_name);
+                    return Ok(());
+                }
+            } else {
+                info!("Model {} already exists, skipping download", model_name);
+                return Ok(());
+            }
+        }
+
+        info!("Starting download for model: {} from {}", model_name, download_url);
+
+        // Check existing file size for resume
+        let already_downloaded = if model_path.exists() {
+            tokio::fs::metadata(&model_path).await.ok().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Send initial progress (Pending or Resuming)
+        let initial_status = if already_downloaded > 0 {
+            DownloadStatus::Downloading  // Resuming
+        } else {
+            DownloadStatus::Pending
+        };
+        
+        self.send_download_progress(
+            &model_name,
+            already_downloaded,
+            pod_model.expected_size.unwrap_or(0),
+            if pod_model.expected_size.unwrap_or(0) > 0 {
+                (already_downloaded as f64 / pod_model.expected_size.unwrap_or(1) as f64) as f32 * 100.0
+            } else {
+                0.0
+            },
+            0,
+            initial_status,
+            None,
+        ).await?;
+
+        // Create download config
+        let config = crate::util::model_downloader::DownloadConfig {
+            url: download_url,
+            output_path: model_path.clone(),
+            parallel_chunks: 4,
+            chunk_size: 8 * 1024 * 1024,
+            expected_size: pod_model.expected_size,
+            checksum: pod_model.checksum.clone(),
+            resume: true,
+        };
+
+        // Setup progress reporting with 10 second interval
+        let client_id = self.client_id;
+        let writer = self.writer.clone();
+        let model_name_clone = model_name.clone();
+        let last_report_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+
+        let mut downloader = crate::util::model_downloader::ModelDownloader::new(config);
+        downloader.set_progress_callback({
+            let last_report_time = last_report_time.clone();
+            let model_name = model_name_clone.clone();
+            let writer = writer.clone();
+
+            move |progress| {
+                let elapsed = {
+                    let last_time = last_report_time.lock().unwrap();
+                    last_time.elapsed()
+                };
+
+                // Report every 10 seconds
+                if elapsed.as_secs() >= 10 {
+                    let mut last_time = last_report_time.lock().unwrap();
+                    *last_time = std::time::Instant::now();
+
+                    let cmd = Command::V1(CommandV1::ModelDownloadProgress {
+                        client_id,
+                        model_name: model_name.clone(),
+                        downloaded_bytes: progress.downloaded_bytes,
+                        total_bytes: progress.total_bytes,
+                        percentage: progress.percentage as f32,
+                        speed_bps: progress.speed_bps,
+                        status: DownloadStatus::Downloading,
+                        error: None,
+                    });
+
+                    // Use blocking send for callback
+                    let writer_clone = writer.clone();
+                    tokio::task::spawn(async move {
+                        let mut writer_guard = writer_clone.lock().await;
+                        let _ = write_command(&mut *writer_guard, &cmd).await;
+                    });
+                }
+            }
+        });
+
+        // Execute download
+        match downloader.download().await {
+            Ok(_) => {
+                info!("Model {} downloaded successfully to {:?}", model_name, model_path);
+                self.send_download_progress(
+                    &model_name,
+                    pod_model.expected_size.unwrap_or(0),
+                    pod_model.expected_size.unwrap_or(0),
+                    100.0,
+                    0,
+                    DownloadStatus::Completed,
+                    None,
+                ).await?;
+                
+                // Update MODEL_STATUS and load model into engine
+                let model_path_str = model_path.to_string_lossy().to_string();
+                if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                    status.current_model = Some(model_path_str.clone());
+                    status.loading_status = "Loading into engine".to_string();
+                    status.is_loaded = false;
+                    status.error_message = None;
+                }
+                
+                // Load model into engine
+                info!("Loading model {} into engine", model_name);
+                let mut engine_guard = self.engine.lock().await;
+                if let Some(engine) = engine_guard.as_mut() {
+                    match engine.set_models(vec![model_path_str.clone()]).await {
+                        Ok(_) => {
+                            info!("Model {} loaded into engine successfully", model_name);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = "Loaded".to_string();
+                                status.is_loaded = true;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to load model {} into engine: {}", model_name, e);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = format!("Load failed: {}", e);
+                                status.error_message = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to download model {}: {}", model_name, e);
+                self.send_download_progress(
+                    &model_name,
+                    0,
+                    pod_model.expected_size.unwrap_or(0),
+                    0.0,
+                    0,
+                    DownloadStatus::Failed,
+                    Some(e.to_string()),
+                ).await?;
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_download_progress(
+        &self,
+        model_name: &str,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+        percentage: f32,
+        speed_bps: u64,
+        status: DownloadStatus,
+        error: Option<String>,
+    ) -> Result<()> {
+        let cmd = CommandV1::ModelDownloadProgress {
+            client_id: self.client_id,
+            model_name: model_name.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            percentage,
+            speed_bps,
+            status,
+            error,
+        };
+        self.send_command(cmd).await
     }
 }
 
@@ -1758,10 +1965,13 @@ impl WorkerHandle for ClientWorker {
                                         }
                                     }
                                     // If server assigned models, ensure they are pulled/ready.
-                                    for pod_model in pods_model {
-                                        if let Some(model_name) = pod_model.model_name {
-                                            if self.args.auto_models {
-                                                self.deal_with_model(&model_name).await?;
+                                    for pod_model in &pods_model {
+                                        if self.args.auto_models {
+                                            // For Llama engine, use deal_with_pod_model which supports download URL
+                                            if self.engine_type == common::EngineType::Llama {
+                                                self.deal_with_pod_model(pod_model).await?;
+                                            } else if let Some(ref model_name) = pod_model.model_name {
+                                                self.deal_with_model(model_name).await?;
                                             }
                                         }
                                     }
@@ -1784,10 +1994,12 @@ impl WorkerHandle for ClientWorker {
                                     error!("device is not compatible with the model");
                                     return Err(anyhow!("device is not compatible with the model"));
                                 }
-                                for pod_model in pods_model {
-                                    if let Some(model_name) = pod_model.model_name {
-                                        self.deal_with_model(&model_name).await?;
-                                        
+                                for pod_model in &pods_model {
+                                    // For Llama engine, use deal_with_pod_model which supports download URL
+                                    if self.engine_type == common::EngineType::Llama {
+                                        self.deal_with_pod_model(pod_model).await?;
+                                    } else if let Some(ref model_name) = pod_model.model_name {
+                                        self.deal_with_model(model_name).await?;
                                     }
                                 }
                             }
@@ -1824,6 +2036,12 @@ impl WorkerHandle for ClientWorker {
                                 repeat_last_n,
                                 min_keep,
                             } => {
+                                info!(
+                                    "Received chat inference task: {} messages: {} max_tokens: {}",
+                                    task_id,
+                                    messages.len(),
+                                    max_tokens
+                                );
                                 let prompt = {
                                     #[cfg(target_os = "android")]
                                     {

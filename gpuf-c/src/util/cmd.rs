@@ -87,7 +87,7 @@ pub struct Args {
     )]
     pub engine_type: EngineType,
 
-    #[arg(long, default_value = "false", help = "auto mode")]
+    #[arg(long, default_value = "true", help = "auto mode")]
     pub auto_models: bool,
 
     #[arg(long, default_value = None, help = "hugging face hub token" )]
