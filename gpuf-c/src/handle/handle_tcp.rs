@@ -1476,19 +1476,63 @@ impl ClientWorker {
         tokio::fs::create_dir_all(&models_dir).await?;
 
         let model_path = models_dir.join(&model_name);
+        let model_path_str = model_path.to_string_lossy().to_string();
 
-        // Check if model already exists
-        if model_path.exists() {
-            if let Some(expected_size) = pod_model.expected_size {
-                let metadata = tokio::fs::metadata(&model_path).await?;
-                if metadata.len() == expected_size {
-                    info!("Model {} already exists and size matches, skipping download", model_name);
+        // Check if model is already loaded
+        if let Ok(status) = crate::MODEL_STATUS.lock() {
+            if let Some(current_model) = &status.current_model {
+                if current_model == &model_path_str && status.is_loaded {
+                    info!("Model {} is already loaded, skipping", model_name);
                     return Ok(());
                 }
-            } else {
-                info!("Model {} already exists, skipping download", model_name);
-                return Ok(());
             }
+        }
+
+        // Check if model file already exists and is complete
+        let model_exists_and_complete = if model_path.exists() {
+            if let Some(expected_size) = pod_model.expected_size {
+                let metadata = tokio::fs::metadata(&model_path).await?;
+                metadata.len() == expected_size
+            } else {
+                true // No expected size, assume complete
+            }
+        } else {
+            false
+        };
+
+        // If model exists and is complete, load it directly without downloading
+        if model_exists_and_complete {
+            info!("Model {} already exists locally, loading directly", model_name);
+            
+            // Update MODEL_STATUS
+            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                status.current_model = Some(model_path_str.clone());
+                status.loading_status = "Loading into engine".to_string();
+                status.is_loaded = false;
+                status.error_message = None;
+            }
+            
+            // Load model into engine
+            let mut engine_guard = self.engine.lock().await;
+            if let Some(engine) = engine_guard.as_mut() {
+                match engine.set_models(vec![model_path_str.clone()]).await {
+                    Ok(_) => {
+                        info!("Model {} loaded into engine successfully", model_name);
+                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                            status.loading_status = "Loaded".to_string();
+                            status.is_loaded = true;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to load model {} into engine: {}", model_name, e);
+                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                            status.loading_status = format!("Load failed: {}", e);
+                            status.error_message = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            return Ok(());
         }
 
         info!("Starting download for model: {} from {}", model_name, download_url);
