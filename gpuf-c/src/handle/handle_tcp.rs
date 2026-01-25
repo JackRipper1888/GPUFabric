@@ -34,6 +34,13 @@ use tokio::time::timeout;
 // Global flag to track if HTTP server is already running
 #[cfg(not(target_os = "android"))]
 static HTTP_SERVER_STARTED: AtomicBool = AtomicBool::new(false);
+
+// Global engine cache - initialized once on startup, reused on reconnection
+#[cfg(not(target_os = "android"))]
+use std::sync::OnceLock;
+#[cfg(not(target_os = "android"))]
+static GLOBAL_ENGINE: OnceLock<Arc<Mutex<Option<AnyEngine>>>> = OnceLock::new();
+
 #[cfg(not(target_os = "android"))]
 use tokio_rustls::{
     rustls::{
@@ -1281,51 +1288,64 @@ impl ClientWorker {
                 }
                 engine = Some(llvm_worker);
             } else if args.engine_type == EngineType::LLAMA {
-                // Initialize LLAMA engine (single shared instance for both worker and HTTP server)
-                let mut llama_worker = if let Some(model_path) = &args.llama_model_path {
-                    // Use provided model path
-                    info!("Creating LLAMA engine with model: {}", model_path);
-                    llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
-                        model_path.clone(),
-                        args.n_ctx,
-                        args.n_gpu_layers,
-                        args.llama_split_mode.clone(),
-                        args.llama_main_gpu,
-                        args.llama_devices.clone(),
-                    ))
+                // Check if engine is already initialized in global cache
+                let global_engine_cache = GLOBAL_ENGINE.get_or_init(|| {
+                    Arc::new(Mutex::new(None))
+                });
+                
+                let mut cached_engine = global_engine_cache.lock().await;
+                
+                if let Some(existing_engine) = cached_engine.as_ref() {
+                    // Reuse existing engine (reconnection scenario)
+                    info!("Reusing existing LLAMA engine from cache (model already loaded)");
+                    engine = Some(existing_engine.clone());
                 } else {
-                    // Create engine without model (will be set later)
-                    info!("Creating LLAMA engine without model (will be set later)");
-                    llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
-                        args.n_ctx,
-                        args.n_gpu_layers,
-                        args.llama_split_mode.clone(),
-                        args.llama_main_gpu,
-                        args.llama_devices.clone(),
-                    ))
-                };
+                    // First time initialization - create and init engine
+                    info!("First time initialization - creating and loading LLAMA engine");
+                    
+                    let mut llama_worker = if let Some(model_path) = &args.llama_model_path {
+                        // Use provided model path
+                        info!("Creating LLAMA engine with model: {}", model_path);
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
+                            model_path.clone(),
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    } else {
+                        // Create engine without model (will be set later)
+                        info!("Creating LLAMA engine without model (will be set later)");
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    };
 
-                // Initialize the engine (only once)
-                match llama_worker.init().await {
-                    Ok(_) => {
-                        info!("LLAMA engine init success");
-                        // Start worker
-                        match llama_worker.start_worker().await {
-                            Ok(_) => info!("LLAMA worker started"),
-                            Err(e) => warn!("LLAMA worker start failed: {}", e),
+                    // Initialize the engine (only on first startup)
+                    match llama_worker.init().await {
+                        Ok(_) => {
+                            info!("LLAMA engine init success - model loaded into memory");
+                            // Start worker
+                            match llama_worker.start_worker().await {
+                                Ok(_) => info!("LLAMA worker started"),
+                                Err(e) => warn!("LLAMA worker start failed: {}", e),
+                            }
                         }
+                        Err(e) => error!("LLAMA init failed: {}", e),
                     }
-                    Err(e) => error!("LLAMA init failed: {}", e),
+                    
+                    // Store in global cache for future reconnections
+                    *cached_engine = Some(llama_worker.clone());
+                    engine = Some(llama_worker);
                 }
-
-                // Clone the engine for HTTP server (same instance, shared data via Arc)
-                let server_engine = match llama_worker {
-                    AnyEngine::Llama(ref e) => e.clone(),
-                    _ => unreachable!(),
-                };
-
-                // Store engine for GPUFabric worker
-                engine = Some(llama_worker);
+                
+                // Drop the lock before starting HTTP server
+                drop(cached_engine);
 
                 // Start local HTTP API server for LLAMA (for proxy forwarding)
                 // Use the SAME engine instance for both worker and HTTP server
@@ -1343,6 +1363,12 @@ impl ClientWorker {
 
                 // Only start HTTP server if not already running (prevent port conflicts on reconnection)
                 if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
+                    // Extract LlamaEngine from AnyEngine for HTTP server
+                    let server_engine = match engine.as_ref().unwrap() {
+                        AnyEngine::Llama(e) => e.clone(),
+                        _ => unreachable!(),
+                    };
+                    
                     // Wrap the shared engine in Arc<RwLock> for HTTP server
                     let engine_arc = Arc::new(RwLock::new(server_engine));
 
@@ -1815,7 +1841,7 @@ impl WorkerHandle for ClientWorker {
             info!("🔧 Starting login process...");
             let login_cmd = CommandV1::Login {
                 version: CURRENT_VERSION,
-                auto_models: self.args.auto_models,
+                auto_models: self.args.llama_model_path.is_none(),
                 os_type: self.os_type.clone(),
                 client_id: self.client_id.clone(),
                 system_info: (*self.system_info).clone(),
@@ -1841,8 +1867,8 @@ impl WorkerHandle for ClientWorker {
         async move {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
-            // let device_memtotal_gb = self.device_memtotal_gb;
-            // let auto_models = self.args.auto_models;
+            let auto_models = self.args.auto_models;
+            let has_local_model = self.args.llama_model_path.is_some();
             let engine_type = self.engine_type.clone();
             info!("✅ Model task started");
             let local_port = self.args.local_port;
@@ -1888,10 +1914,18 @@ impl WorkerHandle for ClientWorker {
                         _ => Vec::new(),
                     };
                     debug!("Successfully fetched {:?} models from engine.", models);
+                    
+                    // Only send device info if auto_models is enabled and no local model is specified
+                    let auto_models_device = if auto_models && !has_local_model {
+                        devices_info.clone().to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    
                     let model_cmd = CommandV1::ModelStatus {
                         client_id: *client_id,
                         models,
-                        auto_models_device: devices_info.clone().to_vec(),
+                        auto_models_device,
                     };
                     if let Err(e) =
                         write_command(&mut *writer_clone.lock().await, &Command::V1(model_cmd))
@@ -1995,7 +2029,27 @@ impl WorkerHandle for ClientWorker {
                 HashMap::new();
             // (turn_urls, username, password, peer_id as hex) - peer_id used only for debugging/selection
             loop {
-                match read_command(&mut *self.reader.lock().await, &mut buf).await? {
+                let cmd_result = read_command(&mut *self.reader.lock().await, &mut buf).await;
+                
+                // Handle connection errors gracefully
+                let cmd = match cmd_result {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        // Check if this is an IO error indicating connection loss
+                        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                            if io_err.kind() == std::io::ErrorKind::UnexpectedEof 
+                                || io_err.kind() == std::io::ErrorKind::ConnectionReset
+                                || io_err.kind() == std::io::ErrorKind::BrokenPipe {
+                                warn!("Connection to server lost: {}. Exiting handler...", e);
+                                return Err(anyhow!("Connection closed by server"));
+                            }
+                        }
+                        error!("Error reading command from server: {}", e);
+                        return Err(e);
+                    }
+                };
+                
+                match cmd {
                     Command::V1(cmd_v1) => {
                         match cmd_v1 {
                             CommandV1::CancelInference { task_id } => {
@@ -2025,8 +2079,11 @@ impl WorkerHandle for ClientWorker {
                                         }
                                     }
                                     // If server assigned models, ensure they are pulled/ready.
-                                    for pod_model in &pods_model {
-                                        if self.args.auto_models {
+                                    // Skip if user specified a local model path OR auto_models is disabled
+                                    if self.args.llama_model_path.is_some() {
+                                        info!("Skipping server-recommended models (using local model path: {:?})", self.args.llama_model_path);
+                                    } else if self.args.auto_models {
+                                        for pod_model in &pods_model {
                                             // For Llama engine, use deal_with_pod_model which supports download URL
                                             if self.engine_type == common::EngineType::Llama {
                                                 self.deal_with_pod_model(pod_model).await?;
@@ -2034,6 +2091,8 @@ impl WorkerHandle for ClientWorker {
                                                 self.deal_with_model(model_name).await?;
                                             }
                                         }
+                                    } else {
+                                        info!("Skipping server-recommended models (auto_models is disabled)");
                                     }
                                                                         // Start model reporting task immediately after login (choice A).
                                     self.model_task().await?;
@@ -2050,17 +2109,27 @@ impl WorkerHandle for ClientWorker {
                                     error!("Pull model failed: {}", error.unwrap_or_default());
                                     return Err(anyhow!("Pull model failed"));
                                 }
+                                
+                                // Empty pods_model is OK - it means server has no recommendations
                                 if pods_model.is_empty() {
-                                    error!("device is not compatible with the model");
-                                    return Err(anyhow!("device is not compatible with the model"));
+                                    debug!("Server returned no model recommendations");
+                                    continue;
                                 }
-                                for pod_model in &pods_model {
-                                    // For Llama engine, use deal_with_pod_model which supports download URL
-                                    if self.engine_type == common::EngineType::Llama {
-                                        self.deal_with_pod_model(pod_model).await?;
-                                    } else if let Some(ref model_name) = pod_model.model_name {
-                                        self.deal_with_model(model_name).await?;
+                                
+                                // Skip if user specified a local model path OR auto_models is disabled
+                                if self.args.llama_model_path.is_some() {
+                                    info!("Skipping PullModelResult (using local model path: {:?})", self.args.llama_model_path);
+                                } else if self.args.auto_models {
+                                    for pod_model in &pods_model {
+                                        // For Llama engine, use deal_with_pod_model which supports download URL
+                                        if self.engine_type == common::EngineType::Llama {
+                                            self.deal_with_pod_model(pod_model).await?;
+                                        } else if let Some(ref model_name) = pod_model.model_name {
+                                            self.deal_with_model(model_name).await?;
+                                        }
                                     }
+                                } else {
+                                    info!("Skipping PullModelResult (auto_models is disabled)");
                                 }
                             }
                             CommandV1::RequestNewProxyConn { proxy_conn_id } => {

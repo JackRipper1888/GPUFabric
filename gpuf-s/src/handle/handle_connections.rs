@@ -118,7 +118,7 @@ async fn handle_single_client(
         match read_command(&mut reader, &mut buf).await {
             Ok(Command::V1(CommandV1::Login {
                 version,
-                auto_models: _,
+                auto_models,
                 client_id: id,
                 os_type,
                 system_info,
@@ -134,6 +134,7 @@ async fn handle_single_client(
 
                 let validate_result = match handle_login(
                     version,
+                    auto_models,
                     &active_clients,
                     &redis_client,
                     &db_pool,
@@ -485,6 +486,7 @@ async fn handle_single_client(
 
 async fn handle_login(
     version: u32,
+    auto_models: bool,
     active_clients: &Arc<Mutex<HashMap<ClientId, ClientInfo>>>,
     redis_client: &Arc<RedisClient>,
     db_pool: &Pool<Postgres>,
@@ -515,7 +517,13 @@ async fn handle_login(
     let validate_result = if is_valid {
         info!("Client {} registered successfully", client_id);
         *authed = true;
-        let pods_model = models::get_models_batch(&hot_models, &devices_info).await?;
+        
+        // Only recommend models if auto_models is enabled
+        let pods_model = if auto_models {
+            models::get_models_batch(&hot_models, &devices_info).await?
+        } else {
+            Vec::new()
+        };
 
         CommandV1::LoginResult {
             success: true,
