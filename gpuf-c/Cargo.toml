@@ -1,6 +1,6 @@
 [package]
 name = "gpuf-c"
-version = "0.1.0"
+version = "1.0.2"
 edition = "2021"
 
 [lib]
@@ -91,7 +91,7 @@ cocoa = "0.25"
 default = ["cpu"]
 
 # CPU only
-cpu = ["llama-cpp-2/native"]
+cpu = ["llama-cpp-2/openmp"]
 
 # CUDA support (NVIDIA GPU)
 cuda = ["llama-cpp-2/cuda","nvml-wrapper"]

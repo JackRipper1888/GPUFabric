@@ -292,10 +292,16 @@ download_file() {
     local out="$2"
 
     log "${YELLOW}download: $url${NC}"
-    if ! curl -fL "$url" -o "$out" >> "$LOG_FILE" 2>&1; then
+    # Use curl with progress bar (-#) instead of silent mode
+    # -f: fail silently on HTTP errors
+    # -L: follow redirects
+    # -#: show progress bar
+    # -o: output file
+    if ! curl -fL# "$url" -o "$out" 2>&1 | tee -a "$LOG_FILE"; then
         log "${RED}download failed: $url${NC}"
         return 1
     fi
+    echo "" # Add newline after progress bar
 }
 
 extract_archive() {
@@ -434,16 +440,10 @@ main() {
                 pkg_os="$OS"
             fi
 
-            local legacy_archive_name
-            legacy_archive_name="v1.0.1-${pkg_os}-gpuf-c.tar.gz"
+            local archive_name
+            archive_name="v1.0.2-${pkg_os}-gpuf-c.tar.gz"
 
-            local arch_archive_name
-            arch_archive_name="$legacy_archive_name"
-            if [ "$OS" = "darwin" ]; then
-                arch_archive_name="v1.0.1-${pkg_os}-${arch_norm}-gpuf-c.tar.gz"
-            fi
-
-            ARCHIVE_NAME="${GPUF_C_CLIENT_ARCHIVE_NAME:-$arch_archive_name}"
+            ARCHIVE_NAME="${GPUF_C_CLIENT_ARCHIVE_NAME:-$archive_name}"
 
             local tmp_dir
             tmp_dir=$(mktemp -d)
@@ -451,13 +451,7 @@ main() {
             local extract_dir="$tmp_dir/extract"
 
             if ! download_file "$BASE_URL/$ARCHIVE_NAME" "$archive_path"; then
-                if [ "$OS" = "darwin" ] && [ -z "${GPUF_C_CLIENT_ARCHIVE_NAME:-}" ] && [ "$ARCHIVE_NAME" != "$legacy_archive_name" ]; then
-                    ARCHIVE_NAME="$legacy_archive_name"
-                    archive_path="$tmp_dir/$ARCHIVE_NAME"
-                    download_file "$BASE_URL/$ARCHIVE_NAME" "$archive_path"
-                else
-                    exit 1
-                fi
+                exit 1
             fi
             extract_archive "$archive_path" "$extract_dir"
 

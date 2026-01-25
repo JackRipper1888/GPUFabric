@@ -4,6 +4,7 @@
 *.csr
 *.venv
 *.vscode
+*.windsurf
 *.srl
 .cargo/config.toml
 *.oss

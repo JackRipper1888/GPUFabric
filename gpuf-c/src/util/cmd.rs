@@ -258,3 +258,13 @@ pub enum EngineType {
     #[clap(name = "llama")]
     LLAMA,
 }
+
+impl EngineType {
+    pub fn to_common(&self) -> common::EngineType {
+        match self {
+            EngineType::VLLM => common::EngineType::Vllm,
+            EngineType::OLLAMA => common::EngineType::Ollama,
+            EngineType::LLAMA => common::EngineType::Llama,
+        }
+    }
+}

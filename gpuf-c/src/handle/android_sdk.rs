@@ -695,7 +695,7 @@ pub async fn perform_android_login(
             .await
             .map_err(|e| anyhow!("Failed to collect system info: {}", e))?;
 
-    let (devices_info, device_count) = crate::util::system_info::collect_device_info()
+    let (devices_info, device_count) = crate::util::system_info::collect_device_info(common::EngineType::Llama)
         .await
         .map_err(|e| anyhow!("Failed to collect device info: {}", e))?;
 
@@ -1751,7 +1751,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
 
     // Collect device information dynamically in async context
     println!("🔧 Android: Collecting device information...");
-    let (devices_info, device_count) = crate::util::system_info::collect_device_info()
+    let (devices_info, device_count) = crate::util::system_info::collect_device_info(common::EngineType::Llama)
         .await
         .map_err(|e| anyhow!("Failed to collect device info: {}", e))?;
 

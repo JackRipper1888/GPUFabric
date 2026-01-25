@@ -1,7 +1,7 @@
 param(
     [string]$BaseUrl = "https://oss.gpunexus.com/client",
     [string]$InstallDir = "$env:USERPROFILE\AppData\Local\Programs\gpuf-c",
-    [string]$PackageName = "v1.0.1-windows-gpuf-c.tar.gz",
+    [string]$PackageName = "v1.0.2-windows-gpuf-c.tar.gz",
     [string]$DownloadDir = "C:\gpuf"
 )
 
@@ -453,6 +453,18 @@ try {
     if (-not $tar) {
         Write-Host "error: tar command not found. Please install tar/bsdtar or use a zip-based package." -ForegroundColor Red
         exit 1
+    }
+
+    # Clean up old installation files before extracting new version
+    Write-Host "Cleaning old installation files..." -ForegroundColor Yellow
+    if (Test-Path $InstallDir) {
+        try {
+            # Remove all files in InstallDir but keep the directory
+            Get-ChildItem -Path $InstallDir -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Old files removed" -ForegroundColor Green
+        } catch {
+            Write-Host "warning: failed to clean some old files: $_" -ForegroundColor Yellow
+        }
     }
 
     Write-Host "Extracting to: $InstallDir" -ForegroundColor Yellow
