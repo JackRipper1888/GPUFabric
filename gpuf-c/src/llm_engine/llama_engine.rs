@@ -1044,10 +1044,13 @@ impl Engine for LlamaEngine {
 
 impl Drop for LlamaEngine {
     fn drop(&mut self) {
+        // Note: We do NOT clear cached_model here because:
+        // 1. LlamaEngine is Clone, so multiple instances share the same Arc<Mutex<LlamaModel>>
+        // 2. The global GLOBAL_ENGINE cache holds a reference to the engine
+        // 3. Arc automatically manages reference counting and will free memory when last reference is dropped
+        // 4. Clearing here would break the global cache and cause model to be freed prematurely
         if self.is_initialized {
-            info!("Cleaning up Llama.cpp engine on drop");
-            // Simulate cleanup
-            debug!("Llama.cpp engine cleaned up (simulated)");
+            debug!("LlamaEngine instance dropped (model remains in global cache if still referenced)");
         }
     }
 }
