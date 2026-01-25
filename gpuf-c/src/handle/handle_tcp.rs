@@ -24,11 +24,16 @@ use std::fs::File;
 use std::io::BufReader;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::time::interval;
 use tokio::time::timeout;
+
+// Global flag to track if HTTP server is already running
+#[cfg(not(target_os = "android"))]
+static HTTP_SERVER_STARTED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(target_os = "android"))]
 use tokio_rustls::{
     rustls::{
@@ -1225,7 +1230,7 @@ impl ClientWorker {
         }
     }
     pub async fn new(args: Args) -> Result<ClientWorker> {
-        let (device_info, device_memtotal_mb) = match collect_device_info().await {
+        let (device_info, device_memtotal_mb) = match collect_device_info(args.engine_type.to_common()).await {
             Ok(info) => info,
             Err(e) => {
                 error!("Failed to collect device info: {}", e);
@@ -1336,20 +1341,30 @@ impl ClientWorker {
                 use std::sync::Arc;
                 use tokio::sync::RwLock;
 
-                // Wrap the shared engine in Arc<RwLock> for HTTP server
-                let engine_arc = Arc::new(RwLock::new(server_engine));
+                // Only start HTTP server if not already running (prevent port conflicts on reconnection)
+                if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
+                    // Wrap the shared engine in Arc<RwLock> for HTTP server
+                    let engine_arc = Arc::new(RwLock::new(server_engine));
 
-                // Spawn server in background
-                tokio::spawn(async move {
-                    if let Err(e) = start_server(engine_arc, &local_addr_clone, local_port).await {
-                        error!("LLAMA HTTP server error: {}", e);
-                    }
-                });
+                    // Spawn server in background
+                    tokio::spawn(async move {
+                        if let Err(e) = start_server(engine_arc, &local_addr_clone, local_port).await {
+                            error!("LLAMA HTTP server error: {}", e);
+                            // Reset flag on error so it can be retried
+                            HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+                        }
+                    });
 
-                info!(
-                    "LLAMA HTTP API server started successfully on {}:{}",
-                    local_addr, local_port
-                );
+                    info!(
+                        "LLAMA HTTP API server started successfully on {}:{}",
+                        local_addr, local_port
+                    );
+                } else {
+                    info!(
+                        "LLAMA HTTP API server already running on {}:{}",
+                        local_addr, local_port
+                    );
+                }
             }
         }
         #[cfg(target_os = "macos")]
@@ -1899,6 +1914,7 @@ impl WorkerHandle for ClientWorker {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
             let network_monitor = Arc::clone(&self.network_monitor);
+            let engine_type = self.engine_type; // Clone engine_type for use in spawn
             // network_monitor.lock().await.update();
             tokio::spawn(async move {
                 let mut interval = interval(Duration::from_secs(120)); // Send heartbeat every 120 seconds
@@ -1916,7 +1932,7 @@ impl WorkerHandle for ClientWorker {
                         };
 
                     // device_info should be real-time for monitoring
-                    let (device_info, device_memtotal_mb) = match collect_device_info().await {
+                    let (device_info, device_memtotal_mb) = match collect_device_info(engine_type).await {
                         Ok(info) => info,
                         Err(e) => {
                             error!("Failed to collect device info: {}", e);

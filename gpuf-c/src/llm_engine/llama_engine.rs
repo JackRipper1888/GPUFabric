@@ -19,6 +19,12 @@ use llama_cpp_2::{context::params::LlamaContextParams, model::params::LlamaModel
 use llama_cpp_2::{context::LlamaContext, llama_backend::LlamaBackend, model::LlamaModel};
 #[cfg(not(target_os = "android"))]
 use std::num::NonZeroU32;
+#[cfg(not(target_os = "android"))]
+use std::sync::OnceLock;
+
+// Global backend instance - initialized only once
+#[cfg(not(target_os = "android"))]
+static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
 #[allow(dead_code)] // LLM engine implementation for llama.cpp (embedded mode)
 #[derive(Clone)] // Enable cloning for shared instance usage
@@ -145,8 +151,17 @@ impl LlamaEngine {
 
             // Run model loading in blocking thread
             let (backend, model) = tokio::task::spawn_blocking(move || {
-                let backend = LlamaBackend::init()
-                    .map_err(|e| anyhow!("Failed to initialize backend: {:?}", e))?;
+                // Use global backend singleton - initialize only once
+                let backend = LLAMA_BACKEND.get_or_init(|| {
+                    info!("Initializing Llama backend (first time only)");
+                    match LlamaBackend::init() {
+                        Ok(b) => Arc::new(b),
+                        Err(e) => {
+                            warn!("Failed to initialize Llama backend: {:?}", e);
+                            panic!("Cannot initialize Llama backend: {:?}", e);
+                        }
+                    }
+                }).clone();
 
                 use llama_cpp_2::model::params::LlamaSplitMode as LlamaCppSplitMode;
 
@@ -189,15 +204,15 @@ impl LlamaEngine {
                 }
 
                 let model =
-                    LlamaModel::load_from_file(&backend, &model_path_for_closure, &model_params)
+                    LlamaModel::load_from_file(&*backend, &model_path_for_closure, &model_params)
                         .map_err(|e| anyhow!("Failed to load model: {:?}", e))?;
 
-                Ok::<(LlamaBackend, LlamaModel), anyhow::Error>((backend, model))
+                Ok::<(Arc<LlamaBackend>, LlamaModel), anyhow::Error>((backend, model))
             })
             .await??;
 
             // Cache the components and store the model path
-            self.cached_backend = Some(Arc::new(backend));
+            self.cached_backend = Some(backend);
             self.cached_model = Some(Arc::new(Mutex::new(model)));
             self.cached_model_path = Some(model_path_for_cache.clone());
             self.is_initialized = true;

@@ -189,7 +189,7 @@ pub fn get_gpu_count() -> Result<usize, Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "android")]
-pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
+pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(DevicesInfo, u32)> {
     #[cfg(feature = "vulkan")]
     {
         collect_device_info_vulkan().await
@@ -454,7 +454,7 @@ fn read_disk_usage() -> Option<u32> {
     not(target_os = "android"),
     not(feature = "cuda")
 ))]
-pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
+pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(DevicesInfo, u32)> {
     debug!("Using system API for device info (NVML available but not CUDA-specific).");
 
     #[cfg(feature = "vulkan")]
@@ -711,7 +711,7 @@ async fn collect_device_info_cpu() -> Result<(DevicesInfo, u32)> {
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android"), feature = "cuda"))]
-pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
+pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(DevicesInfo, u32)> {
     use common::{set_u16_to_u128, set_u8_to_u64, to_tflops};
     use nvml_wrapper::NVML as NVMLWrapper;
     use std::sync::Once;
@@ -748,6 +748,7 @@ pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
             let mut device_info = DevicesInfo::default();
             device_info.pod_id = 0;
             device_info.num = count.try_into().unwrap();
+            device_info.engine_type = engine_type; // Set from command line args
 
             let mut total_memory = 0;
             let mut total_tflops: f32 = 0.0;
@@ -902,7 +903,7 @@ fn _get_chip_info() -> String {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
+pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(DevicesInfo, u32)> {
     use rand::Rng;
     let output_gpu = Command::new("sudo")
         .args([
@@ -969,7 +970,7 @@ pub async fn collect_device_info() -> Result<(DevicesInfo, u32)> {
         port: 0,
         ip: 0,
         os_type: common::OsType::MACOS,
-        engine_type: common::EngineType::Ollama,
+        engine_type: engine_type,
         memtotal_gb: (total_memory >> 30) as u16,
         usage: (gpu_busy * 100.) as u64,
         mem_usage: (used_memory as f32 / total_memory as f32 * 100.) as u64,
@@ -1207,7 +1208,7 @@ fn test_get_device_id() {
 
 #[tokio::test]
 async fn test_get_device_info() {
-    let device_info = collect_device_info().await;
+    let device_info = collect_device_info(common::EngineType::Llama).await;
     println!("device_info: {:?}", device_info);
     assert!(device_info.is_ok());
 }
