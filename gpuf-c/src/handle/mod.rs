@@ -3,6 +3,7 @@ pub mod handle_tcp;
 pub mod handle_udp;
 pub mod handle_ws;
 use crate::util::cmd::{Args, EngineType, WorkerType};
+use crate::util::log_icon;
 use crate::util::network_info::SessionNetworkMonitor;
 // LLM engine is not available in lightweight Android version
 #[cfg(not(target_os = "android"))]
@@ -119,19 +120,23 @@ impl WorkerHandle for AutoWorker {
 }
 
 pub async fn new_worker(args: Args) -> AutoWorker {
-    info!("🔧 new_worker: Starting worker creation...");
+    info!("{} new_worker: Starting worker creation...", log_icon("🔧", "[INIT]"));
     // TODO: IPC shared memory should be selected
     loop {
         info!(
-            "🔄 new_worker: Loop iteration for worker type: {:?}",
+            "{} new_worker: Loop iteration for worker type: {:?}",
+            log_icon("🔄", "[LOOP]"),
             args.worker_type
         );
         match args.worker_type {
             WorkerType::TCP => {
-                info!("📡 new_worker: Creating TCP worker...");
+                info!("{} new_worker: Creating TCP worker...", log_icon("📡", "[TCP]"));
                 match TCPWorker::new(args.clone()).await {
                     Ok(worker) => {
-                        info!("✅ new_worker: TCP worker created successfully");
+                        info!(
+                            "{} new_worker: TCP worker created successfully",
+                            log_icon("✅", "[OK]")
+                        );
                         return AutoWorker::TCP(worker);
                     }
                     Err(e) => {
@@ -143,10 +148,13 @@ pub async fn new_worker(args: Args) -> AutoWorker {
                 }
             }
             WorkerType::WS => {
-                info!("🌐 new_worker: Creating WS worker...");
+                info!("{} new_worker: Creating WS worker...", log_icon("🌐", "[WS]"));
                 match WSWorker::new(args.clone()).await {
                     Ok(worker) => {
-                        info!("✅ new_worker: WS worker created successfully");
+                        info!(
+                            "{} new_worker: WS worker created successfully",
+                            log_icon("✅", "[OK]")
+                        );
                         return AutoWorker::WS(worker);
                     }
                     Err(e) => {
@@ -159,7 +167,10 @@ pub async fn new_worker(args: Args) -> AutoWorker {
             }
         }
 
-        info!("⏳ new_worker: Waiting 5 seconds before retry...");
+        info!(
+            "{} new_worker: Waiting 5 seconds before retry...",
+            log_icon("⏳", "[WAIT]")
+        );
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
