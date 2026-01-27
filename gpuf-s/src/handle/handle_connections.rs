@@ -9,7 +9,7 @@ use bytes::BytesMut;
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use common::{os_type_str, format_bytes, CommandV2, Model, OsType, PodModel};
+use common::{format_bytes, os_type_str, CommandV2, DownloadStatus, Model, OsType, PodModel};
 use redis::Client as RedisClient;
 use redis::AsyncCommands;
 use sqlx::{Pool, Postgres};
@@ -301,17 +301,37 @@ async fn handle_single_client(
                 status,
                 error,
             })) => {
-                info!(
-                    "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
-                    ClientId(id),
-                    model_name,
-                    percentage,
-                    format_bytes!(downloaded_bytes),
-                    format_bytes!(total_bytes),
-                    format_bytes!(speed_bps),
-                    status,
-                    error
-                );
+                let is_noisy_pending = status == DownloadStatus::Pending
+                    && downloaded_bytes == 0
+                    && speed_bps == 0
+                    && percentage <= 0.0
+                    && error.is_none();
+
+                if !is_noisy_pending {
+                    info!(
+                        "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
+                        ClientId(id),
+                        model_name,
+                        percentage,
+                        format_bytes!(downloaded_bytes),
+                        format_bytes!(total_bytes),
+                        format_bytes!(speed_bps),
+                        status,
+                        error
+                    );
+                } else {
+                    debug!(
+                        "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
+                        ClientId(id),
+                        model_name,
+                        percentage,
+                        format_bytes!(downloaded_bytes),
+                        format_bytes!(total_bytes),
+                        format_bytes!(speed_bps),
+                        status,
+                        error
+                    );
+                }
                 
                 // Store or delete progress in Redis
                 update_model_download_progress_in_redis(

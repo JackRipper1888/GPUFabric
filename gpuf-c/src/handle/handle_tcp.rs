@@ -6,6 +6,7 @@ use crate::llm_engine::{self, llama_engine::LlamaEngine};
 use crate::util::system_info::{
     collect_device_info, collect_system_info, get_engine_models, pull_ollama_model,
 };
+use crate::util::log_icon;
 use anyhow::{anyhow, Result};
 use common::{
     format_bytes, format_duration, join_streams, read_command, write_command, Command, CommandV1,
@@ -1553,22 +1554,25 @@ impl ClientWorker {
                 status.error_message = None;
             }
             
-            // Load model into engine
-            let mut engine_guard = self.engine.lock().await;
-            if let Some(engine) = engine_guard.as_mut() {
-                match engine.set_models(vec![model_path_str.clone()]).await {
-                    Ok(_) => {
-                        info!("Model {} loaded into engine successfully", model_name);
-                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                            status.loading_status = "Loaded".to_string();
-                            status.is_loaded = true;
+            // Load model into engine (only on non-Android platforms)
+            #[cfg(not(target_os = "android"))]
+            {
+                let mut engine_guard = self.engine.lock().await;
+                if let Some(engine) = engine_guard.as_mut() {
+                    match engine.set_models(vec![model_path_str.clone()]).await {
+                        Ok(_) => {
+                            info!("Model {} loaded into engine successfully", model_name);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = "Loaded".to_string();
+                                status.is_loaded = true;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to load model {} into engine: {}", model_name, e);
-                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                            status.loading_status = format!("Load failed: {}", e);
-                            status.error_message = Some(e.to_string());
+                        Err(e) => {
+                            error!("Failed to load model {} into engine: {}", model_name, e);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = format!("Load failed: {}", e);
+                                status.error_message = Some(e.to_string());
+                            }
                         }
                     }
                 }
@@ -1578,37 +1582,56 @@ impl ClientWorker {
 
         info!("Starting download for model: {} from {}", model_name, download_url);
 
-        // Check existing file size for resume
-        let already_downloaded = if model_path.exists() {
-            tokio::fs::metadata(&model_path).await.ok().map(|m| m.len()).unwrap_or(0)
+        // Check existing bytes for resume.
+        // Note: parallel downloads store partial progress in a "<model>.parts" directory.
+        let mut already_downloaded = if model_path.exists() {
+            tokio::fs::metadata(&model_path)
+                .await
+                .ok()
+                .map(|m| m.len())
+                .unwrap_or(0)
         } else {
             0
         };
 
-        // Send initial progress (Pending or Resuming)
-        let initial_status = if already_downloaded > 0 {
-            DownloadStatus::Downloading  // Resuming
-        } else {
-            DownloadStatus::Pending
-        };
-        
-        self.send_download_progress(
-            &model_name,
-            already_downloaded,
-            pod_model.expected_size.unwrap_or(0),
-            if pod_model.expected_size.unwrap_or(0) > 0 {
-                (already_downloaded as f64 / pod_model.expected_size.unwrap_or(1) as f64) as f32 * 100.0
-            } else {
-                0.0
-            },
-            0,
-            initial_status,
-            None,
-        ).await?;
+        if already_downloaded == 0 {
+            let mut p = model_path.to_string_lossy().to_string();
+            p.push_str(".parts");
+            let parts_dir = std::path::PathBuf::from(p);
+
+            if let Ok(mut dir) = tokio::fs::read_dir(&parts_dir).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_file() {
+                            already_downloaded = already_downloaded.saturating_add(meta.len());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only send an initial progress event when we have non-zero progress to report.
+        // This avoids a noisy "0B Pending" event on reconnect, while still reporting resume state.
+        if already_downloaded > 0 {
+            self.send_download_progress(
+                &model_name,
+                already_downloaded,
+                pod_model.expected_size.unwrap_or(0),
+                if pod_model.expected_size.unwrap_or(0) > 0 {
+                    (already_downloaded as f64 / pod_model.expected_size.unwrap_or(1) as f64) as f32 * 100.0
+                } else {
+                    0.0
+                },
+                0,
+                DownloadStatus::Downloading,
+                None,
+            )
+            .await?;
+        }
 
         // Create download config
         let config = crate::util::model_downloader::DownloadConfig {
-            url: download_url,
+            url: download_url.clone(),
             output_path: model_path.clone(),
             parallel_chunks: 4,
             chunk_size: 8 * 1024 * 1024,
@@ -1645,7 +1668,7 @@ impl ClientWorker {
                         model_name: model_name.clone(),
                         downloaded_bytes: progress.downloaded_bytes,
                         total_bytes: progress.total_bytes,
-                        percentage: progress.percentage as f32,
+                        percentage: (progress.percentage as f32) * 100.0,
                         speed_bps: progress.speed_bps,
                         status: DownloadStatus::Downloading,
                         error: None,
@@ -1661,67 +1684,131 @@ impl ClientWorker {
             }
         });
 
-        // Execute download
-        match downloader.download().await {
-            Ok(_) => {
-                info!("Model {} downloaded successfully to {:?}", model_name, model_path);
-                self.send_download_progress(
-                    &model_name,
-                    pod_model.expected_size.unwrap_or(0),
-                    pod_model.expected_size.unwrap_or(0),
-                    100.0,
-                    0,
-                    DownloadStatus::Completed,
-                    None,
-                ).await?;
-                
-                // Update MODEL_STATUS and load model into engine
-                let model_path_str = model_path.to_string_lossy().to_string();
-                if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                    status.current_model = Some(model_path_str.clone());
-                    status.loading_status = "Loading into engine".to_string();
-                    status.is_loaded = false;
-                    status.error_message = None;
-                }
-                
-                // Load model into engine
-                info!("Loading model {} into engine", model_name);
-                let mut engine_guard = self.engine.lock().await;
-                if let Some(engine) = engine_guard.as_mut() {
-                    match engine.set_models(vec![model_path_str.clone()]).await {
-                        Ok(_) => {
-                            info!("Model {} loaded into engine successfully", model_name);
-                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                                status.loading_status = "Loaded".to_string();
-                                status.is_loaded = true;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to load model {} into engine: {}", model_name, e);
-                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                                status.loading_status = format!("Load failed: {}", e);
-                                status.error_message = Some(e.to_string());
+        // Execute download with retry logic
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_SECS: u64 = 10;
+        
+        let mut last_error = None;
+        for attempt in 1..=MAX_RETRIES {
+            match downloader.download().await {
+                Ok(_) => {
+                    info!("Model {} downloaded successfully to {:?}", model_name, model_path);
+                    self.send_download_progress(
+                        &model_name,
+                        pod_model.expected_size.unwrap_or(0),
+                        pod_model.expected_size.unwrap_or(0),
+                        100.0,
+                        0,
+                        DownloadStatus::Completed,
+                        None,
+                    ).await?;
+                    
+                    // Update MODEL_STATUS and load model into engine
+                    let model_path_str = model_path.to_string_lossy().to_string();
+                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                        status.current_model = Some(model_path_str.clone());
+                        status.loading_status = "Loading into engine".to_string();
+                        status.is_loaded = false;
+                        status.error_message = None;
+                    }
+                    
+                    // Load model into engine (only on non-Android platforms)
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        info!("Loading model {} into engine", model_name);
+                        let mut engine_guard = self.engine.lock().await;
+                        if let Some(engine) = engine_guard.as_mut() {
+                            match engine.set_models(vec![model_path_str.clone()]).await {
+                                Ok(_) => {
+                                    info!("Model {} loaded into engine successfully", model_name);
+                                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                        status.loading_status = "Loaded".to_string();
+                                        status.is_loaded = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to load model {} into engine: {}", model_name, e);
+                                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                        status.loading_status = format!("Load failed: {}", e);
+                                        status.error_message = Some(e.to_string());
+                                    }
+                                }
                             }
                         }
                     }
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Download attempt {}/{} failed for model {}: {}", attempt, MAX_RETRIES, model_name, e);
+                    last_error = Some(e);
+                    
+                    if attempt < MAX_RETRIES {
+                        info!("Retrying download in {} seconds (attempt {}/{})...", RETRY_DELAY_SECS, attempt + 1, MAX_RETRIES);
+                        tokio::time::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                        
+                        // Recreate downloader for retry (it will resume from where it left off)
+                        let config = crate::util::model_downloader::DownloadConfig {
+                            url: download_url.clone(),
+                            output_path: model_path.clone(),
+                            parallel_chunks: 4,
+                            chunk_size: 8 * 1024 * 1024,
+                            expected_size: pod_model.expected_size,
+                            checksum: pod_model.checksum.clone(),
+                            resume: true,
+                        };
+                        downloader = crate::util::model_downloader::ModelDownloader::new(config);
+                        downloader.set_progress_callback({
+                            let last_report_time = last_report_time.clone();
+                            let model_name = model_name_clone.clone();
+                            let writer = writer.clone();
+
+                            move |progress| {
+                                let elapsed = {
+                                    let last_time = last_report_time.lock().unwrap();
+                                    last_time.elapsed()
+                                };
+
+                                if elapsed.as_secs() >= 10 {
+                                    let mut last_time = last_report_time.lock().unwrap();
+                                    *last_time = std::time::Instant::now();
+
+                                    let cmd = Command::V1(CommandV1::ModelDownloadProgress {
+                                        client_id,
+                                        model_name: model_name.clone(),
+                                        downloaded_bytes: progress.downloaded_bytes,
+                                        total_bytes: progress.total_bytes,
+                                        percentage: (progress.percentage as f32) * 100.0,
+                                        speed_bps: progress.speed_bps,
+                                        status: DownloadStatus::Downloading,
+                                        error: None,
+                                    });
+
+                                    let writer_clone = writer.clone();
+                                    tokio::task::spawn(async move {
+                                        let mut writer_guard = writer_clone.lock().await;
+                                        let _ = write_command(&mut *writer_guard, &cmd).await;
+                                    });
+                                }
+                            }
+                        });
+                    }
                 }
             }
-            Err(e) => {
-                error!("Failed to download model {}: {}", model_name, e);
-                self.send_download_progress(
-                    &model_name,
-                    0,
-                    pod_model.expected_size.unwrap_or(0),
-                    0.0,
-                    0,
-                    DownloadStatus::Failed,
-                    Some(e.to_string()),
-                ).await?;
-                return Err(e);
-            }
         }
-
-        Ok(())
+        
+        // All retries failed
+        let final_error = last_error.unwrap_or_else(|| anyhow::anyhow!("Download failed after {} retries", MAX_RETRIES));
+        error!("Failed to download model {} after {} attempts: {}", model_name, MAX_RETRIES, final_error);
+        self.send_download_progress(
+            &model_name,
+            0,
+            pod_model.expected_size.unwrap_or(0),
+            0.0,
+            0,
+            DownloadStatus::Failed,
+            Some(final_error.to_string()),
+        ).await?;
+        Err(final_error)
     }
 
     async fn send_download_progress(
@@ -1838,7 +1925,7 @@ async fn check_and_restart_ollama() -> Result<()> {
 impl WorkerHandle for ClientWorker {
     fn login(&self) -> impl Future<Output = Result<()>> + Send {
         async move {
-            info!("🔧 Starting login process...");
+            info!("{} Starting login process...", log_icon("🔧", "[LOGIN]"));
             let login_cmd = CommandV1::Login {
                 version: CURRENT_VERSION,
                 auto_models: self.args.llama_model_path.is_none(),
@@ -1849,14 +1936,24 @@ impl WorkerHandle for ClientWorker {
                 device_total_tflops: self.device_total_tflops,
                 devices_info: self.devices_info.as_ref().clone(),
             };
-            info!("📤 About to write login command to server...");
+            info!(
+                "{} About to write login command to server...",
+                log_icon("📤", "[SEND]")
+            );
             match write_command(&mut *self.writer.lock().await, &Command::V1(login_cmd)).await {
                 Ok(_) => {
-                    info!("✅ Login command written successfully");
+                    info!(
+                        "{} Login command written successfully",
+                        log_icon("✅", "[OK]")
+                    );
                     Ok(())
                 }
                 Err(e) => {
-                    error!("❌ Failed to write login command: {}", e);
+                    error!(
+                        "{} Failed to write login command: {}",
+                        log_icon("❌", "[ERR]"),
+                        e
+                    );
                     Err(e)
                 }
             }
@@ -1870,7 +1967,7 @@ impl WorkerHandle for ClientWorker {
             let auto_models = self.args.auto_models;
             let has_local_model = self.args.llama_model_path.is_some();
             let engine_type = self.engine_type.clone();
-            info!("✅ Model task started");
+            info!("{} Model task started", log_icon("✅", "[OK]"));
             let local_port = self.args.local_port;
             let devices_info = self.devices_info.clone();
             tokio::spawn(async move {
@@ -2086,9 +2183,15 @@ impl WorkerHandle for ClientWorker {
                                         for pod_model in &pods_model {
                                             // For Llama engine, use deal_with_pod_model which supports download URL
                                             if self.engine_type == common::EngineType::Llama {
-                                                self.deal_with_pod_model(pod_model).await?;
+                                                // Download errors should not crash the handler - just log and continue
+                                                // The download will be retried on next PullModelResult
+                                                if let Err(e) = self.deal_with_pod_model(pod_model).await {
+                                                    error!("Failed to download/load model: {}. Will retry later.", e);
+                                                }
                                             } else if let Some(ref model_name) = pod_model.model_name {
-                                                self.deal_with_model(model_name).await?;
+                                                if let Err(e) = self.deal_with_model(model_name).await {
+                                                    error!("Failed to deal with model {}: {}. Will retry later.", model_name, e);
+                                                }
                                             }
                                         }
                                     } else {
@@ -2123,9 +2226,15 @@ impl WorkerHandle for ClientWorker {
                                     for pod_model in &pods_model {
                                         // For Llama engine, use deal_with_pod_model which supports download URL
                                         if self.engine_type == common::EngineType::Llama {
-                                            self.deal_with_pod_model(pod_model).await?;
+                                            // Download errors should not crash the handler - just log and continue
+                                            // The download will be retried on next PullModelResult
+                                            if let Err(e) = self.deal_with_pod_model(pod_model).await {
+                                                error!("Failed to download/load model: {}. Will retry later.", e);
+                                            }
                                         } else if let Some(ref model_name) = pod_model.model_name {
-                                            self.deal_with_model(model_name).await?;
+                                            if let Err(e) = self.deal_with_model(model_name).await {
+                                                error!("Failed to deal with model {}: {}. Will retry later.", model_name, e);
+                                            }
                                         }
                                     }
                                 } else {
