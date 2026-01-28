@@ -181,17 +181,18 @@ impl InferenceScheduler {
 
         let mut best_device: Option<(ClientId, u16)> = None;
 
+        debug!("online Clients: {}", clients.len());
         for (client_id, client_info) in clients.iter() {
             if let Some(allowed) = allowed_client_ids {
                 if !allowed.iter().any(|id| id == client_id) {
+                    debug!("Client {} is not allowed", client_id);
                     continue;
                 }
             }
-
+            debug!("Client {} is authed {} model {}", client_id, client_info.authed, model_name);
             if !client_info.authed {
                 continue;
             }
-
             let Some(models) = &client_info.models else {
                 continue;
             };

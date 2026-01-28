@@ -6,6 +6,7 @@ use crate::llm_engine::{self, llama_engine::LlamaEngine};
 use crate::util::system_info::{
     collect_device_info, collect_system_info, get_engine_models, pull_ollama_model,
 };
+use crate::util::log_icon;
 use anyhow::{anyhow, Result};
 use common::{
     format_bytes, format_duration, join_streams, read_command, write_command, Command, CommandV1,
@@ -24,11 +25,23 @@ use std::fs::File;
 use std::io::BufReader;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::time::interval;
 use tokio::time::timeout;
+
+// Global flag to track if HTTP server is already running
+#[cfg(not(target_os = "android"))]
+static HTTP_SERVER_STARTED: AtomicBool = AtomicBool::new(false);
+
+// Global engine cache - initialized once on startup, reused on reconnection
+#[cfg(not(target_os = "android"))]
+use std::sync::OnceLock;
+#[cfg(not(target_os = "android"))]
+static GLOBAL_ENGINE: OnceLock<Arc<Mutex<Option<AnyEngine>>>> = OnceLock::new();
+
 #[cfg(not(target_os = "android"))]
 use tokio_rustls::{
     rustls::{
@@ -1225,7 +1238,7 @@ impl ClientWorker {
         }
     }
     pub async fn new(args: Args) -> Result<ClientWorker> {
-        let (device_info, device_memtotal_mb) = match collect_device_info().await {
+        let (device_info, device_memtotal_mb) = match collect_device_info(args.engine_type.to_common()).await {
             Ok(info) => info,
             Err(e) => {
                 error!("Failed to collect device info: {}", e);
@@ -1276,51 +1289,64 @@ impl ClientWorker {
                 }
                 engine = Some(llvm_worker);
             } else if args.engine_type == EngineType::LLAMA {
-                // Initialize LLAMA engine (single shared instance for both worker and HTTP server)
-                let mut llama_worker = if let Some(model_path) = &args.llama_model_path {
-                    // Use provided model path
-                    info!("Creating LLAMA engine with model: {}", model_path);
-                    llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
-                        model_path.clone(),
-                        args.n_ctx,
-                        args.n_gpu_layers,
-                        args.llama_split_mode.clone(),
-                        args.llama_main_gpu,
-                        args.llama_devices.clone(),
-                    ))
+                // Check if engine is already initialized in global cache
+                let global_engine_cache = GLOBAL_ENGINE.get_or_init(|| {
+                    Arc::new(Mutex::new(None))
+                });
+                
+                let mut cached_engine = global_engine_cache.lock().await;
+                
+                if let Some(existing_engine) = cached_engine.as_ref() {
+                    // Reuse existing engine (reconnection scenario)
+                    info!("Reusing existing LLAMA engine from cache (model already loaded)");
+                    engine = Some(existing_engine.clone());
                 } else {
-                    // Create engine without model (will be set later)
-                    info!("Creating LLAMA engine without model (will be set later)");
-                    llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
-                        args.n_ctx,
-                        args.n_gpu_layers,
-                        args.llama_split_mode.clone(),
-                        args.llama_main_gpu,
-                        args.llama_devices.clone(),
-                    ))
-                };
+                    // First time initialization - create and init engine
+                    info!("First time initialization - creating and loading LLAMA engine");
+                    
+                    let mut llama_worker = if let Some(model_path) = &args.llama_model_path {
+                        // Use provided model path
+                        info!("Creating LLAMA engine with model: {}", model_path);
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
+                            model_path.clone(),
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    } else {
+                        // Create engine without model (will be set later)
+                        info!("Creating LLAMA engine without model (will be set later)");
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    };
 
-                // Initialize the engine (only once)
-                match llama_worker.init().await {
-                    Ok(_) => {
-                        info!("LLAMA engine init success");
-                        // Start worker
-                        match llama_worker.start_worker().await {
-                            Ok(_) => info!("LLAMA worker started"),
-                            Err(e) => warn!("LLAMA worker start failed: {}", e),
+                    // Initialize the engine (only on first startup)
+                    match llama_worker.init().await {
+                        Ok(_) => {
+                            info!("LLAMA engine init success - model loaded into memory");
+                            // Start worker
+                            match llama_worker.start_worker().await {
+                                Ok(_) => info!("LLAMA worker started"),
+                                Err(e) => warn!("LLAMA worker start failed: {}", e),
+                            }
                         }
+                        Err(e) => error!("LLAMA init failed: {}", e),
                     }
-                    Err(e) => error!("LLAMA init failed: {}", e),
+                    
+                    // Store in global cache for future reconnections
+                    *cached_engine = Some(llama_worker.clone());
+                    engine = Some(llama_worker);
                 }
-
-                // Clone the engine for HTTP server (same instance, shared data via Arc)
-                let server_engine = match llama_worker {
-                    AnyEngine::Llama(ref e) => e.clone(),
-                    _ => unreachable!(),
-                };
-
-                // Store engine for GPUFabric worker
-                engine = Some(llama_worker);
+                
+                // Drop the lock before starting HTTP server
+                drop(cached_engine);
 
                 // Start local HTTP API server for LLAMA (for proxy forwarding)
                 // Use the SAME engine instance for both worker and HTTP server
@@ -1336,20 +1362,36 @@ impl ClientWorker {
                 use std::sync::Arc;
                 use tokio::sync::RwLock;
 
-                // Wrap the shared engine in Arc<RwLock> for HTTP server
-                let engine_arc = Arc::new(RwLock::new(server_engine));
+                // Only start HTTP server if not already running (prevent port conflicts on reconnection)
+                if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
+                    // Extract LlamaEngine from AnyEngine for HTTP server
+                    let server_engine = match engine.as_ref().unwrap() {
+                        AnyEngine::Llama(e) => e.clone(),
+                        _ => unreachable!(),
+                    };
+                    
+                    // Wrap the shared engine in Arc<RwLock> for HTTP server
+                    let engine_arc = Arc::new(RwLock::new(server_engine));
 
-                // Spawn server in background
-                tokio::spawn(async move {
-                    if let Err(e) = start_server(engine_arc, &local_addr_clone, local_port).await {
-                        error!("LLAMA HTTP server error: {}", e);
-                    }
-                });
+                    // Spawn server in background
+                    tokio::spawn(async move {
+                        if let Err(e) = start_server(engine_arc, &local_addr_clone, local_port).await {
+                            error!("LLAMA HTTP server error: {}", e);
+                            // Reset flag on error so it can be retried
+                            HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+                        }
+                    });
 
-                info!(
-                    "LLAMA HTTP API server started successfully on {}:{}",
-                    local_addr, local_port
-                );
+                    info!(
+                        "LLAMA HTTP API server started successfully on {}:{}",
+                        local_addr, local_port
+                    );
+                } else {
+                    info!(
+                        "LLAMA HTTP API server already running on {}:{}",
+                        local_addr, local_port
+                    );
+                }
             }
         }
         #[cfg(target_os = "macos")]
@@ -1476,54 +1518,120 @@ impl ClientWorker {
         tokio::fs::create_dir_all(&models_dir).await?;
 
         let model_path = models_dir.join(&model_name);
+        let model_path_str = model_path.to_string_lossy().to_string();
 
-        // Check if model already exists
-        if model_path.exists() {
-            if let Some(expected_size) = pod_model.expected_size {
-                let metadata = tokio::fs::metadata(&model_path).await?;
-                if metadata.len() == expected_size {
-                    info!("Model {} already exists and size matches, skipping download", model_name);
+        // Check if model is already loaded
+        if let Ok(status) = crate::MODEL_STATUS.lock() {
+            if let Some(current_model) = &status.current_model {
+                if current_model == &model_path_str && status.is_loaded {
+                    info!("Model {} is already loaded, skipping", model_name);
                     return Ok(());
                 }
-            } else {
-                info!("Model {} already exists, skipping download", model_name);
-                return Ok(());
             }
+        }
+
+        // Check if model file already exists and is complete
+        let model_exists_and_complete = if model_path.exists() {
+            if let Some(expected_size) = pod_model.expected_size {
+                let metadata = tokio::fs::metadata(&model_path).await?;
+                metadata.len() == expected_size
+            } else {
+                true // No expected size, assume complete
+            }
+        } else {
+            false
+        };
+
+        // If model exists and is complete, load it directly without downloading
+        if model_exists_and_complete {
+            info!("Model {} already exists locally, loading directly", model_name);
+            
+            // Update MODEL_STATUS
+            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                status.current_model = Some(model_path_str.clone());
+                status.loading_status = "Loading into engine".to_string();
+                status.is_loaded = false;
+                status.error_message = None;
+            }
+            
+            // Load model into engine (only on non-Android platforms)
+            #[cfg(not(target_os = "android"))]
+            {
+                let mut engine_guard = self.engine.lock().await;
+                if let Some(engine) = engine_guard.as_mut() {
+                    match engine.set_models(vec![model_path_str.clone()]).await {
+                        Ok(_) => {
+                            info!("Model {} loaded into engine successfully", model_name);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = "Loaded".to_string();
+                                status.is_loaded = true;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to load model {} into engine: {}", model_name, e);
+                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                status.loading_status = format!("Load failed: {}", e);
+                                status.error_message = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
         }
 
         info!("Starting download for model: {} from {}", model_name, download_url);
 
-        // Check existing file size for resume
-        let already_downloaded = if model_path.exists() {
-            tokio::fs::metadata(&model_path).await.ok().map(|m| m.len()).unwrap_or(0)
+        // Check existing bytes for resume.
+        // Note: parallel downloads store partial progress in a "<model>.parts" directory.
+        let mut already_downloaded = if model_path.exists() {
+            tokio::fs::metadata(&model_path)
+                .await
+                .ok()
+                .map(|m| m.len())
+                .unwrap_or(0)
         } else {
             0
         };
 
-        // Send initial progress (Pending or Resuming)
-        let initial_status = if already_downloaded > 0 {
-            DownloadStatus::Downloading  // Resuming
-        } else {
-            DownloadStatus::Pending
-        };
-        
-        self.send_download_progress(
-            &model_name,
-            already_downloaded,
-            pod_model.expected_size.unwrap_or(0),
-            if pod_model.expected_size.unwrap_or(0) > 0 {
-                (already_downloaded as f64 / pod_model.expected_size.unwrap_or(1) as f64) as f32 * 100.0
-            } else {
-                0.0
-            },
-            0,
-            initial_status,
-            None,
-        ).await?;
+        if already_downloaded == 0 {
+            let mut p = model_path.to_string_lossy().to_string();
+            p.push_str(".parts");
+            let parts_dir = std::path::PathBuf::from(p);
+
+            if let Ok(mut dir) = tokio::fs::read_dir(&parts_dir).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_file() {
+                            already_downloaded = already_downloaded.saturating_add(meta.len());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only send an initial progress event when we have non-zero progress to report.
+        // This avoids a noisy "0B Pending" event on reconnect, while still reporting resume state.
+        if already_downloaded > 0 {
+            self.send_download_progress(
+                &model_name,
+                already_downloaded,
+                pod_model.expected_size.unwrap_or(0),
+                if pod_model.expected_size.unwrap_or(0) > 0 {
+                    (already_downloaded as f64 / pod_model.expected_size.unwrap_or(1) as f64) as f32 * 100.0
+                } else {
+                    0.0
+                },
+                0,
+                DownloadStatus::Downloading,
+                None,
+            )
+            .await?;
+        }
 
         // Create download config
         let config = crate::util::model_downloader::DownloadConfig {
-            url: download_url,
+            url: download_url.clone(),
             output_path: model_path.clone(),
             parallel_chunks: 4,
             chunk_size: 8 * 1024 * 1024,
@@ -1560,7 +1668,7 @@ impl ClientWorker {
                         model_name: model_name.clone(),
                         downloaded_bytes: progress.downloaded_bytes,
                         total_bytes: progress.total_bytes,
-                        percentage: progress.percentage as f32,
+                        percentage: (progress.percentage as f32) * 100.0,
                         speed_bps: progress.speed_bps,
                         status: DownloadStatus::Downloading,
                         error: None,
@@ -1576,67 +1684,131 @@ impl ClientWorker {
             }
         });
 
-        // Execute download
-        match downloader.download().await {
-            Ok(_) => {
-                info!("Model {} downloaded successfully to {:?}", model_name, model_path);
-                self.send_download_progress(
-                    &model_name,
-                    pod_model.expected_size.unwrap_or(0),
-                    pod_model.expected_size.unwrap_or(0),
-                    100.0,
-                    0,
-                    DownloadStatus::Completed,
-                    None,
-                ).await?;
-                
-                // Update MODEL_STATUS and load model into engine
-                let model_path_str = model_path.to_string_lossy().to_string();
-                if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                    status.current_model = Some(model_path_str.clone());
-                    status.loading_status = "Loading into engine".to_string();
-                    status.is_loaded = false;
-                    status.error_message = None;
-                }
-                
-                // Load model into engine
-                info!("Loading model {} into engine", model_name);
-                let mut engine_guard = self.engine.lock().await;
-                if let Some(engine) = engine_guard.as_mut() {
-                    match engine.set_models(vec![model_path_str.clone()]).await {
-                        Ok(_) => {
-                            info!("Model {} loaded into engine successfully", model_name);
-                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                                status.loading_status = "Loaded".to_string();
-                                status.is_loaded = true;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to load model {} into engine: {}", model_name, e);
-                            if let Ok(mut status) = crate::MODEL_STATUS.lock() {
-                                status.loading_status = format!("Load failed: {}", e);
-                                status.error_message = Some(e.to_string());
+        // Execute download with retry logic
+        const MAX_RETRIES: u32 = 10;
+        const RETRY_DELAY_SECS: u64 = 10;
+        
+        let mut last_error = None;
+        for attempt in 1..=MAX_RETRIES {
+            match downloader.download().await {
+                Ok(_) => {
+                    info!("Model {} downloaded successfully to {:?}", model_name, model_path);
+                    self.send_download_progress(
+                        &model_name,
+                        pod_model.expected_size.unwrap_or(0),
+                        pod_model.expected_size.unwrap_or(0),
+                        100.0,
+                        0,
+                        DownloadStatus::Completed,
+                        None,
+                    ).await?;
+                    
+                    // Update MODEL_STATUS and load model into engine
+                    let model_path_str = model_path.to_string_lossy().to_string();
+                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                        status.current_model = Some(model_path_str.clone());
+                        status.loading_status = "Loading into engine".to_string();
+                        status.is_loaded = false;
+                        status.error_message = None;
+                    }
+                    
+                    // Load model into engine (only on non-Android platforms)
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        info!("Loading model {} into engine", model_name);
+                        let mut engine_guard = self.engine.lock().await;
+                        if let Some(engine) = engine_guard.as_mut() {
+                            match engine.set_models(vec![model_path_str.clone()]).await {
+                                Ok(_) => {
+                                    info!("Model {} loaded into engine successfully", model_name);
+                                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                        status.loading_status = "Loaded".to_string();
+                                        status.is_loaded = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to load model {} into engine: {}", model_name, e);
+                                    if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                        status.loading_status = format!("Load failed: {}", e);
+                                        status.error_message = Some(e.to_string());
+                                    }
+                                }
                             }
                         }
                     }
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Download attempt {}/{} failed for model {}: {}", attempt, MAX_RETRIES, model_name, e);
+                    last_error = Some(e);
+                    
+                    if attempt < MAX_RETRIES {
+                        info!("Retrying download in {} seconds (attempt {}/{})...", RETRY_DELAY_SECS, attempt + 1, MAX_RETRIES);
+                        tokio::time::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                        
+                        // Recreate downloader for retry (it will resume from where it left off)
+                        let config = crate::util::model_downloader::DownloadConfig {
+                            url: download_url.clone(),
+                            output_path: model_path.clone(),
+                            parallel_chunks: 4,
+                            chunk_size: 8 * 1024 * 1024,
+                            expected_size: pod_model.expected_size,
+                            checksum: pod_model.checksum.clone(),
+                            resume: true,
+                        };
+                        downloader = crate::util::model_downloader::ModelDownloader::new(config);
+                        downloader.set_progress_callback({
+                            let last_report_time = last_report_time.clone();
+                            let model_name = model_name_clone.clone();
+                            let writer = writer.clone();
+
+                            move |progress| {
+                                let elapsed = {
+                                    let last_time = last_report_time.lock().unwrap();
+                                    last_time.elapsed()
+                                };
+
+                                if elapsed.as_secs() >= 10 {
+                                    let mut last_time = last_report_time.lock().unwrap();
+                                    *last_time = std::time::Instant::now();
+
+                                    let cmd = Command::V1(CommandV1::ModelDownloadProgress {
+                                        client_id,
+                                        model_name: model_name.clone(),
+                                        downloaded_bytes: progress.downloaded_bytes,
+                                        total_bytes: progress.total_bytes,
+                                        percentage: (progress.percentage as f32) * 100.0,
+                                        speed_bps: progress.speed_bps,
+                                        status: DownloadStatus::Downloading,
+                                        error: None,
+                                    });
+
+                                    let writer_clone = writer.clone();
+                                    tokio::task::spawn(async move {
+                                        let mut writer_guard = writer_clone.lock().await;
+                                        let _ = write_command(&mut *writer_guard, &cmd).await;
+                                    });
+                                }
+                            }
+                        });
+                    }
                 }
             }
-            Err(e) => {
-                error!("Failed to download model {}: {}", model_name, e);
-                self.send_download_progress(
-                    &model_name,
-                    0,
-                    pod_model.expected_size.unwrap_or(0),
-                    0.0,
-                    0,
-                    DownloadStatus::Failed,
-                    Some(e.to_string()),
-                ).await?;
-                return Err(e);
-            }
         }
-
-        Ok(())
+        
+        // All retries failed
+        let final_error = last_error.unwrap_or_else(|| anyhow::anyhow!("Download failed after {} retries", MAX_RETRIES));
+        error!("Failed to download model {} after {} attempts: {}", model_name, MAX_RETRIES, final_error);
+        self.send_download_progress(
+            &model_name,
+            0,
+            pod_model.expected_size.unwrap_or(0),
+            0.0,
+            0,
+            DownloadStatus::Failed,
+            Some(final_error.to_string()),
+        ).await?;
+        Err(final_error)
     }
 
     async fn send_download_progress(
@@ -1753,10 +1925,10 @@ async fn check_and_restart_ollama() -> Result<()> {
 impl WorkerHandle for ClientWorker {
     fn login(&self) -> impl Future<Output = Result<()>> + Send {
         async move {
-            info!("🔧 Starting login process...");
+            info!("{} Starting login process...", log_icon("🔧", "[LOGIN]"));
             let login_cmd = CommandV1::Login {
                 version: CURRENT_VERSION,
-                auto_models: self.args.auto_models,
+                auto_models: self.args.llama_model_path.is_none(),
                 os_type: self.os_type.clone(),
                 client_id: self.client_id.clone(),
                 system_info: (*self.system_info).clone(),
@@ -1764,14 +1936,24 @@ impl WorkerHandle for ClientWorker {
                 device_total_tflops: self.device_total_tflops,
                 devices_info: self.devices_info.as_ref().clone(),
             };
-            info!("📤 About to write login command to server...");
+            info!(
+                "{} About to write login command to server...",
+                log_icon("📤", "[SEND]")
+            );
             match write_command(&mut *self.writer.lock().await, &Command::V1(login_cmd)).await {
                 Ok(_) => {
-                    info!("✅ Login command written successfully");
+                    info!(
+                        "{} Login command written successfully",
+                        log_icon("✅", "[OK]")
+                    );
                     Ok(())
                 }
                 Err(e) => {
-                    error!("❌ Failed to write login command: {}", e);
+                    error!(
+                        "{} Failed to write login command: {}",
+                        log_icon("❌", "[ERR]"),
+                        e
+                    );
                     Err(e)
                 }
             }
@@ -1782,10 +1964,10 @@ impl WorkerHandle for ClientWorker {
         async move {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
-            // let device_memtotal_gb = self.device_memtotal_gb;
-            // let auto_models = self.args.auto_models;
+            let auto_models = self.args.auto_models;
+            let has_local_model = self.args.llama_model_path.is_some();
             let engine_type = self.engine_type.clone();
-            info!("✅ Model task started");
+            info!("{} Model task started", log_icon("✅", "[OK]"));
             let local_port = self.args.local_port;
             let devices_info = self.devices_info.clone();
             tokio::spawn(async move {
@@ -1829,10 +2011,18 @@ impl WorkerHandle for ClientWorker {
                         _ => Vec::new(),
                     };
                     debug!("Successfully fetched {:?} models from engine.", models);
+                    
+                    // Only send device info if auto_models is enabled and no local model is specified
+                    let auto_models_device = if auto_models && !has_local_model {
+                        devices_info.clone().to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    
                     let model_cmd = CommandV1::ModelStatus {
                         client_id: *client_id,
                         models,
-                        auto_models_device: devices_info.clone().to_vec(),
+                        auto_models_device,
                     };
                     if let Err(e) =
                         write_command(&mut *writer_clone.lock().await, &Command::V1(model_cmd))
@@ -1855,6 +2045,7 @@ impl WorkerHandle for ClientWorker {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
             let network_monitor = Arc::clone(&self.network_monitor);
+            let engine_type = self.engine_type; // Clone engine_type for use in spawn
             // network_monitor.lock().await.update();
             tokio::spawn(async move {
                 let mut interval = interval(Duration::from_secs(120)); // Send heartbeat every 120 seconds
@@ -1872,7 +2063,7 @@ impl WorkerHandle for ClientWorker {
                         };
 
                     // device_info should be real-time for monitoring
-                    let (device_info, device_memtotal_mb) = match collect_device_info().await {
+                    let (device_info, device_memtotal_mb) = match collect_device_info(engine_type).await {
                         Ok(info) => info,
                         Err(e) => {
                             error!("Failed to collect device info: {}", e);
@@ -1935,7 +2126,27 @@ impl WorkerHandle for ClientWorker {
                 HashMap::new();
             // (turn_urls, username, password, peer_id as hex) - peer_id used only for debugging/selection
             loop {
-                match read_command(&mut *self.reader.lock().await, &mut buf).await? {
+                let cmd_result = read_command(&mut *self.reader.lock().await, &mut buf).await;
+                
+                // Handle connection errors gracefully
+                let cmd = match cmd_result {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        // Check if this is an IO error indicating connection loss
+                        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                            if io_err.kind() == std::io::ErrorKind::UnexpectedEof 
+                                || io_err.kind() == std::io::ErrorKind::ConnectionReset
+                                || io_err.kind() == std::io::ErrorKind::BrokenPipe {
+                                warn!("Connection to server lost: {}. Exiting handler...", e);
+                                return Err(anyhow!("Connection closed by server"));
+                            }
+                        }
+                        error!("Error reading command from server: {}", e);
+                        return Err(e);
+                    }
+                };
+                
+                match cmd {
                     Command::V1(cmd_v1) => {
                         match cmd_v1 {
                             CommandV1::CancelInference { task_id } => {
@@ -1965,15 +2176,26 @@ impl WorkerHandle for ClientWorker {
                                         }
                                     }
                                     // If server assigned models, ensure they are pulled/ready.
-                                    for pod_model in &pods_model {
-                                        if self.args.auto_models {
+                                    // Skip if user specified a local model path OR auto_models is disabled
+                                    if self.args.llama_model_path.is_some() {
+                                        info!("Skipping server-recommended models (using local model path: {:?})", self.args.llama_model_path);
+                                    } else if self.args.auto_models {
+                                        for pod_model in &pods_model {
                                             // For Llama engine, use deal_with_pod_model which supports download URL
                                             if self.engine_type == common::EngineType::Llama {
-                                                self.deal_with_pod_model(pod_model).await?;
+                                                // Download errors should not crash the handler - just log and continue
+                                                // The download will be retried on next PullModelResult
+                                                if let Err(e) = self.deal_with_pod_model(pod_model).await {
+                                                    error!("Failed to download/load model: {}. Will retry later.", e);
+                                                }
                                             } else if let Some(ref model_name) = pod_model.model_name {
-                                                self.deal_with_model(model_name).await?;
+                                                if let Err(e) = self.deal_with_model(model_name).await {
+                                                    error!("Failed to deal with model {}: {}. Will retry later.", model_name, e);
+                                                }
                                             }
                                         }
+                                    } else {
+                                        info!("Skipping server-recommended models (auto_models is disabled)");
                                     }
                                                                         // Start model reporting task immediately after login (choice A).
                                     self.model_task().await?;
@@ -1990,17 +2212,33 @@ impl WorkerHandle for ClientWorker {
                                     error!("Pull model failed: {}", error.unwrap_or_default());
                                     return Err(anyhow!("Pull model failed"));
                                 }
+                                
+                                // Empty pods_model is OK - it means server has no recommendations
                                 if pods_model.is_empty() {
-                                    error!("device is not compatible with the model");
-                                    return Err(anyhow!("device is not compatible with the model"));
+                                    debug!("Server returned no model recommendations");
+                                    continue;
                                 }
-                                for pod_model in &pods_model {
-                                    // For Llama engine, use deal_with_pod_model which supports download URL
-                                    if self.engine_type == common::EngineType::Llama {
-                                        self.deal_with_pod_model(pod_model).await?;
-                                    } else if let Some(ref model_name) = pod_model.model_name {
-                                        self.deal_with_model(model_name).await?;
+                                
+                                // Skip if user specified a local model path OR auto_models is disabled
+                                if self.args.llama_model_path.is_some() {
+                                    info!("Skipping PullModelResult (using local model path: {:?})", self.args.llama_model_path);
+                                } else if self.args.auto_models {
+                                    for pod_model in &pods_model {
+                                        // For Llama engine, use deal_with_pod_model which supports download URL
+                                        if self.engine_type == common::EngineType::Llama {
+                                            // Download errors should not crash the handler - just log and continue
+                                            // The download will be retried on next PullModelResult
+                                            if let Err(e) = self.deal_with_pod_model(pod_model).await {
+                                                error!("Failed to download/load model: {}. Will retry later.", e);
+                                            }
+                                        } else if let Some(ref model_name) = pod_model.model_name {
+                                            if let Err(e) = self.deal_with_model(model_name).await {
+                                                error!("Failed to deal with model {}: {}. Will retry later.", model_name, e);
+                                            }
+                                        }
                                     }
+                                } else {
+                                    info!("Skipping PullModelResult (auto_models is disabled)");
                                 }
                             }
                             CommandV1::RequestNewProxyConn { proxy_conn_id } => {

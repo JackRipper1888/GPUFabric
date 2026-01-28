@@ -35,13 +35,16 @@ async fn main() -> Result<()> {
 
         if let Err(e) = worker.login().await {
             tracing::error!(error = %e, "gpuf-c login failed");
+            drop(worker); // Explicitly drop worker to free resources
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
 
         if let Err(e) = worker.handler().await {
             tracing::error!(error = %e, "gpuf-c handler exited");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            drop(worker); // Explicitly drop worker to free resources
+            tracing::info!("Waiting for resources to be freed before reconnecting...");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
 

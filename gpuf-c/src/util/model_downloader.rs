@@ -7,14 +7,14 @@
 //! - Integrity verification with checksums
 
 use anyhow::{anyhow, Result};
+use futures_util::StreamExt;
 use reqwest::Client;
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for model downloading
@@ -142,6 +142,14 @@ impl ModelDownloader {
             tokio::fs::create_dir_all(parent).await?;
         }
 
+        if downloaded_size > 0 {
+            info!(
+                "Resume detected ({} bytes already present). Using sequential ranged download to avoid file corruption.",
+                downloaded_size
+            );
+            return self.simple_download().await;
+        }
+
         // Download remaining bytes
         let remaining_bytes = file_size - downloaded_size;
         info!(
@@ -164,7 +172,7 @@ impl ModelDownloader {
         }
 
         // Download chunks
-        self.download_chunks(chunks, file_size).await?;
+        self.download_chunks(chunks, file_size, downloaded_size).await?;
 
         // Verify integrity if checksum provided
         if let Some(checksum) = &self.config.checksum {
@@ -182,17 +190,20 @@ impl ModelDownloader {
             Ok(response) => {
                 if response.status().is_success() {
                     if let Some(size) = response.content_length() {
-                        return Ok(size);
+                        if size > 0 {
+                            return Ok(size);
+                        }
                     }
                 }
-                // HEAD failed or no content length, try GET
+                // HEAD failed or no content length, try GET with Range
             }
             Err(_) => {
-                // HEAD failed, try GET
+                // HEAD failed, try GET with Range
             }
         }
 
-        // Fallback to GET request with range=0-0 to get just the content length
+        // Fallback to GET request with range=0-0 to get file size from Content-Range header
+        // Response will be: Content-Range: bytes 0-0/TOTAL_SIZE
         let response = self
             .client
             .get(&self.config.url)
@@ -200,13 +211,32 @@ impl ModelDownloader {
             .send()
             .await?;
 
-        if !response.status().is_success() && response.status() != 206 {
-            return Err(anyhow!("Failed to get file info: {}", response.status()));
+        // Check for 206 Partial Content (range request supported)
+        if response.status() == 206 {
+            // Parse Content-Range header: "bytes 0-0/TOTAL_SIZE"
+            if let Some(content_range) = response.headers().get("content-range") {
+                if let Ok(range_str) = content_range.to_str() {
+                    // Format: "bytes 0-0/26883306112"
+                    if let Some(total_size_str) = range_str.split('/').last() {
+                        if let Ok(total_size) = total_size_str.parse::<u64>() {
+                            return Ok(total_size);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If range request not supported, try content_length from response
+        if response.status().is_success() {
+            if let Some(size) = response.content_length() {
+                if size > 0 {
+                    return Ok(size);
+                }
+            }
         }
 
-        response
-            .content_length()
-            .ok_or_else(|| anyhow!("Server didn't provide content length"))
+        // Server doesn't provide file size
+        Ok(0)
     }
 
     /// Get current size of partially downloaded file
@@ -258,9 +288,32 @@ impl ModelDownloader {
     }
 
     /// Download multiple chunks in parallel
-    async fn download_chunks(&self, chunks: Vec<DownloadChunk>, total_size: u64) -> Result<()> {
+    async fn download_chunks(
+        &self,
+        chunks: Vec<DownloadChunk>,
+        total_size: u64,
+        initial_downloaded: u64,
+    ) -> Result<()> {
+        let parts_dir = self.parts_dir();
+        tokio::fs::create_dir_all(&parts_dir).await?;
+
+        let mut existing = 0u64;
+        for chunk in chunks.iter() {
+            let part_path = Self::part_path(&parts_dir, chunk.index);
+            if let Ok(meta) = tokio::fs::metadata(&part_path).await {
+                let len = meta.len();
+                let max_len = (chunk.end - chunk.start) + 1;
+                if len <= max_len {
+                    existing += len;
+                } else {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                }
+            }
+        }
+
         let semaphore = Arc::new(Semaphore::new(self.config.parallel_chunks));
-        let downloaded_bytes = Arc::new(Mutex::new(0u64));
+        let baseline_downloaded = initial_downloaded + existing;
+        let downloaded_bytes = Arc::new(Mutex::new(baseline_downloaded));
         let start_time = std::time::Instant::now();
         let total_chunks = chunks.len();
 
@@ -271,21 +324,25 @@ impl ModelDownloader {
             let client = self.client.clone();
             let url = self.config.url.clone();
             let output_path = self.config.output_path.clone();
+            let parts_dir = parts_dir.clone();
             let downloaded_bytes = downloaded_bytes.clone();
             let progress_callback = self.progress_callback.clone();
+            let baseline_downloaded = baseline_downloaded;
 
             set.spawn(async move {
                 let _permit = semaphore.acquire().await?;
 
-                let result = Self::download_chunk(
+                let result = Self::download_chunk_to_part(
                     client,
                     &url,
                     &output_path,
+                    &parts_dir,
                     chunk,
                     downloaded_bytes.clone(),
                     total_size,
                     progress_callback,
                     start_time,
+                    baseline_downloaded,
                 )
                 .await;
 
@@ -320,70 +377,127 @@ impl ModelDownloader {
             }
         }
 
+        Self::assemble_parts(&parts_dir, &self.config.output_path, total_chunks).await?;
+
+        let _ = tokio::fs::remove_dir_all(&parts_dir).await;
+
         Ok(())
     }
 
-    /// Download a single chunk with range request
-    async fn download_chunk(
+    fn parts_dir(&self) -> PathBuf {
+        let mut p = self.config.output_path.to_string_lossy().to_string();
+        p.push_str(".parts");
+        PathBuf::from(p)
+    }
+
+    fn part_path(parts_dir: &Path, index: usize) -> PathBuf {
+        parts_dir.join(format!("part-{}", index))
+    }
+
+    async fn assemble_parts(parts_dir: &Path, output_path: &Path, total_parts: usize) -> Result<()> {
+        let mut out = tokio::fs::File::create(output_path).await?;
+        for i in 0..total_parts {
+            let part = Self::part_path(parts_dir, i);
+            let mut f = tokio::fs::File::open(&part).await?;
+            tokio::io::copy(&mut f, &mut out).await?;
+        }
+        out.sync_all().await?;
+        Ok(())
+    }
+
+    async fn download_chunk_to_part(
         client: Client,
         url: &str,
         output_path: &Path,
+        parts_dir: &Path,
         chunk: DownloadChunk,
         downloaded_bytes: Arc<Mutex<u64>>,
         total_size: u64,
         progress_callback: Option<Arc<ProgressCallback>>,
         start_time: std::time::Instant,
+        baseline_downloaded: u64,
     ) -> Result<()> {
-        let range_header = format!("bytes={}-{}", chunk.start, chunk.end);
+        let _ = output_path;
+        let part_path = Self::part_path(parts_dir, chunk.index);
 
+        let existing_len = match tokio::fs::metadata(&part_path).await {
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
+
+        let max_len = (chunk.end - chunk.start) + 1;
+        let existing_len = existing_len.min(max_len);
+        let start = chunk.start + existing_len;
+        if start > chunk.end {
+            return Ok(());
+        }
+
+        let range_header = format!("bytes={}-{}", start, chunk.end);
         let response = client.get(url).header("Range", range_header).send().await?;
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Chunk download failed: {}", response.status()));
+        if response.status() != 206 {
+            return Err(anyhow!(
+                "Server did not honor Range request for chunk {} (status: {})",
+                chunk.index,
+                response.status()
+            ));
         }
 
-        let chunk_data = response.bytes().await?;
-
-        // Write chunk to file at correct position
-        let mut file = OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .open(output_path)?;
+            .append(true)
+            .open(&part_path)
+            .await?;
 
-        file.seek(SeekFrom::Start(chunk.start))?;
-        file.write_all(&chunk_data)?;
-        file.sync_all()?;
+        let mut stream = response.bytes_stream();
+        let mut last_report = std::time::Instant::now();
 
-        // Update progress
-        {
-            let mut downloaded = downloaded_bytes.lock().await;
-            *downloaded += chunk_data.len() as u64;
+        loop {
+            let next = timeout(Duration::from_secs(30), stream.next()).await;
+            match next {
+                Ok(Some(item)) => {
+                    let bytes = item?;
+                    file.write_all(&bytes).await?;
 
-            if let Some(callback) = progress_callback {
-                let progress = DownloadProgress {
-                    downloaded_bytes: *downloaded,
-                    total_bytes: total_size,
-                    percentage: (*downloaded as f64) / (total_size as f64),
-                    speed_bps: if start_time.elapsed().as_secs() > 0 {
-                        (*downloaded) / start_time.elapsed().as_secs()
-                    } else {
-                        0
-                    },
-                    eta_seconds: if start_time.elapsed().as_secs() > 0 {
-                        let avg_speed = (*downloaded) / start_time.elapsed().as_secs();
-                        if avg_speed > 0 {
-                            Some((total_size - *downloaded) / avg_speed)
-                        } else {
-                            None
+                    let mut downloaded = downloaded_bytes.lock().await;
+                    *downloaded += bytes.len() as u64;
+
+                    if let Some(callback) = progress_callback.as_ref() {
+                        if last_report.elapsed().as_secs() >= 1 {
+                            last_report = std::time::Instant::now();
+                            let elapsed_secs = start_time.elapsed().as_secs();
+                            let downloaded_since_start = downloaded.saturating_sub(baseline_downloaded);
+                            let speed_bps = if elapsed_secs > 0 {
+                                downloaded_since_start / elapsed_secs
+                            } else {
+                                0
+                            };
+                            let progress = DownloadProgress {
+                                downloaded_bytes: *downloaded,
+                                total_bytes: total_size,
+                                percentage: (*downloaded as f64) / (total_size as f64),
+                                speed_bps,
+                                eta_seconds: if speed_bps > 0 {
+                                    Some((total_size - *downloaded) / speed_bps)
+                                } else {
+                                    None
+                                },
+                            };
+                            callback(progress);
                         }
-                    } else {
-                        None
-                    },
-                };
-
-                callback(progress);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "Chunk download stalled (timeout waiting for data)"
+                    ));
+                }
             }
         }
+
+        file.flush().await?;
 
         Ok(())
     }
@@ -449,13 +563,22 @@ impl ModelDownloader {
             return Err(anyhow!("Download failed: {}", response.status()));
         }
 
+        let effective_resume_from = if resume_from > 0 && response.status() == 206 {
+            resume_from
+        } else {
+            0
+        };
+
         let total_size = response.content_length().unwrap_or(0);
-        let actual_total = if resume_from > 0 && response.status() == 206 {
-            resume_from + total_size
+        let actual_total = if effective_resume_from > 0 {
+            effective_resume_from + total_size
         } else {
             total_size
         };
-        info!("Actual content length: {} bytes (resume from: {})", actual_total, resume_from);
+        info!(
+            "Actual content length: {} bytes (resume from: {})",
+            actual_total, effective_resume_from
+        );
 
         // Create output directory
         if let Some(parent) = self.config.output_path.parent() {
@@ -463,7 +586,7 @@ impl ModelDownloader {
         }
 
         // Open file for append if resuming, otherwise create new
-        let mut file = if resume_from > 0 && response.status() == 206 {
+        let mut file = if effective_resume_from > 0 {
             use tokio::fs::OpenOptions;
             OpenOptions::new()
                 .write(true)
@@ -474,7 +597,7 @@ impl ModelDownloader {
             tokio::fs::File::create(&self.config.output_path).await?
         };
         
-        let mut downloaded_bytes = resume_from;
+        let mut downloaded_bytes = effective_resume_from;
         let start_time = std::time::Instant::now();
 
         // Use streaming download
@@ -496,17 +619,17 @@ impl ModelDownloader {
                         downloaded_bytes
                     },
                     percentage: if actual_total > 0 {
-                        (downloaded_bytes as f64) / (actual_total as f64) * 100.0
+                        (downloaded_bytes as f64) / (actual_total as f64)
                     } else {
                         0.0 // Can't calculate percentage without total size
                     },
                     speed_bps: if start_time.elapsed().as_secs() > 0 {
-                        (downloaded_bytes - resume_from) / start_time.elapsed().as_secs()
+                        (downloaded_bytes - effective_resume_from) / start_time.elapsed().as_secs()
                     } else {
                         0
                     },
                     eta_seconds: if actual_total > 0 && start_time.elapsed().as_secs() > 0 {
-                        let avg_speed = (downloaded_bytes - resume_from) / start_time.elapsed().as_secs();
+                        let avg_speed = (downloaded_bytes - effective_resume_from) / start_time.elapsed().as_secs();
                         if avg_speed > 0 {
                             Some((actual_total - downloaded_bytes) / avg_speed)
                         } else {

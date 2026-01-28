@@ -9,10 +9,11 @@ use common::{DevicesInfo, EngineType, OsType};
 #[cfg(feature = "vulkan")]
 use sysinfo;
 
-// Conditional debug printing: only print in debug builds
+use super::log_icon;
+
+// Conditional debug printing: print in all builds
 macro_rules! debug_println {
     ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
         println!($($arg)*);
     };
 }
@@ -366,7 +367,10 @@ pub async fn collect_device_info_vulkan_cross_platform() -> Result<(DevicesInfo,
 
     unsafe { instance.destroy_instance(None) };
 
-    debug_println!("\n✅ Device information collection completed!");
+    debug_println!(
+        "\n{} Device information collection completed!",
+        log_icon("✅", "[OK]")
+    );
     Ok((devices_info, device_count))
 }
 
@@ -485,7 +489,10 @@ fn get_accurate_gpu_metrics(
     #[cfg(all(feature = "nvml", not(target_os = "macos"), not(target_os = "android")))]
     {
         if let Ok((usage, mem_usage, power, temp)) = try_nvml_metrics() {
-            debug_println!("🎯 Using NVML for accurate GPU metrics");
+            debug_println!(
+                "{} Using NVML for accurate GPU metrics",
+                log_icon("🎯", "[INFO]")
+            );
             return (usage, mem_usage, power, temp);
         }
     }
@@ -494,7 +501,10 @@ fn get_accurate_gpu_metrics(
     #[cfg(all(feature = "rocm", target_os = "linux"))]
     {
         if let Ok((usage, mem_usage, power, temp)) = try_rocm_metrics() {
-            debug_println!("🎯 Using ROCm SMI for accurate GPU metrics");
+            debug_println!(
+                "{} Using ROCm SMI for accurate GPU metrics",
+                log_icon("🎯", "[INFO]")
+            );
             return (usage, mem_usage, power, temp);
         }
     }
@@ -503,7 +513,10 @@ fn get_accurate_gpu_metrics(
     #[cfg(all(target_os = "windows", not(feature = "nvml")))]
     {
         if let Ok((usage, mem_usage, power, temp)) = try_wmi_gpu_metrics() {
-            debug_println!("🎯 Using WMI for accurate GPU metrics");
+            debug_println!(
+                "{} Using WMI for accurate GPU metrics",
+                log_icon("🎯", "[INFO]")
+            );
             return (usage, mem_usage, power, temp);
         }
     }
@@ -512,7 +525,10 @@ fn get_accurate_gpu_metrics(
     #[cfg(target_os = "macos")]
     {
         if let Ok((usage, mem_usage, power, temp)) = try_macos_gpu_metrics() {
-            debug_println!("🎯 Using PowerMetrics for accurate GPU metrics");
+            debug_println!(
+                "{} Using PowerMetrics for accurate GPU metrics",
+                log_icon("🎯", "[INFO]")
+            );
             return (usage, mem_usage, power, temp);
         }
     }
@@ -521,7 +537,10 @@ fn get_accurate_gpu_metrics(
     #[cfg(all(target_os = "linux", not(feature = "nvml")))]
     {
         if let Ok((usage, mem_usage, power, temp)) = try_sysfs_gpu_metrics(vendor_id) {
-            debug_println!("🎯 Using sysfs for accurate GPU metrics");
+            debug_println!(
+                "{} Using sysfs for accurate GPU metrics",
+                log_icon("🎯", "[INFO]")
+            );
             return (usage, mem_usage, power, temp);
         }
     }

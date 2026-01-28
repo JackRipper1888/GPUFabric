@@ -87,7 +87,7 @@ pub struct Args {
     )]
     pub engine_type: EngineType,
 
-    #[arg(long, default_value = "true", help = "auto mode")]
+    #[arg(long, default_value = "false", help = "auto mode")]
     pub auto_models: bool,
 
     #[arg(long, default_value = None, help = "hugging face hub token" )]
@@ -257,4 +257,14 @@ pub enum EngineType {
     OLLAMA,
     #[clap(name = "llama")]
     LLAMA,
+}
+
+impl EngineType {
+    pub fn to_common(&self) -> common::EngineType {
+        match self {
+            EngineType::VLLM => common::EngineType::Vllm,
+            EngineType::OLLAMA => common::EngineType::Ollama,
+            EngineType::LLAMA => common::EngineType::Llama,
+        }
+    }
 }

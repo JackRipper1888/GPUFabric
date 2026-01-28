@@ -89,7 +89,7 @@ fn main() {
             r#"#include <windows.h>
 1 ICON "{}"
 "#,
-            icon_path.replace("\\", "\\\\") // 转义反斜杠
+            icon_path.replace("\\", "\\\\") // Escape backslashes for .rc file
         );
 
         std::fs::write("icon.rc", icon_rc_content).expect("Failed to write icon.rc file");

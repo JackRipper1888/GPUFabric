@@ -81,8 +81,25 @@ impl Default for VLLMEngine {
     }
 }
 
+impl Clone for VLLMEngine {
+    fn clone(&self) -> Self {
+        Self {
+            models: self.models.clone(),
+            models_name: self.models_name.clone(),
+            worker_handler: None, // JoinHandle cannot be cloned, set to None
+            show_worker_log: self.show_worker_log,
+            base_url: self.base_url.clone(),
+            gpu_count: self.gpu_count,
+            container_id: self.container_id.clone(),
+            hugging_face_hub_token: self.hugging_face_hub_token.clone(),
+            chat_template_path: self.chat_template_path.clone(),
+        }
+    }
+}
+
 //TODO: delete unused field
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct OllamaEngine {
     models: [i32; 16],
     models_name: Vec<String>,
@@ -98,6 +115,7 @@ impl Default for OllamaEngine {
     }
 }
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum AnyEngine {
     VLLM(VLLMEngine),
     Ollama(OllamaEngine),

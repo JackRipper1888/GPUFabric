@@ -9,7 +9,7 @@ use bytes::BytesMut;
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use common::{os_type_str, format_bytes, CommandV2, Model, OsType, PodModel};
+use common::{format_bytes, os_type_str, CommandV2, DownloadStatus, Model, OsType, PodModel};
 use redis::Client as RedisClient;
 use redis::AsyncCommands;
 use sqlx::{Pool, Postgres};
@@ -118,7 +118,7 @@ async fn handle_single_client(
         match read_command(&mut reader, &mut buf).await {
             Ok(Command::V1(CommandV1::Login {
                 version,
-                auto_models: _,
+                auto_models,
                 client_id: id,
                 os_type,
                 system_info,
@@ -134,6 +134,7 @@ async fn handle_single_client(
 
                 let validate_result = match handle_login(
                     version,
+                    auto_models,
                     &active_clients,
                     &redis_client,
                     &db_pool,
@@ -300,17 +301,37 @@ async fn handle_single_client(
                 status,
                 error,
             })) => {
-                info!(
-                    "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
-                    ClientId(id),
-                    model_name,
-                    percentage,
-                    format_bytes!(downloaded_bytes),
-                    format_bytes!(total_bytes),
-                    format_bytes!(speed_bps),
-                    status,
-                    error
-                );
+                let is_noisy_pending = status == DownloadStatus::Pending
+                    && downloaded_bytes == 0
+                    && speed_bps == 0
+                    && percentage <= 0.0
+                    && error.is_none();
+
+                if !is_noisy_pending {
+                    info!(
+                        "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
+                        ClientId(id),
+                        model_name,
+                        percentage,
+                        format_bytes!(downloaded_bytes),
+                        format_bytes!(total_bytes),
+                        format_bytes!(speed_bps),
+                        status,
+                        error
+                    );
+                } else {
+                    debug!(
+                        "Model download progress from client {}: model={}, progress={:.1}%, downloaded={}/{}, speed={}/s, status={:?}, error={:?}",
+                        ClientId(id),
+                        model_name,
+                        percentage,
+                        format_bytes!(downloaded_bytes),
+                        format_bytes!(total_bytes),
+                        format_bytes!(speed_bps),
+                        status,
+                        error
+                    );
+                }
                 
                 // Store or delete progress in Redis
                 update_model_download_progress_in_redis(
@@ -485,6 +506,7 @@ async fn handle_single_client(
 
 async fn handle_login(
     version: u32,
+    auto_models: bool,
     active_clients: &Arc<Mutex<HashMap<ClientId, ClientInfo>>>,
     redis_client: &Arc<RedisClient>,
     db_pool: &Pool<Postgres>,
@@ -515,7 +537,13 @@ async fn handle_login(
     let validate_result = if is_valid {
         info!("Client {} registered successfully", client_id);
         *authed = true;
-        let pods_model = models::get_models_batch(&hot_models, &devices_info).await?;
+        
+        // Only recommend models if auto_models is enabled
+        let pods_model = if auto_models {
+            models::get_models_batch(&hot_models, &devices_info).await?
+        } else {
+            Vec::new()
+        };
 
         CommandV1::LoginResult {
             success: true,

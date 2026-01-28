@@ -8,10 +8,39 @@ pub mod network_info;
 pub mod system_info;
 pub mod system_info_vulkan;
 
+use std::sync::OnceLock;
 use tracing::{debug, Level};
+
+static LOG_ICONS_UTF8: OnceLock<bool> = OnceLock::new();
+
+fn detect_utf8_locale() -> bool {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if v.is_empty() {
+                continue;
+            }
+            let lower = v.to_ascii_lowercase();
+            return lower.contains("utf-8") || lower.contains("utf8");
+        }
+    }
+
+    true
+}
+
+pub fn log_icon(unicode: &'static str, ascii: &'static str) -> &'static str {
+    let utf8 = *LOG_ICONS_UTF8.get_or_init(detect_utf8_locale);
+    if utf8 {
+        unicode
+    } else {
+        ascii
+    }
+}
 
 pub fn init_logging() {
     // Use DEBUG level for debug builds, INFO for release builds
+
+    let _ = LOG_ICONS_UTF8.get_or_init(detect_utf8_locale);
 
     #[cfg(not(debug_assertions))]
     tracing_subscriber::fmt()
