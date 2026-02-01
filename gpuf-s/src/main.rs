@@ -15,6 +15,8 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info};
 
+use crate::db::client;
+
 #[cfg(debug_assertions)]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -106,6 +108,23 @@ async fn main() -> Result<()> {
     };
 
     let result = server_loop.await;
+
+    let active_client_ids = {
+        let clients = server_state.active_clients.lock().await;
+        clients.keys().cloned().collect::<Vec<_>>()
+    };
+    if !active_client_ids.is_empty() {
+        info!(
+            "Marking {} active clients as offline before shutdown",
+            active_client_ids.len()
+        );
+        for client_id in active_client_ids {
+            if let Err(e) = client::upsert_client_status(&server_state.db_pool, &client_id, "offline").await {
+                error!("Failed to set client {} offline during shutdown: {}", client_id, e);
+            }
+        }
+    }
+
     info!("Dropping ServerState...");
     drop(server_state);
 
