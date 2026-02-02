@@ -52,6 +52,12 @@ pub struct LlamaEngine {
     pub cached_model_path: Option<String>, // Track which model is currently cached
 }
 
+impl Default for LlamaEngine {
+    fn default() -> Self {
+        Self { models: Arc::new(RwLock::new(Vec::new())), models_name: Vec::new(), model_path: None, n_ctx: 0, n_gpu_layers: 0, llama_split_mode: LlamaSplitModeArg::None, llama_main_gpu: 0, llama_devices: None, is_initialized: false, models_dir: PathBuf::new(), loading_status: Arc::new(RwLock::new(String::new())), current_loading_model: Arc::new(RwLock::new(None)), cached_backend: None, cached_model: None, cached_model_path: None }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SamplingParams {
     pub temperature: f32,
