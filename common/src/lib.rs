@@ -365,6 +365,50 @@ pub enum CommandV2 {
         connection_id: [u8; 16],
         error: String,
     },
+
+    // ===== Stable Diffusion Distributed Inference Commands =====
+    
+    /// SD推理请求：PC 端发送文本提示词给移动端
+    SDInferenceRequest {
+        connection_id: [u8; 16],
+        task_id: String,
+        prompt: String,
+        params: SDGenerationParams,
+    },
+    
+    /// SD Embedding 传输：PC 端发送提取的 Embedding
+    SDEmbeddingTransfer {
+        connection_id: [u8; 16],
+        task_id: String,
+        embedding: SDEmbedding,
+    },
+    
+    /// SD 推理进度：移动端报告 UNet 采样进度
+    SDInferenceProgress {
+        connection_id: [u8; 16],
+        task_id: String,
+        step: u32,
+        total_steps: u32,
+        stage: SDStage,
+    },
+    
+    /// SD 推理结果：移动端返回生成的图像
+    SDInferenceResult {
+        connection_id: [u8; 16],
+        task_id: String,
+        success: bool,
+        image_data: Option<Vec<u8>>,
+        width: u32,
+        height: u32,
+        execution_time_ms: u64,
+        error: Option<String>,
+    },
+    
+    /// SD 推理取消
+    SDCancelInference {
+        connection_id: [u8; 16],
+        task_id: String,
+    },
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq)]
@@ -393,6 +437,77 @@ pub enum P2PConnectionType {
     Direct, // direct P2P connection
     Relay,  // relay through gpuf-s
     TURN,   // through TURN server
+}
+
+// ===== Stable Diffusion Data Structures =====
+
+/// Stable Diffusion Text Embedding
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct SDEmbedding {
+    pub embedding_id: [u8; 16],
+    pub model_type: SDModelType,
+    pub shape: [u32; 3],
+    pub dtype: SDDType,
+    pub data: Vec<u8>,
+    pub uncompressed_size: u64,
+    pub checksum: u32,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SDModelType {
+    ZImage,
+    Flux,
+    StableDiffusion3,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SDDType {
+    F32,
+    F16,
+    BF16,
+}
+
+/// Stable Diffusion 图像生成参数
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct SDGenerationParams {
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    pub cfg_scale: f32,
+    pub negative_prompt: Option<String>,
+    pub seed: u64,
+    pub sampler: SDSampler,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SDSampler {
+    Euler,
+    EulerA,
+    DPM,
+    DDIM,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SDStage {
+    Initializing,
+    TextEncoding,
+    Denoising,
+    Decoding,
+    Encoding,
+    Completed,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum SDError {
+    EmbeddingExtractionFailed(String),
+    ModelNotLoaded(String),
+    IncompatibleModel(String),
+    ChecksumMismatch,
+    DecompressionFailed(String),
+    UNetInferenceFailed(String),
+    VAEDecodeFailed(String),
+    OutOfMemory,
+    Timeout,
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq)]

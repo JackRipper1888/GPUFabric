@@ -89,6 +89,7 @@ static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 // Export modules
 pub mod handle;
 pub mod llm_engine;
+pub mod sd_embedding_extractor;
 pub mod util;
 
 // JNI wrapper modules
