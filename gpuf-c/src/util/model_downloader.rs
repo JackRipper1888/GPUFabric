@@ -124,7 +124,7 @@ impl ModelDownloader {
         }
 
         // Check if we can resume
-        let downloaded_size = if self.config.resume && self.config.output_path.exists() {
+        let mut downloaded_size = if self.config.resume && self.config.output_path.exists() {
             self.get_downloaded_size().await?
         } else {
             0
@@ -140,6 +140,37 @@ impl ModelDownloader {
         // Create output directory
         if let Some(parent) = self.config.output_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+        }
+
+        if downloaded_size > file_size {
+            warn!(
+                "Existing file is larger than server file size (existing={}, server={}), re-downloading",
+                downloaded_size, file_size
+            );
+            let _ = tokio::fs::remove_file(&self.config.output_path).await;
+            let _ = tokio::fs::remove_dir_all(self.parts_dir()).await;
+            downloaded_size = 0;
+        } else if downloaded_size == file_size && file_size > 0 {
+            if let Some(checksum) = &self.config.checksum {
+                match self.verify_checksum(checksum).await {
+                    Ok(()) => {
+                        info!("File already completely downloaded and checksum verified");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Existing file matches server size but checksum failed ({}), re-downloading",
+                            e
+                        );
+                        let _ = tokio::fs::remove_file(&self.config.output_path).await;
+                        let _ = tokio::fs::remove_dir_all(self.parts_dir()).await;
+                        downloaded_size = 0;
+                    }
+                }
+            } else {
+                info!("File already completely downloaded");
+                return Ok(());
+            }
         }
 
         if downloaded_size > 0 {
@@ -558,6 +589,14 @@ impl ModelDownloader {
         } else {
             self.client.get(&self.config.url).send().await?
         };
+
+        if response.status() == 416 && resume_from > 0 {
+            if let Some(checksum) = &self.config.checksum {
+                self.verify_checksum(checksum).await?;
+            }
+            info!("Range resume not satisfiable; treating existing file as complete");
+            return Ok(());
+        }
 
         if !response.status().is_success() && response.status() != 206 {
             return Err(anyhow!("Download failed: {}", response.status()));

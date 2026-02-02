@@ -1,8 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
 use gpuf_s::consumer;
-use tracing::error;
+use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
+
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,6 +23,12 @@ pub struct Args {
 
     #[arg(long, default_value = "localhost:9092")]
     pub bootstrap_server: String,
+
+    #[arg(long, default_value = "300")]
+    pub offline_after_secs: i64,
+
+    #[arg(long, default_value = "30")]
+    pub sweep_interval_secs: u64,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,6 +52,38 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Database connection failed"));
         }
     };
+
+    let sweep_pool = db_pool.clone();
+    let offline_after_secs = args.offline_after_secs;
+    let sweep_interval_secs = args.sweep_interval_secs;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(sweep_interval_secs));
+        loop {
+            ticker.tick().await;
+
+            let res = sqlx::query(
+                "UPDATE \"public\".\"gpu_assets\" \n                 SET client_status = 'offline', updated_at = NOW() \n                 WHERE valid_status = 'valid' \n                   AND client_status <> 'offline' \n                   AND updated_at < (NOW() - ($1 * INTERVAL '1 second'))",
+            )
+            .bind(offline_after_secs)
+            .execute(&sweep_pool)
+            .await;
+
+            match res {
+                Ok(r) => {
+                    let n = r.rows_affected();
+                    if n > 0 {
+                        info!(
+                            "Sweeper marked {} clients offline (offline_after_secs={})",
+                            n, offline_after_secs
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Sweeper failed to mark stale clients offline: {}", e);
+                }
+            }
+        }
+    });
 
     // Start the consumer service
     consumer::start_consumer_services(

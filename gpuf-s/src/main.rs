@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
     };
 
     let result = server_loop.await;
+
     info!("Dropping ServerState...");
     drop(server_state);
 
