@@ -11,6 +11,7 @@
 output
 dhat-heap.json
 Cargo.lock
+gpuf-c/Cargo.toml.bak
 zookeeper_data
 zookeeper_logs
 kafka_data
