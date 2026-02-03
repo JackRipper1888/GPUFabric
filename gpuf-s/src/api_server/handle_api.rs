@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 
-use crate::api_server::{apk, client, models};
+use crate::api_server::{apk, client, models, points};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -50,6 +50,8 @@ impl ApiServer {
             // Model Management APIs
             .route("/api/models/insert", post(models::create_or_update_model))
             .route("/api/models/get", get(models::get_models))
+            // Points Management APIs
+            .route("/api/user/points", get(points::get_user_points))
             // APK Management APIs
             .route("/api/apk/upsert", post(apk::upsert_apk))
             .route("/api/apk/get", get(apk::get_apk))

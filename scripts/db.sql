@@ -21,6 +21,16 @@ CREATE INDEX IF NOT EXISTS idx_tokens_key ON "public"."tokens" ("key");
 CREATE INDEX IF NOT EXISTS idx_tokens_user_id ON "public"."tokens" ("user_id");
 CREATE INDEX IF NOT EXISTS idx_tokens_deleted_at ON "public"."tokens" ("deleted_at");
 
+DO $$
+BEGIN
+    BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_key_unique ON "public"."tokens" ("key");
+    EXCEPTION
+        WHEN others THEN
+            NULL;
+    END;
+END $$;
+
 -- Create GPU assets table for client info
 
 CREATE TABLE  IF NOT EXISTS  "public"."gpu_assets" (
@@ -108,6 +118,9 @@ ADD COLUMN IF NOT EXISTS download_url TEXT,
 ADD COLUMN IF NOT EXISTS checksum VARCHAR(128),
 ADD COLUMN IF NOT EXISTS expected_size BIGINT;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_client_models_name_version_unique
+ON client_models (name, version);
+
 CREATE TABLE IF NOT EXISTS heartbeat (
   id SERIAL,
   client_id   BYTEA NOT NULL,
@@ -135,10 +148,14 @@ CREATE TABLE IF NOT EXISTS client_daily_stats (
     total_network_in_bytes BIGINT DEFAULT 0,
     total_network_out_bytes BIGINT DEFAULT 0,
     last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_heartbeat_bucket BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (client_id, date)
 );
+
+ALTER TABLE client_daily_stats
+ADD COLUMN IF NOT EXISTS last_heartbeat_bucket BIGINT NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_client_daily_stats_client_id_date 
 ON client_daily_stats (client_id, date DESC);
@@ -154,14 +171,181 @@ CREATE TABLE IF NOT EXISTS device_daily_stats (
     avg_temperature FLOAT,
     avg_power_usage FLOAT,
     avg_memory_usage FLOAT,
+    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_heartbeat_bucket BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (client_id, device_index, date)
 );
 
+ALTER TABLE device_daily_stats
+ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE device_daily_stats
+ADD COLUMN IF NOT EXISTS last_heartbeat_bucket BIGINT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_date ON device_daily_stats (date);
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_client_id ON device_daily_stats (client_id);
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_device_index ON device_daily_stats (device_index);
+
+CREATE TABLE IF NOT EXISTS heartbeat_config_daily (
+    date DATE PRIMARY KEY,
+    heartbeat_interval_secs INTEGER NOT NULL DEFAULT 120,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_heartbeat_config_daily_date ON heartbeat_config_daily (date);
+
+CREATE TABLE IF NOT EXISTS device_types (
+    device_id INTEGER PRIMARY KEY,
+    device_name VARCHAR(255) NOT NULL,
+    tflops DOUBLE PRECISION NOT NULL DEFAULT 0,
+    points_multiplier NUMERIC(10,4) NOT NULL DEFAULT 1.0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (device_name)
+);
+
+INSERT INTO device_types (device_id, device_name, tflops)
+VALUES
+    (1, 'Apple M1', 2.6),
+    (2, 'Apple M1 Pro', 5.2),
+    (3, 'Apple M1 Max', 10.4),
+    (4, 'Apple M1 Ultra', 20.8),
+    (5, 'Apple M2', 3.6),
+    (6, 'Apple M2 Pro', 6.8),
+    (7, 'Apple M2 Max', 13.6),
+    (8, 'Apple M2 Ultra', 27.2),
+    (9, 'Apple M3', 4.6),
+    (10, 'Apple M3 Pro', 7.4),
+    (11, 'Apple M3 Max', 14.8),
+    (12, 'Apple M4 Max', 6.5),
+    (13, 'Apple M4', 15.8),
+    (5229, 'GeForce RTX 3080 20GB', 0),
+    (5294, 'GeForce RTX 3070 16GB', 0),
+    (8707, 'GeForce RTX 3090 Ti', 20.8),
+    (8708, 'GeForce RTX 3090', 41.6),
+    (8709, 'GeForce RTX 3080 Ti', 0),
+    (8710, 'GeForce RTX 3080', 10.4),
+    (8711, 'GeForce RTX 3070 Ti', 0),
+    (8714, 'GeForce RTX 3080 12GB', 0),
+    (8726, 'GeForce RTX 3080 Lite Hash Rate', 0),
+    (8751, 'GeForce RTX 3080 11GB / 12GB Engineering Sample', 0),
+    (9248, 'GeForce RTX 3080 Ti Mobile', 0),
+    (9312, 'GeForce RTX 3080 Ti Laptop', 0),
+    (9352, 'GeForce RTX 3070 Lite Hash Rate', 0),
+    (9357, 'GeForce RTX 3070', 0),
+    (9373, 'GeForce RTX 3070 Mobile', 0),
+    (9376, 'GeForce RTX 3070 Laptop', 0),
+    (9391, 'GeForce RTX 3070 Engineering Sample', 0),
+    (9416, 'GeForce RTX 3070 GDDR6X', 0),
+    (9860, 'GeForce RTX 4090', 83.2),
+    (9865, 'GeForce RTX 4070 Ti SUPER', 0),
+    (9879, 'GeForce RTX 4090 D', 0),
+    (9986, 'GeForce RTX 4080 Super', 332.8),
+    (9988, 'GeForce RTX 4080', 0),
+    (9993, 'GeForce RTX 4070', 0),
+    (10114, 'GeForce RTX 4070 Ti', 0),
+    (10115, 'GeForce RTX 4070 SUPER', 0),
+    (10120, 'GeForce RTX 4060 Ti', 0),
+    (10144, 'GeForce RTX 4080 Max-Q / Mobile', 0),
+    (10245, 'GeForce RTX 4060 Ti 16GB', 0),
+    (10248, 'GeForce RTX 4060', 0),
+    (10272, 'GeForce RTX 4070 Max-Q / Mobile', 0),
+    (10400, 'GeForce RTX 4060 Max-Q / Mobile', 0),
+    (11141, 'GeForce RTX 5090', 0),
+    (11143, 'GeForce RTX 5090 D', 0),
+    (11266, 'GeForce RTX 5080', 0),
+    (11269, 'GeForce RTX 5070 Ti', 0),
+    (11288, 'GeForce RTX 5090 Max-Q / Mobile', 0),
+    (11289, 'GeForce RTX 5080 Max-Q / Mobile', 0),
+    (11524, 'GeForce RTX 5060 Ti', 0),
+    (11525, 'GeForce RTX 5060', 0),
+    (11545, 'GeForce RTX 5060 Max-Q / Mobile', 0),
+    (12036, 'GeForce RTX 5070', 0),
+    (12056, 'GeForce RTX 5070 Ti Mobile', 0)
+ON CONFLICT (device_id) DO UPDATE SET
+    device_name = EXCLUDED.device_name,
+    tflops = EXCLUDED.tflops,
+    updated_at = NOW();
+
+DO $$
+BEGIN
+    IF to_regclass('public.device_points_multiplier') IS NOT NULL THEN
+        INSERT INTO device_types (device_id, device_name, tflops, points_multiplier)
+        SELECT
+            device_id,
+            CONCAT('device_', device_id),
+            0,
+            MAX(multiplier)
+        FROM device_points_multiplier
+        GROUP BY device_id
+        ON CONFLICT (device_id) DO UPDATE SET
+            points_multiplier = EXCLUDED.points_multiplier,
+            updated_at = NOW();
+
+        DROP TABLE device_points_multiplier;
+    END IF;
+END
+$$;
+
+UPDATE device_types
+SET
+    points_multiplier = (tflops / NULLIF((SELECT tflops FROM device_types WHERE device_id = 9860), 0)),
+    updated_at = NOW()
+WHERE points_multiplier = 1.0
+  AND tflops > 0
+  AND (SELECT tflops FROM device_types WHERE device_id = 9860) > 0;
+
+DROP MATERIALIZED VIEW IF EXISTS device_points_daily;
+DROP TABLE IF EXISTS device_points_daily;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS device_points_daily AS
+SELECT
+    s.client_id,
+    s.device_index,
+    s.date,
+    s.total_heartbeats,
+    di.device_id,
+    dt.device_name,
+    dt.tflops,
+    COALESCE(dt.points_multiplier, 1.0) AS multiplier,
+    s.base_hours,
+    (s.base_hours::NUMERIC * COALESCE(dt.points_multiplier, 1.0)) AS points,
+    NOW() AS refreshed_at
+FROM (
+    SELECT
+        dds.client_id,
+        dds.device_index,
+        dds.date,
+        dds.total_heartbeats,
+        ((dds.total_heartbeats::BIGINT * COALESCE(hcd.heartbeat_interval_secs, 120)::BIGINT) / 3600) AS base_hours
+    FROM device_daily_stats dds
+    LEFT JOIN heartbeat_config_daily hcd
+        ON hcd.date = dds.date
+) s
+LEFT JOIN device_info di
+    ON di.client_id = s.client_id
+   AND di.device_index = s.device_index
+LEFT JOIN device_types dt
+    ON dt.device_id = di.device_id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_points_daily_pk
+ON device_points_daily (client_id, device_index, date);
+
+CREATE INDEX IF NOT EXISTS idx_device_points_daily_date ON device_points_daily (date);
+CREATE INDEX IF NOT EXISTS idx_device_points_daily_client_id ON device_points_daily (client_id);
+CREATE INDEX IF NOT EXISTS idx_device_points_daily_device_index ON device_points_daily (device_index);
+
+CREATE OR REPLACE FUNCTION refresh_device_points_daily()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    REFRESH MATERIALIZED VIEW device_points_daily;
+END;
+$$;
 
 -- Insert test data for client_models
 -- engine_type: 1=Ollama, 2=Vllm, 3=TensorRT, 4=ONNX, 5=None, 6=Llama
@@ -177,10 +361,19 @@ VALUES
 ON CONFLICT (name, version) DO NOTHING;
 
 -- Insert test data for tokens
-INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level) 
-VALUES 
-    (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1)
-ON CONFLICT (key) DO NOTHING;
+DO $$
+BEGIN
+    IF to_regclass('public.users') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.users WHERE id = 2)
+       AND NOT EXISTS (
+           SELECT 1 FROM tokens
+           WHERE key = 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4'
+       )
+    THEN
+        INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level)
+        VALUES (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1);
+    END IF;
+END $$;
 
 -- APK version management
 CREATE TABLE IF NOT EXISTS "public"."apk_versions" (

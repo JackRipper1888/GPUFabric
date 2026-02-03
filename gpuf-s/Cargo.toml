@@ -45,6 +45,7 @@ time = "0.3"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+md5 = "0.7"
 
 socket2 = { version = "0.6.0", features = ["all"] }
 tokio-util = "0.7.16"

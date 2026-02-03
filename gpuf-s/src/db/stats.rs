@@ -23,6 +23,7 @@ pub struct ClientDailyStats {
     pub total_network_in_bytes: Option<i64>,
     pub total_network_out_bytes: Option<i64>,
     pub last_heartbeat: DateTime<Utc>,
+    pub last_heartbeat_bucket: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -39,6 +40,8 @@ pub struct DeviceDailyStats {
     pub avg_temperature: Option<f64>,
     pub avg_power_usage: Option<f64>,
     pub avg_memory_usage: Option<f64>,
+    pub last_heartbeat: DateTime<Utc>,
+    pub last_heartbeat_bucket: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -52,8 +55,9 @@ impl ClientDailyStats {
         disk_usage: Option<f64>,
         network_in: Option<i64>,
         network_out: Option<i64>,
+        timestamp: DateTime<Utc>,
     ) -> Result<Self, sqlx::Error> {
-        let today = Utc::now().date_naive();
+        let day = timestamp.date_naive();
 
         let record = sqlx::query_as(
             r#"
@@ -61,32 +65,68 @@ impl ClientDailyStats {
                 date, client_id, 
                 avg_cpu_usage, avg_memory_usage, avg_disk_usage,
                 total_network_in_bytes, total_network_out_bytes,
-                total_heartbeats, last_heartbeat
+                total_heartbeats, last_heartbeat, last_heartbeat_bucket
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 1, NOW())
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                1,
+                $8,
+                (EXTRACT(EPOCH FROM $8)::BIGINT / COALESCE((SELECT heartbeat_interval_secs FROM heartbeat_config_daily WHERE date = $1), 120)::BIGINT)
+            )
             ON CONFLICT (client_id, date) 
             DO UPDATE SET
-                avg_cpu_usage = (COALESCE(client_daily_stats.avg_cpu_usage, 0) * client_daily_stats.total_heartbeats + $3) / 
-                               (client_daily_stats.total_heartbeats + 1),
-                avg_memory_usage = (COALESCE(client_daily_stats.avg_memory_usage, 0) * client_daily_stats.total_heartbeats + $4) / 
-                                 (client_daily_stats.total_heartbeats + 1),
-                avg_disk_usage = (COALESCE(client_daily_stats.avg_disk_usage, 0) * client_daily_stats.total_heartbeats + $5) / 
-                               (client_daily_stats.total_heartbeats + 1),
-                total_network_in_bytes = COALESCE($6, 0) + COALESCE(client_daily_stats.total_network_in_bytes, 0),
-                total_network_out_bytes = COALESCE($7, 0) + COALESCE(client_daily_stats.total_network_out_bytes, 0),
-                total_heartbeats = client_daily_stats.total_heartbeats + 1,
-                last_heartbeat = NOW(),
+                avg_cpu_usage = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN
+                        (COALESCE(client_daily_stats.avg_cpu_usage, 0) * client_daily_stats.total_heartbeats + EXCLUDED.avg_cpu_usage) /
+                        (client_daily_stats.total_heartbeats + 1)
+                    ELSE client_daily_stats.avg_cpu_usage
+                END,
+                avg_memory_usage = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN
+                        (COALESCE(client_daily_stats.avg_memory_usage, 0) * client_daily_stats.total_heartbeats + EXCLUDED.avg_memory_usage) /
+                        (client_daily_stats.total_heartbeats + 1)
+                    ELSE client_daily_stats.avg_memory_usage
+                END,
+                avg_disk_usage = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN
+                        (COALESCE(client_daily_stats.avg_disk_usage, 0) * client_daily_stats.total_heartbeats + EXCLUDED.avg_disk_usage) /
+                        (client_daily_stats.total_heartbeats + 1)
+                    ELSE client_daily_stats.avg_disk_usage
+                END,
+                total_network_in_bytes = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN
+                        COALESCE(EXCLUDED.total_network_in_bytes, 0) + COALESCE(client_daily_stats.total_network_in_bytes, 0)
+                    ELSE client_daily_stats.total_network_in_bytes
+                END,
+                total_network_out_bytes = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN
+                        COALESCE(EXCLUDED.total_network_out_bytes, 0) + COALESCE(client_daily_stats.total_network_out_bytes, 0)
+                    ELSE client_daily_stats.total_network_out_bytes
+                END,
+                total_heartbeats = client_daily_stats.total_heartbeats + CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > client_daily_stats.last_heartbeat_bucket THEN 1
+                    ELSE 0
+                END,
+                last_heartbeat = GREATEST(client_daily_stats.last_heartbeat, EXCLUDED.last_heartbeat),
+                last_heartbeat_bucket = GREATEST(client_daily_stats.last_heartbeat_bucket, EXCLUDED.last_heartbeat_bucket),
                 updated_at = NOW()
             RETURNING *
             "#,
         )
-        .bind(today)
+        .bind(day)
         .bind(client_id)
         .bind(cpu_usage)
         .bind(memory_usage)
         .bind(disk_usage)
         .bind(network_in)
         .bind(network_out)
+        .bind(timestamp)
         .fetch_one(&mut **tx)
         .await?;
 
@@ -136,19 +176,30 @@ impl DeviceDailyStats {
         tx: &mut Transaction<'_, Postgres>,
         client_id: &ClientId,
         devices: &Vec<common::DevicesInfo>,
+        timestamp: DateTime<Utc>,
     ) -> Result<i32, sqlx::Error> {
         if devices.is_empty() {
             return Ok(0);
         }
 
-        let today = Utc::now().date_naive();
+        let day = timestamp.date_naive();
+        let interval_secs: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(heartbeat_interval_secs, 120)::BIGINT FROM heartbeat_config_daily WHERE date = $1",
+        )
+        .bind(day)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(120);
+
+        let interval_secs = interval_secs.max(1);
+        let bucket: i64 = (timestamp.timestamp() / interval_secs).max(0);
         let mut query_builder = QueryBuilder::new(
             format!(
                 "
             INSERT INTO {} (
                 date, client_id, device_index, device_name,
                 avg_utilization, avg_temperature, avg_power_usage, avg_memory_usage,
-                total_heartbeats
+                total_heartbeats, last_heartbeat, last_heartbeat_bucket
             )
             ",
                 DEVICE_DAILY_STATS_TABLE
@@ -158,7 +209,7 @@ impl DeviceDailyStats {
         //batch insert
         query_builder.push_values(devices, |mut b, device| {
             for index in 0..device.num {
-                b.push_bind(today)
+                b.push_bind(day)
                     .push_bind(client_id)
                     .push_bind(index as i16)
                     .push_bind(format!(
@@ -172,28 +223,64 @@ impl DeviceDailyStats {
                     .push_bind(Some(device.temp as f64))
                     .push_bind(Some(device.power_usage as f64))
                     .push_bind(Some(device.mem_usage as f64))
-                    .push_bind(1);
+                    .push_bind(1)
+                    .push_bind(timestamp)
+                    .push_bind(bucket);
             }
         });
 
-        query_builder.push(
-            format!("
-            ON CONFLICT (date, client_id, device_index) 
+        let t = DEVICE_DAILY_STATS_TABLE;
+        query_builder.push(format!(
+            "
+            ON CONFLICT (date, client_id, device_index)
             DO UPDATE SET
-                  device_name = EXCLUDED.device_name,
-                avg_utilization = (COALESCE({}.avg_utilization, 0) * {}.total_heartbeats + EXCLUDED.avg_utilization) / 
-                                ({}.total_heartbeats + 1),
-                avg_temperature = (COALESCE({}.avg_temperature, 0) * {}.total_heartbeats + EXCLUDED.avg_temperature) / 
-                                ({}.total_heartbeats + 1),
-                avg_power_usage = (COALESCE({}.avg_power_usage, 0) * {}.total_heartbeats + EXCLUDED.avg_power_usage) / 
-                                ({}.total_heartbeats + 1),
-                avg_memory_usage = (COALESCE({}.avg_memory_usage, 0) * {}.total_heartbeats + EXCLUDED.avg_memory_usage) / 
-                                 ({}.total_heartbeats + 1),
-                total_heartbeats = {}.total_heartbeats + 1,
+                device_name = EXCLUDED.device_name,
+                avg_utilization = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > {t}.last_heartbeat_bucket THEN
+                        CASE 
+                            WHEN {t}.total_heartbeats = 0 THEN EXCLUDED.avg_utilization
+                            ELSE (COALESCE({t}.avg_utilization, 0) * {t}.total_heartbeats + EXCLUDED.avg_utilization) /
+                                 ({t}.total_heartbeats + 1)
+                        END
+                    ELSE {t}.avg_utilization
+                END,
+                avg_temperature = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > {t}.last_heartbeat_bucket THEN
+                        CASE 
+                            WHEN {t}.total_heartbeats = 0 THEN EXCLUDED.avg_temperature
+                            ELSE (COALESCE({t}.avg_temperature, 0) * {t}.total_heartbeats + EXCLUDED.avg_temperature) /
+                                 ({t}.total_heartbeats + 1)
+                        END
+                    ELSE {t}.avg_temperature
+                END,
+                avg_power_usage = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > {t}.last_heartbeat_bucket THEN
+                        CASE 
+                            WHEN {t}.total_heartbeats = 0 THEN EXCLUDED.avg_power_usage
+                            ELSE (COALESCE({t}.avg_power_usage, 0) * {t}.total_heartbeats + EXCLUDED.avg_power_usage) /
+                                 ({t}.total_heartbeats + 1)
+                        END
+                    ELSE {t}.avg_power_usage
+                END,
+                avg_memory_usage = CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > {t}.last_heartbeat_bucket THEN
+                        CASE 
+                            WHEN {t}.total_heartbeats = 0 THEN EXCLUDED.avg_memory_usage
+                            ELSE (COALESCE({t}.avg_memory_usage, 0) * {t}.total_heartbeats + EXCLUDED.avg_memory_usage) /
+                                 ({t}.total_heartbeats + 1)
+                        END
+                    ELSE {t}.avg_memory_usage
+                END,
+                total_heartbeats = {t}.total_heartbeats + CASE
+                    WHEN EXCLUDED.last_heartbeat_bucket > {t}.last_heartbeat_bucket THEN 1
+                    ELSE 0
+                END,
+                last_heartbeat = GREATEST({t}.last_heartbeat, EXCLUDED.last_heartbeat),
+                last_heartbeat_bucket = GREATEST({t}.last_heartbeat_bucket, EXCLUDED.last_heartbeat_bucket),
                 updated_at = NOW()
             RETURNING *
-            ", DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE, DEVICE_DAILY_STATS_TABLE).as_str(),
-        );
+            "
+        ));
 
         let records = query_builder.build().execute(&mut **tx).await?;
 
@@ -244,11 +331,13 @@ pub async fn insert_heartbeat(
     timestamp: Option<DateTime<Utc>>,
 ) -> anyhow::Result<()> {
     let timestamp = timestamp.unwrap_or_else(Utc::now);
-    // Insert heartbeat record using the transaction
+    // Insert heartbeat record using the transaction with better conflict resolution
+    let _device_hash = format!("{:x}", md5::compute(format!("{:?}{:?}", client_id, devices_info)));
     let _ = sqlx::query(
         format!("
         INSERT INTO {} (client_id, cpu_usage, mem_usage, disk_usage, network_up, network_down, timestamp)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (client_id, timestamp) DO NOTHING
         ", HEARTBEAT_TABLE).as_str(),
     )
     .bind(client_id)
@@ -508,7 +597,8 @@ async fn test_device_daily_stats() {
     let start_date = Utc::now().date_naive();
     let end_date = Utc::now().date_naive();
     let mut tx = pool.begin().await.unwrap();
-    let _ = DeviceDailyStats::upsert_batch(&mut tx, &ClientId(client_id), &vec![device_info])
+    let _ =
+        DeviceDailyStats::upsert_batch(&mut tx, &ClientId(client_id), &vec![device_info], Utc::now())
         .await
         .unwrap();
     tx.commit().await.unwrap();
