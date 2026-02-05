@@ -301,6 +301,7 @@ Query a user’s points list (based on materialized view `device_points_daily`).
 |---|---:|:---:|---|
 | user_id | string | No | joins via `gpu_assets.user_id` |
 | client_id | string | Yes | client id **hex string (32 chars)**; filters by exact client |
+| client_name | string | Yes | fuzzy match by `gpu_assets.client_name` using `ILIKE '%...%'` |
 | device_id | number | Yes | `INT` device id |
 | start_date | string | Yes | `YYYY-MM-DD` |
 | end_date | string | Yes | `YYYY-MM-DD` |
@@ -321,6 +322,7 @@ Query a user’s points list (based on materialized view `device_points_daily`).
 | Field | Type |
 |---|---|
 | client_id | string | hex string (`encode(bytea,'hex')`) |
+| client_name | string | from `gpu_assets.client_name` |
 | date | string | `YYYY-MM-DD` |
 | total_heartbeats | number |
 | device_name | string |
@@ -331,6 +333,7 @@ Query a user’s points list (based on materialized view `device_points_daily`).
 ```bash
 curl "http://<host>:18081/api/user/points?user_id=1&page=1&page_size=20"
 curl "http://<host>:18081/api/user/points?user_id=1&client_id=50ef7b5e7b5b4c79991087bb9f62cef1"
+curl "http://<host>:18081/api/user/points?user_id=1&client_name=node"
 curl "http://<host>:18081/api/user/points?user_id=1&device_id=9860&start_date=2026-02-01&end_date=2026-02-03"
 ```
 

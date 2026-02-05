@@ -17,6 +17,7 @@ use sqlx::Row;
 pub struct PointsQueryRequest {
     pub user_id: String,
     pub client_id: Option<String>,
+    pub client_name: Option<String>,
     pub device_id: Option<i32>,
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
@@ -30,6 +31,7 @@ pub struct PointsQueryRequest {
 #[derive(Debug, Serialize)]
 pub struct DevicePointsResponse {
     pub client_id: String,
+    pub client_name: String,
     pub date: NaiveDate,
     pub total_heartbeats: i32,
     pub device_name: String,
@@ -62,6 +64,13 @@ pub async fn get_user_points(
     let page_size = params.page_size.unwrap_or(20);
     let offset = (page - 1) * page_size;
 
+    let client_name_filter: Option<String> = params
+        .client_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     let client_id_bytes: Option<Vec<u8>> = if let Some(ref client_id) = params.client_id {
         let client_id = client_id.trim().trim_matches(|c| c == '\'' || c == '"');
         let bytes = hex::decode(client_id).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -80,6 +89,12 @@ pub async fn get_user_points(
     // Add client_id filter if provided (hex string)
     if client_id_bytes.is_some() {
         query_conditions.push(format!("dpd.client_id = ${}", param_index));
+        param_index += 1;
+    }
+
+    // Add client_name fuzzy filter if provided
+    if client_name_filter.is_some() {
+        query_conditions.push(format!("COALESCE(ga.client_name, '') ILIKE ${}", param_index));
         param_index += 1;
     }
 
@@ -107,6 +122,7 @@ pub async fn get_user_points(
         WITH filtered_points AS (
             SELECT 
                 encode(dpd.client_id::bytea, 'hex') as client_id,
+                COALESCE(ga.client_name, '') as client_name,
                 dpd.date,
                 dpd.total_heartbeats,
                 COALESCE(dpd.device_name, 'Unknown Device') as device_name,
@@ -121,6 +137,7 @@ pub async fn get_user_points(
         )
         SELECT 
             client_id,
+            client_name,
             date,
             total_heartbeats,
             device_name,
@@ -142,6 +159,9 @@ pub async fn get_user_points(
     // Bind optional parameters
     if let Some(client_id_bytes) = client_id_bytes {
         query_builder = query_builder.bind(client_id_bytes);
+    }
+    if let Some(client_name_filter) = client_name_filter {
+        query_builder = query_builder.bind(format!("%{}%", client_name_filter));
     }
     if let Some(device_id) = params.device_id {
         query_builder = query_builder.bind(device_id);
@@ -188,6 +208,7 @@ pub async fn get_user_points(
 
     for row in rows {
         let client_id: String = row.get("client_id");
+        let client_name: String = row.get("client_name");
         let date: NaiveDate = row.get("date");
         let total_heartbeats: i32 = row.get("total_heartbeats");
         let device_name: String = row.get("device_name");
@@ -203,6 +224,7 @@ pub async fn get_user_points(
 
         points.push(DevicePointsResponse {
             client_id,
+            client_name,
             date,
             total_heartbeats,
             device_name,
