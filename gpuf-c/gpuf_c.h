@@ -330,10 +330,19 @@ extern int llama_chat_apply_template(const char *tmpl,
                                      char *buf,
                                      int length);
 
+/**
+ * # Safety
+ * `model` must be a valid pointer to a `llama_model` created by this library (or the linked
+ * llama.cpp bindings) and must remain valid for the duration of this call.
+ */
 struct llama_context *gpuf_create_context(struct llama_model *model);
 
 /**
  * Start async model loading (realistic implementation)
+ *
+ * # Safety
+ * `path` must be a valid, NUL-terminated C string pointer and must remain valid for the duration
+ * of this call.
  */
 bool gpuf_load_model_async_start(const char *path);
 
@@ -402,13 +411,41 @@ bool gpuf_is_context_ready(void);
  */
 int gpuf_get_model_status(void);
 
+/**
+ *
+ * # Safety
+ * `path` must be a valid, NUL-terminated C string pointer and must remain valid for the duration
+ * of this call.
+ */
 struct llama_model *gpuf_load_model(const char *path);
 
+/**
+ *
+ * # Safety
+ * `text_model_path` and `mmproj_path` must be valid, NUL-terminated C string pointers and must
+ * remain valid for the duration of this call.
+ */
 struct gpuf_multimodal_model *gpuf_load_multimodal_model(const char *text_model_path,
                                                          const char *mmproj_path);
 
+/**
+ *
+ * # Safety
+ * `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model` and must
+ * remain valid for the duration of this call.
+ */
 struct llama_context *gpuf_create_multimodal_context(struct gpuf_multimodal_model *multimodal_model);
 
+/**
+ * # Safety
+ * - `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model`.
+ * - `ctx` may be null (a fresh context may be created internally); if non-null it must be a valid
+ *   `llama_context` compatible with the given model.
+ * - `text_prompt` must be a valid, NUL-terminated C string pointer.
+ * - `image_data` must be a valid pointer to `image_size` bytes (may be null only if
+ *   `image_size == 0`).
+ * - `output` must be a valid writable buffer of at least `output_len` bytes.
+ */
 int gpuf_generate_multimodal(struct gpuf_multimodal_model *multimodal_model,
                              struct llama_context *ctx,
                              const char *text_prompt,

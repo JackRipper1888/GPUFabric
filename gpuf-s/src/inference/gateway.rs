@@ -13,9 +13,11 @@ use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info};
 
 use crate::db::client::get_user_client_by_token;
+#[cfg(feature = "experimental")]
 use crate::handle::ActiveClients;
 use crate::inference::{handlers, InferenceScheduler};
 use crate::util::protoc::{ClientId, RequestIDAndClientIDMessage};
+use crate::util::policy::{AccessLevel, REQUEST_MESSAGE_TOPIC};
 use anyhow::anyhow;
 use rdkafka::producer::FutureRecord;
 use std::time::Duration;
@@ -23,7 +25,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct AuthContext {
     pub client_ids: Vec<ClientId>,
-    pub access_level: i32,
+    pub access_level: AccessLevel,
     pub token: String,
 }
 
@@ -46,7 +48,7 @@ impl InferenceGateway {
             producer,
         }
     }
-    #[allow(dead_code)]
+    #[cfg(feature = "experimental")]
     pub fn with_active_clients(
         active_clients: ActiveClients,
         db_pool: Arc<Pool<Postgres>>,
@@ -100,10 +102,10 @@ impl InferenceGateway {
         &self,
         request_id: Option<String>,
         chosen_client_id: ClientId,
-        access_level: i32,
+        access_level: AccessLevel,
     ) -> Result<()> {
         // Skip unless access_level is -1 (metered API)
-        if access_level != -1 {
+        if !access_level.is_metered() {
             return Ok(());
         }
 
@@ -121,11 +123,11 @@ impl InferenceGateway {
                 client_id: chosen_client_id.0,
             };
 
-            let request_message_bytes = serde_json::to_vec(&message).unwrap();
+            let request_message_bytes = serde_json::to_vec(&message)?;
 
             self.producer
                 .send(
-                    FutureRecord::to("request-message")
+                    FutureRecord::to(REQUEST_MESSAGE_TOPIC)
                         .payload(&request_message_bytes)
                         .key(&chosen_client_id.to_string()),
                     Duration::from_secs(0),

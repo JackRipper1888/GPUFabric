@@ -2,6 +2,7 @@ pub mod cmd;
 pub mod db;
 pub mod msg;
 pub mod pack;
+pub mod policy;
 pub mod protoc;
 use anyhow::Result;
 use std::fs::File;

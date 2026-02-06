@@ -363,15 +363,16 @@ ON CONFLICT (name, version) DO NOTHING;
 -- Insert test data for tokens
 DO $$
 BEGIN
-    IF to_regclass('public.users') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM public.users WHERE id = 2)
-       AND NOT EXISTS (
-           SELECT 1 FROM tokens
-           WHERE key = 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4'
-       )
-    THEN
-        INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level)
-        VALUES (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1);
+    IF to_regclass('public.users') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM public.users WHERE id = 2)
+           AND NOT EXISTS (
+               SELECT 1 FROM tokens
+               WHERE key = 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4'
+           )
+        THEN
+            INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level)
+            VALUES (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1);
+        END IF;
     END IF;
 END $$;
 

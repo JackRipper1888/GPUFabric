@@ -36,6 +36,7 @@ pub struct DevicePointsResponse {
     pub total_heartbeats: i32,
     pub device_name: String,
     pub device_id: i32,
+    pub device_index: i16,
     pub points: f64,
 }
 
@@ -53,11 +54,17 @@ pub struct PointsListResponse {
 pub async fn get_user_points(
     State(app_state): State<Arc<ApiServer>>,
     Query(params): Query<PointsQueryRequest>,
-) -> Result<Json<ApiResponse<PointsListResponse>>, StatusCode> {
+) -> Result<Json<ApiResponse<PointsListResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
     // Validate input
     if let Err(validation_errors) = params.validate() {
         error!("Validation errors: {:?}", validation_errors);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::error(format!(
+                "validation errors: {:?}",
+                validation_errors
+            ))),
+        ));
     }
 
     let page = params.page.unwrap_or(1);
@@ -73,9 +80,22 @@ pub async fn get_user_points(
 
     let client_id_bytes: Option<Vec<u8>> = if let Some(ref client_id) = params.client_id {
         let client_id = client_id.trim().trim_matches(|c| c == '\'' || c == '"');
-        let bytes = hex::decode(client_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+        let bytes = hex::decode(client_id).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<()>::error(
+                    "invalid client_id: expected 32-char hex string".to_string(),
+                )),
+            )
+        })?;
         if bytes.len() != 16 {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<()>::error(
+                    "invalid client_id: expected 16 bytes (32 hex chars)".to_string(),
+                )),
+            ));
         }
         Some(bytes)
     } else {
@@ -127,12 +147,13 @@ pub async fn get_user_points(
                 dpd.total_heartbeats,
                 COALESCE(dpd.device_name, 'Unknown Device') as device_name,
                 COALESCE(dpd.device_id, 0) as device_id,
+                dpd.device_index,
                 (dpd.points)::DOUBLE PRECISION as points,
                 (SUM(dpd.points) OVER ())::DOUBLE PRECISION as total_points,
                 COUNT(*) OVER () as total_count,
                 ROW_NUMBER() OVER (ORDER BY dpd.date DESC, dpd.client_id) as row_num
-            FROM device_points_daily dpd
-            INNER JOIN gpu_assets ga ON dpd.client_id = ga.client_id
+            FROM public.device_points_daily dpd
+            INNER JOIN public.gpu_assets ga ON dpd.client_id = ga.client_id
             WHERE {}
         )
         SELECT 
@@ -142,6 +163,7 @@ pub async fn get_user_points(
             total_heartbeats,
             device_name,
             device_id,
+            device_index,
             points,
             total_points,
             total_count
@@ -185,7 +207,10 @@ pub async fn get_user_points(
         Ok(rows) => rows,
         Err(e) => {
             error!("Failed to query user points: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error".to_string())),
+            ));
         }
     };
 
@@ -213,6 +238,7 @@ pub async fn get_user_points(
         let total_heartbeats: i32 = row.get("total_heartbeats");
         let device_name: String = row.get("device_name");
         let device_id: i32 = row.get("device_id");
+        let device_index: i16 = row.get("device_index");
         let points_value: f64 = row.get("points");
         
         // Get total_points and total_count from first row
@@ -229,6 +255,7 @@ pub async fn get_user_points(
             total_heartbeats,
             device_name,
             device_id,
+            device_index,
             points: points_value,
         });
     }

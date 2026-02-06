@@ -6,19 +6,24 @@ use uuid::Uuid;
 
 use rdkafka::producer::{FutureProducer, FutureRecord};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "experimental"))]
 use tokio_uring::net::TcpStream as UringTcpStream;
 
 use crate::util::protoc::{ClientId, ProxyConnId, RequestIDAndClientIDMessage};
 use bytes::BytesMut;
 
 use std::collections::HashMap;
+#[cfg(feature = "experimental")]
 use std::pin::Pin;
+#[cfg(feature = "experimental")]
 use std::task::{Context, Poll};
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{self, AsyncRead, AsyncReadExt};
+#[cfg(feature = "experimental")]
+use tokio::io::AsyncWrite;
 use twoway;
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "experimental")]
 use simd_json;
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
@@ -34,6 +39,7 @@ use tokio_rustls::rustls::crypto::ring;
 
 use crate::db::client::get_user_client_by_token;
 use crate::util::msg::ApiResponse;
+use crate::util::policy::{AccessLevel, REQUEST_MESSAGE_TOPIC};
 use tracing::debug;
 
 impl ServerState {
@@ -165,8 +171,7 @@ impl ServerState {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)] // Experimental io_uring implementation for performance optimization
+    #[cfg(all(target_os = "linux", feature = "experimental"))]
     pub async fn handle_proxy_connections_uring(
         self: Arc<Self>,
         listener: TcpListener,
@@ -220,8 +225,7 @@ impl ServerState {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[allow(dead_code)] // Experimental io_uring implementation for performance optimization
+#[cfg(all(target_os = "linux", feature = "experimental"))]
 async fn route_public_connection_uring(
     _user_stream: UringTcpStream,
     _active_clients: ActiveClients,
@@ -236,16 +240,14 @@ async fn route_public_connection_uring(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-#[allow(dead_code)] // Experimental io_uring implementation for performance optimization
+#[cfg(all(target_os = "linux", feature = "experimental"))]
 async fn parse_request_uring(_user_stream: UringTcpStream) -> Result<()> {
     // TODO: Implement uring version of parse_request
     info!("Parsing request with io_uring (not yet implemented)");
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
+#[cfg(all(not(target_os = "linux"), feature = "experimental"))]
 async fn parse_request(
     user_stream: &TcpStream,
 ) -> Result<(Option<String>, Option<String>, Option<String>)> {
@@ -327,7 +329,7 @@ async fn parse_request(
 async fn authenticate_and_select_client(
     api_key: Option<String>,
     db_pool: &Pool<Postgres>,
-) -> Result<(Vec<ClientId>, i32)> {
+) -> Result<(Vec<ClientId>, AccessLevel)> {
     let api_key = api_key.ok_or_else(|| anyhow::anyhow!("Missing API key"))?;
     if api_key.len() != 48 {
         warn!("Invalid API key length");
@@ -340,12 +342,13 @@ async fn authenticate_and_select_client(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "experimental")]
 struct TeeReader<R> {
     reader: R,
     writer: Option<tokio::io::DuplexStream>,
 }
 
+#[cfg(feature = "experimental")]
 impl<R: AsyncRead + Unpin> AsyncRead for TeeReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -369,7 +372,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for TeeReader<R> {
     }
 }
 /// A wrapper around TcpStream that allows peeking at the data without consuming it
-#[allow(dead_code)]
+#[cfg(feature = "experimental")]
 pub struct PeekableTcpStream {
     inner: TcpStream,
     peek_buf: Vec<u8>,
@@ -377,10 +380,11 @@ pub struct PeekableTcpStream {
     consumed_data: Vec<u8>,
 }
 
+#[cfg(feature = "experimental")]
 use tokio::io::ReadBuf;
 
+#[cfg(feature = "experimental")]
 impl PeekableTcpStream {
-    #[allow(dead_code)] // Constructor for peekable TCP stream wrapper
     pub fn new(stream: TcpStream) -> Self {
         Self {
             inner: stream,
@@ -391,7 +395,6 @@ impl PeekableTcpStream {
     }
 
     /// Peek at the data without consuming it
-    #[allow(dead_code)] // Peek functionality for TCP stream inspection
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // If we've already peeked data, return it
         if self.peek_pos < self.peek_buf.len() {
@@ -419,7 +422,6 @@ impl PeekableTcpStream {
     }
 
     /// Consume n bytes from the peek buffer
-    #[allow(dead_code)] // Consume peeked data from buffer
     pub fn consume(&mut self, n: usize) {
         self.peek_pos = (self.peek_pos + n).min(self.peek_buf.len());
         if self.peek_pos == self.peek_buf.len() {
@@ -434,24 +436,22 @@ impl PeekableTcpStream {
     }
 
     /// Get a reference to the inner TcpStream
-    #[allow(dead_code)] // Get reference to inner TCP stream
     pub fn get_ref(&self) -> &TcpStream {
         &self.inner
     }
 
     /// Get a mutable reference to the inner TcpStream
-    #[allow(dead_code)] // Get mutable reference to inner TCP stream
     pub fn get_mut(&mut self) -> &mut TcpStream {
         &mut self.inner
     }
 
     /// Convert back into the inner TcpStream
-    #[allow(dead_code)] // Consume wrapper and return inner TCP stream
     pub fn into_inner(self) -> TcpStream {
         self.inner
     }
 }
 
+#[cfg(feature = "experimental")]
 impl AsyncRead for PeekableTcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -472,6 +472,7 @@ impl AsyncRead for PeekableTcpStream {
     }
 }
 
+#[cfg(feature = "experimental")]
 impl AsyncWrite for PeekableTcpStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -493,6 +494,7 @@ impl AsyncWrite for PeekableTcpStream {
     }
 }
 
+#[cfg(feature = "experimental")]
 use simd_json::{prelude::*, OwnedValue};
 #[derive(Debug)]
 //pub struct ChatRequestInfo<R: AsyncRead + Unpin> {
@@ -500,7 +502,6 @@ pub struct ChatRequestInfo {
     pub model: Option<String>,
     pub request_id: Option<String>,
     pub api_key: Option<String>,
-    #[allow(dead_code)] // Content type for future request parsing
     pub content_type: Option<String>,
     // pub reader: R,
 }
@@ -537,6 +538,41 @@ fn parse_headers(data: &[u8]) -> io::Result<HeaderMap> {
 
     Ok(headers)
 }
+
+async fn read_model_from_json_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut BytesMut,
+    body_start: usize,
+    log_buffer_len: bool,
+) -> Result<Option<String>> {
+    if body_start < buffer.len() {
+        if let Some(model) = try_parse_model_from_slice(&buffer[body_start..]) {
+            return Ok(Some(model));
+        }
+    }
+
+    let mut buf = [0u8; 1024];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                warn!("Connection closed");
+                return Ok(None);
+            }
+            Ok(n) => {
+                buffer.truncate(body_start + n);
+                buffer.extend_from_slice(&buf[..n]);
+                if let Some(model) = try_parse_model_from_slice(&buffer[body_start..]) {
+                    return Ok(Some(model));
+                }
+                if log_buffer_len {
+                    debug!(" buffer.len: {}", buffer.len());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 async fn extract_chat_info<R: AsyncRead + Unpin>(
     reader: &mut R,
     buffer: &mut BytesMut,
@@ -593,98 +629,41 @@ async fn extract_chat_info<R: AsyncRead + Unpin>(
 
     debug!("buffer.len: {} body_start: {} ", buffer.len(), body_start);
 
-    let chat_info = if let Some(ct) = &content_type {
-        if ct == "application/json" {
-            let model = if body_start < buffer.len() {
-                // let body = buffer[body_start..].to_vec();
-                // buffer = Vec::with_capacity(8 * 1024);
-                if let Some(model) = try_parse_model_from_slice(&buffer[body_start..]) {
-                    Some(model)
-                } else {
-                    let mut found = false;
-                    let mut model = None;
-                    let mut buf = [0u8; 1024];
-
-                    while !found {
-                        match reader.read(&mut buf).await {
-                            Ok(0) => {
-                                warn!("Connection closed");
-                                break;
-                            }
-                            Ok(n) => {
-                                buffer.truncate(body_start + n);
-                                buffer.extend_from_slice(&buf[..n]);
-
-                                if let Some(m) = try_parse_model_from_slice(&buffer[body_start..]) {
-                                    model = Some(m);
-                                    found = true;
-                                }
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
-                    }
-
-                    model
-                }
-            } else {
-                debug!("No body data found");
-                //let mut combined = Vec::new();
-                let mut found = false;
-                let mut model = None;
-                let mut buf = [0u8; 1024];
-
-                while !found {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => {
-                            warn!("Connection closed");
-                            break;
-                        }
-                        Ok(n) => {
-                            buffer.truncate(body_start + n);
-                            buffer.extend_from_slice(&buf[..n]);
-                            if let Some(m) = try_parse_model_from_slice(&buffer[body_start..]) {
-                                model = Some(m);
-                                found = true;
-                            }
-                            debug!(" buffer.len: {}", buffer.len());
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                model
-            };
-
-            ChatRequestInfo {
-                model,
-                request_id,
-                api_key,
-                content_type,
-                // reader,
-            }
-        } else {
-            warn!("Unsupported content type: {:?}", ct);
-            ChatRequestInfo {
-                model: None,
-                request_id: None,
-                api_key,
-                content_type,
-                // reader,
-            }
-        }
-    } else {
-        ChatRequestInfo {
+    let Some(ct) = content_type.as_deref() else {
+        return Ok(ChatRequestInfo {
             model: None,
             request_id: None,
             api_key,
             content_type: None,
-            //reader,
-        }
+        });
     };
 
-    Ok(chat_info)
+    if ct != "application/json" {
+        warn!("Unsupported content type: {:?}", ct);
+        return Ok(ChatRequestInfo {
+            model: None,
+            request_id: None,
+            api_key,
+            content_type,
+        });
+    }
+
+    let model = if body_start < buffer.len() {
+        read_model_from_json_body(reader, buffer, body_start, false).await?
+    } else {
+        debug!("No body data found");
+        read_model_from_json_body(reader, buffer, body_start, true).await?
+    };
+
+    Ok(ChatRequestInfo {
+        model,
+        request_id,
+        api_key,
+        content_type,
+    })
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "experimental")]
 async fn parse_json_body<R: AsyncRead + Unpin>(
     reader: &mut R,
     mut buffer: Vec<u8>,
@@ -733,7 +712,7 @@ fn try_parse_model_from_slice(data: &[u8]) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "experimental")]
 fn try_parse_chat_info(data: &[u8]) -> io::Result<Option<String>> {
     let mut data = data.to_vec();
     let json: Result<OwnedValue, _> = simd_json::from_slice(&mut data);
@@ -860,7 +839,7 @@ async fn route_public_connection_new(
         }
     };
 
-    if access_level != -1 {
+    if !access_level.is_metered() {
         debug!("Send kafka key-value (request_id, client_id) pair");
         return Ok(());
     }
@@ -940,11 +919,11 @@ async fn request_to_kafka(
             client_id: chosen_client_id.0,
         };
 
-        let request_message_bytes = serde_json::to_vec(&message).unwrap();
+        let request_message_bytes = serde_json::to_vec(&message)?;
 
         if let Err(e) = producer
             .send(
-                FutureRecord::to("request-message")
+                FutureRecord::to(REQUEST_MESSAGE_TOPIC)
                     .payload(&request_message_bytes)
                     .key(&chosen_client_id.to_string()),
                 Duration::from_secs(0),

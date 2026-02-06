@@ -16,14 +16,17 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring};
 #[cfg(target_os = "android")]
 use jni::JNIEnv;
+#[cfg(target_os = "android")]
 use libc::size_t;
 use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::Write;
 #[cfg(target_os = "android")]
 use std::os::raw::c_ulonglong;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
+
+const DEFAULT_LLAMA_THREADS: i32 = 4;
+const DEFAULT_MTMD_THREADS: i32 = 4;
 struct Utf8EmitBuffer {
     buf: Vec<u8>,
 }
@@ -1388,8 +1391,8 @@ fn simulate_llama_context_default_params() -> llama_context_params {
         n_batch: 512,
         n_ubatch: 512,
         n_seq_max: 1,
-        n_threads: 4,
-        n_threads_batch: 4,
+        n_threads: DEFAULT_LLAMA_THREADS,
+        n_threads_batch: DEFAULT_LLAMA_THREADS,
         rope_scaling_type: 0,
         pooling_type: 0,
         attention_type: 0,
@@ -1419,6 +1422,9 @@ fn simulate_llama_context_default_params() -> llama_context_params {
 
 // Final solution: Use real llama.cpp API on Android, simulated on other platforms
 
+/// # Safety
+/// `model` must be a valid pointer to a `llama_model` created by this library (or the linked
+/// llama.cpp bindings) and must remain valid for the duration of this call.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_context {
@@ -1431,8 +1437,8 @@ pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_con
     let mut params = unsafe { llama_context_default_params() };
     params.n_ctx = 4096;
     params.n_batch = 128;
-    params.n_threads = 4;
-    params.n_threads_batch = 4;
+    params.n_threads = DEFAULT_LLAMA_THREADS;
+    params.n_threads_batch = DEFAULT_LLAMA_THREADS;
     params.embeddings = false;
     params.offload_kqv = false;
 
@@ -1458,6 +1464,10 @@ pub struct AsyncLoadingState {
 }
 
 /// Start async model loading (realistic implementation)
+///
+/// # Safety
+/// `path` must be a valid, NUL-terminated C string pointer and must remain valid for the duration
+/// of this call.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_load_model_async_start(path: *const c_char) -> bool {
@@ -1771,6 +1781,10 @@ pub struct MultimodalModel {
 }
 
 // Load model with multimodal support
+///
+/// # Safety
+/// `path` must be a valid, NUL-terminated C string pointer and must remain valid for the duration
+/// of this call.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_load_model(path: *const c_char) -> *mut llama_model {
@@ -1812,6 +1826,10 @@ fn detect_model_type_from_path(model_path: &str) -> ProjectorType {
 }
 
 // Load multimodal model using libmtmd with model type detection
+///
+/// # Safety
+/// `text_model_path` and `mmproj_path` must be valid, NUL-terminated C string pointers and must
+/// remain valid for the duration of this call.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_load_multimodal_model(
@@ -1843,7 +1861,7 @@ pub extern "C" fn gpuf_load_multimodal_model(
         let ctx_params = MtmdContextParams {
             use_gpu: true,
             print_timings: false,
-            n_threads: 4,
+            n_threads: DEFAULT_MTMD_THREADS,
             image_marker: std::ptr::null(),
             media_marker: std::ptr::null(),
             flash_attn_type: 0,
@@ -1857,7 +1875,7 @@ pub extern "C" fn gpuf_load_multimodal_model(
         let mut ctx_params = mtmd_context_params_default();
         // Override only necessary fields
         ctx_params.use_gpu = true;
-        ctx_params.n_threads = 4;
+        ctx_params.n_threads = DEFAULT_MTMD_THREADS;
 
         // 🆕 Set proper media marker based on model type
         let projector_type = detect_model_type_from_path(text_path);
@@ -1914,6 +1932,10 @@ pub extern "C" fn gpuf_load_multimodal_model(
 }
 
 // Create context for multimodal model
+///
+/// # Safety
+/// `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model` and must
+/// remain valid for the duration of this call.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_create_multimodal_context(
@@ -1936,6 +1958,15 @@ pub extern "C" fn gpuf_create_multimodal_context(
 
     real_llama_init_from_model(model, ctx_params)
 }
+
+/// # Safety
+/// - `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model`.
+/// - `ctx` may be null (a fresh context may be created internally); if non-null it must be a valid
+///   `llama_context` compatible with the given model.
+/// - `text_prompt` must be a valid, NUL-terminated C string pointer.
+/// - `image_data` must be a valid pointer to `image_size` bytes (may be null only if
+///   `image_size == 0`).
+/// - `output` must be a valid writable buffer of at least `output_len` bytes.
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_multimodal(

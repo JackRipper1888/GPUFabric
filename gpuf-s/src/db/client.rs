@@ -1,4 +1,5 @@
 use crate::util::protoc::ClientId;
+use crate::util::policy::AccessLevel;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use common::Model;
@@ -21,7 +22,7 @@ struct TokenInfo {
 pub async fn get_user_client_by_token(
     pool: &Pool<Postgres>,
     token: &str,
-) -> Result<(Vec<ClientId>, i32)> {
+) -> Result<(Vec<ClientId>, AccessLevel)> {
     // First, get the token details including user_id and access_level
     let token_info = match sqlx::query_as::<_, TokenInfo>(
         r#"
@@ -41,8 +42,10 @@ pub async fn get_user_client_by_token(
         None => return Err(anyhow!("Invalid or expired token")),
     };
 
+    let access_level = AccessLevel::from(token_info.access_level);
+
     // Then query devices based on access level
-    let query = if token_info.access_level == -1 {
+    let query = if access_level.is_metered() {
         // Access to all devices
         "SELECT client_id FROM gpu_assets 
          WHERE client_status = 'online' AND valid_status = 'valid'"
@@ -55,7 +58,7 @@ pub async fn get_user_client_by_token(
     let mut query = sqlx::query_as::<_, ClientRecord>(query);
 
     // Only bind user_id parameter if access_level is not -1
-    if token_info.access_level != -1 {
+    if !access_level.is_metered() {
         query = query.bind(&token_info.user_id);
     }
 
@@ -77,10 +80,10 @@ pub async fn get_user_client_by_token(
         .collect::<Result<Vec<ClientId>>>()?;
 
     if client_ids.is_empty() {
-        return Ok((vec![], token_info.access_level));
+        return Ok((vec![], access_level));
     }
 
-    Ok((client_ids, token_info.access_level))
+    Ok((client_ids, access_level))
 }
 
 pub async fn update_client_db(
