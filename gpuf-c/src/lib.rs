@@ -16,11 +16,13 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring};
 #[cfg(target_os = "android")]
 use jni::JNIEnv;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use libc::size_t;
 use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 #[cfg(target_os = "android")]
+use std::io::Write;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use std::os::raw::c_ulonglong;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1449,6 +1451,12 @@ pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_con
     result
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_context(_model: *mut llama_model) -> *mut llama_context {
+    std::ptr::null_mut()
+}
+
 // Async Model Loading and Context Creation Functions
 // ============================================================================
 
@@ -1540,6 +1548,12 @@ pub extern "C" fn gpuf_load_model_async_start(path: *const c_char) -> bool {
     true
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_async_start(_path: *const c_char) -> bool {
+    false
+}
+
 /// Get loading status (realistic polling)
 #[no_mangle]
 pub extern "C" fn gpuf_load_model_get_status() -> i32 {
@@ -1608,6 +1622,12 @@ pub extern "C" fn gpuf_load_model_wait() -> i32 {
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_wait() -> i32 {
+    0
+}
+
 /// Cleanup async loading state
 #[no_mangle]
 #[cfg(target_os = "android")]
@@ -1622,6 +1642,10 @@ pub extern "C" fn gpuf_load_model_cleanup() {
         ASYNC_LOADING_STATE = None;
     }
 }
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_cleanup() {}
 
 /// Legacy async model loading with callback (for backward compatibility)
 #[no_mangle]
@@ -1661,6 +1685,16 @@ pub extern "C" fn gpuf_load_model_async(
     model_ptr
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_async(
+    _path: *const c_char,
+    _on_progress: Option<extern "C" fn(f32, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> *mut llama_model {
+    std::ptr::null_mut()
+}
+
 /// Context creation remains synchronous (fast operation)
 /// Use the regular gpuf_create_context for context creation
 #[no_mangle]
@@ -1685,6 +1719,16 @@ pub extern "C" fn gpuf_create_context_async(
     }
 
     context_ptr
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_context_async(
+    _model: *mut llama_model,
+    _on_progress: Option<extern "C" fn(f32, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> *mut llama_context {
+    std::ptr::null_mut()
 }
 
 /// Check if model is loaded (non-blocking)
@@ -1806,6 +1850,12 @@ pub extern "C" fn gpuf_load_model(path: *const c_char) -> *mut llama_model {
     println!("✅ real_llama_model_load_from_file returned: {:p}", result);
 
     result
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model(_path: *const c_char) -> *mut llama_model {
+    std::ptr::null_mut()
 }
 
 // 🆕 Helper function to detect model type from filename
@@ -1931,6 +1981,15 @@ pub extern "C" fn gpuf_load_multimodal_model(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_multimodal_model(
+    _text_model_path: *const c_char,
+    _mmproj_path: *const c_char,
+) -> *mut gpuf_multimodal_model {
+    std::ptr::null_mut()
+}
+
 // Create context for multimodal model
 ///
 /// # Safety
@@ -1959,6 +2018,14 @@ pub extern "C" fn gpuf_create_multimodal_context(
     real_llama_init_from_model(model, ctx_params)
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_multimodal_context(
+    _multimodal_model: *mut gpuf_multimodal_model,
+) -> *mut llama_context {
+    std::ptr::null_mut()
+}
+
 /// # Safety
 /// - `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model`.
 /// - `ctx` may be null (a fresh context may be created internally); if non-null it must be a valid
@@ -1967,6 +2034,25 @@ pub extern "C" fn gpuf_create_multimodal_context(
 /// - `image_data` must be a valid pointer to `image_size` bytes (may be null only if
 ///   `image_size == 0`).
 /// - `output` must be a valid writable buffer of at least `output_len` bytes.
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_multimodal(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _ctx: *mut llama_context,
+    _text_prompt: *const c_char,
+    _image_data: *const u8,
+    _image_size: c_ulonglong,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _output: *mut c_char,
+    _output_len: c_int,
+) -> c_int {
+    -1
+}
+
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_multimodal(
@@ -2271,6 +2357,26 @@ pub extern "C" fn gpuf_generate_multimodal(
 
 // 🆕 Streaming version with callbacks
 #[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_multimodal_stream(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _ctx: *mut llama_context,
+    _text_prompt: *const c_char,
+    _image_data: *const u8,
+    _image_size: c_ulonglong,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _on_token: TokenCallback,
+    _on_complete: CompletionCallback,
+    _user_data: *mut c_void,
+) -> c_int {
+    -1
+}
+
+#[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_multimodal_stream(
     multimodal_model: *mut gpuf_multimodal_model,
@@ -2552,6 +2658,10 @@ pub extern "C" fn gpuf_generate_multimodal_stream(
 
 // Free multimodal model with libmtmd support
 #[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_free_multimodal_model(_multimodal_model: *mut gpuf_multimodal_model) {}
+
+#[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_free_multimodal_model(multimodal_model: *mut gpuf_multimodal_model) {
     if !multimodal_model.is_null() {
@@ -2587,6 +2697,14 @@ pub extern "C" fn gpuf_multimodal_supports_vision(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_multimodal_supports_vision(
+    _multimodal_model: *mut gpuf_multimodal_model,
+) -> bool {
+    false
+}
+
 // Get multimodal model info
 #[no_mangle]
 #[cfg(target_os = "android")]
@@ -2607,6 +2725,15 @@ pub extern "C" fn gpuf_get_multimodal_info(
         *has_vision = mtmd_support_vision(model_ref.mtmd_context);
         0
     }
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_get_multimodal_info(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _has_vision: *mut bool,
+) -> c_int {
+    -1
 }
 
 // 🆕 Get vision tokens for the detected model type
@@ -2655,6 +2782,18 @@ pub extern "C" fn gpuf_get_vision_tokens(
         // Return model type as integer for debugging
         model_ref.projector_type as c_int
     }
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_get_vision_tokens(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _start_token: *mut c_char,
+    _end_token: *mut c_char,
+    _media_token: *mut c_char,
+    _max_length: c_int,
+) -> c_int {
+    -1
 }
 
 #[cfg(target_os = "android")]
@@ -3178,6 +3317,25 @@ pub extern "C" fn gpuf_generate_with_sampling(
 }
 
 #[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_with_sampling(
+    _model: *const llama_model,
+    _ctx: *mut llama_context,
+    _prompt: *const c_char,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _output: *mut c_char,
+    _output_len: c_int,
+    _token_buffer: *mut LlamaToken,
+    _token_buffer_size: c_int,
+) -> c_int {
+    -1
+}
+
+#[no_mangle]
 pub extern "C" fn gpuf_system_info() -> *const c_char {
     let info = CString::new("GPUFabric Android LLaMA.cpp Engine").unwrap();
     info.into_raw()
@@ -3676,7 +3834,35 @@ pub extern "C" fn gpuf_start_generation_async(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_start_generation_async(
+    _ctx: *mut llama_context,
+    _prompt: *const c_char,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _on_token_callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> c_int {
+    -1
+}
+
 /// Simple single token generation for testing
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_single_token(
+    _model: *const llama_model,
+    _ctx: *mut llama_context,
+    _prompt: *const c_char,
+    _output: *mut c_char,
+    _output_len: c_int,
+) -> c_int {
+    -1
+}
+
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_single_token(
@@ -3940,6 +4126,18 @@ pub extern "C" fn start_remote_worker(
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker(
+    _server_addr: *const c_char,
+    _control_port: c_int,
+    _proxy_port: c_int,
+    _worker_type: *const c_char,
+    _client_id: *const c_char,
+) -> c_int {
+    -1
+}
+
 // Global backend initialization flag
 static BACKEND_INITIALIZED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -4088,6 +4286,12 @@ pub extern "C" fn set_remote_worker_model(model_path: *const c_char) -> c_int {
     0 // Success
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn set_remote_worker_model(_model_path: *const c_char) -> c_int {
+    -1
+}
+
 /// Start remote worker background tasks (C API)
 #[cfg(target_os = "android")]
 #[no_mangle]
@@ -4106,6 +4310,12 @@ pub extern "C" fn start_remote_worker_tasks() -> c_int {
             -1 as c_int
         }
     }
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks() -> c_int {
+    -1
 }
 
 /// Start remote worker background tasks with callback support (C API)
@@ -4135,6 +4345,14 @@ pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
+    _callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+) -> c_int {
+    -1
+}
+
 /// Stop remote worker and cleanup (C API)
 #[cfg(target_os = "android")]
 #[no_mangle]
@@ -4147,6 +4365,12 @@ pub extern "C" fn stop_remote_worker() -> c_int {
 
     println!("✅ C API: Remote worker stopped");
     0
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn stop_remote_worker() -> c_int {
+    -1
 }
 
 /// Get remote worker status (C API)
@@ -4163,7 +4387,7 @@ pub extern "C" fn stop_remote_worker() -> c_int {
 /// Caller must ensure `buffer` is valid and can hold `buffer_size` bytes
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: size_t) -> c_int {
+pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: libc::size_t) -> c_int {
     use crate::handle::android_sdk::get_worker_status;
 
     println!("🔥 GPUFabric C API: Getting remote worker status");
@@ -4213,4 +4437,17 @@ pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: siz
 
     println!("✅ C API: Status written to buffer");
     0 as c_int
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: size_t) -> c_int {
+    if buffer.is_null() || buffer_size == 0 {
+        return -1;
+    }
+
+    unsafe {
+        *buffer = 0;
+    }
+    -1
 }
