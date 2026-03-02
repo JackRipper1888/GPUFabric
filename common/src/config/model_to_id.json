@@ -54,5 +54,21 @@
   "GeForce RTX 5080 Max-Q / Mobile": 11289,
   "GeForce RTX 5090": 11141,
   "GeForce RTX 5090 D": 11143,
-  "GeForce RTX 5090 Max-Q / Mobile": 11288
+  "GeForce RTX 5090 Max-Q / Mobile": 11288,
+  "H100 PCIe": 8960,
+  "H100 SXM": 8961,
+  "H100 80GB HBM3": 8965,
+  "H100 80GB HBM3e": 8966,
+  "H100 NVL": 8954,
+  "A100 PCIe 40GB": 20,
+  "A100 PCIe 80GB": 21,
+  "A100 SXM 40GB": 22,
+  "A100 SXM 80GB": 23,
+  "A100 80GB HBM2e": 24,
+  "A30": 25,
+  "L40": 26,
+  "L40S": 27,
+  "L20": 28,
+  "H200": 30,
+  "B100": 31
 }

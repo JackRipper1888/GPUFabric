@@ -264,7 +264,23 @@ VALUES
     (11525, 'GeForce RTX 5060', 0),
     (11545, 'GeForce RTX 5060 Max-Q / Mobile', 0),
     (12036, 'GeForce RTX 5070', 0),
-    (12056, 'GeForce RTX 5070 Ti Mobile', 0)
+    (12056, 'GeForce RTX 5070 Ti Mobile', 0),
+    (8954, 'H100 NVL', 1482),
+    (8960, 'H100 PCIe', 1513),
+    (8961, 'H100 SXM', 1680),
+    (8965, 'H100 80GB HBM3', 1680),
+    (8966, 'H100 80GB HBM3e', 1979),
+    (20, 'A100 PCIe 40GB', 312),
+    (21, 'A100 PCIe 80GB', 624),
+    (22, 'A100 SXM 40GB', 312),
+    (23, 'A100 SXM 80GB', 624),
+    (24, 'A100 80GB HBM2e', 624),
+    (25, 'NVIDIA A30', 165),
+    (26, 'NVIDIA L40', 36.1),
+    (27, 'NVIDIA L40S', 46.1),
+    (28, 'NVIDIA L20', 29.4),
+    (30, 'H200', 1979),
+    (31, 'B100', 2500)
 ON CONFLICT (device_id) DO UPDATE SET
     device_name = EXCLUDED.device_name,
     tflops = EXCLUDED.tflops,
@@ -356,7 +372,7 @@ VALUES
     ('TheBloke/gemma-3-12b-it-GPTQ', 'GPTQ', 12315, true, '2025-10-14 23:34:40.663107+08', 2, NULL, 8, NULL, NULL, NULL),
     ('facebook/opt-125m', 'latest', 12316, true, '2025-10-15 11:06:15.912991+08', 2, NULL, 8, NULL, NULL, NULL),
     ('Qwen3-32B-Q6_K.gguf', 'Q6_K', 12317, true, CURRENT_TIMESTAMP, 6, NULL, 24, 'https://modelscope.cn/models/Qwen/Qwen3-32B-GGUF/resolve/master/Qwen3-32B-Q6_K.gguf', 'c4c7c3cb6da260df1fe1d3cfd090a32dc7cc348f1278158be18e301f390d6f6e', 26369368064),
-    ('Qwen3-14B-Q8_0.gguf', 'Q8_0', 12318, true, CURRENT_TIMESTAMP, 6, NULL, 16, 'https://modelscope.cn/models/Qwen/Qwen3-14B-GGUF/resolve/master/Qwen3-14B-Q8_0.gguf', 'a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d', 15927754752),
+    ('Qwen3-14B-Q8_0.gguf', 'Q8_0', 12318, true, CURRENT_TIMESTAMP, 6, NULL, 16, 'https://modelscope.cn/models/Qwen/Qwen3-14B-GGUF/resolve/master/Qwen3-14B-Q8_0.gguf', 'a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d', 15698533728),
     ('Qwen3-8B-Q8_0.gguf', 'Q8_0', 12319, true, CURRENT_TIMESTAMP, 6, NULL, 12, 'https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q8_0.gguf', '408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6', 8988692480)
 ON CONFLICT (name, version) DO NOTHING;
 

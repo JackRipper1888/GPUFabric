@@ -206,27 +206,33 @@ impl DeviceDailyStats {
             )
             .as_str(),
         );
-        //batch insert
-        query_builder.push_values(devices, |mut b, device| {
+        // Flatten devices into individual rows first
+        let mut flattened_devices: Vec<(i16, &common::DevicesInfo)> = Vec::new();
+        for device in devices {
             for index in 0..device.num {
-                b.push_bind(day)
-                    .push_bind(client_id)
-                    .push_bind(index as i16)
-                    .push_bind(format!(
-                        "{} {}",
-                        common::id_to_vendor(get_u16_from_u128(device.vendor_id, index as usize))
-                            .unwrap_or("Unknown"),
-                        common::id_to_model(get_u16_from_u128(device.device_id, index as usize))
-                            .unwrap_or("Unknown".to_string())
-                    ))
-                    .push_bind(Some(device.usage as f64))
-                    .push_bind(Some(device.temp as f64))
-                    .push_bind(Some(device.power_usage as f64))
-                    .push_bind(Some(device.mem_usage as f64))
-                    .push_bind(1)
-                    .push_bind(timestamp)
-                    .push_bind(bucket);
+                flattened_devices.push((index as i16, device));
             }
+        }
+        
+        //batch insert with flattened devices
+        query_builder.push_values(&flattened_devices, |mut b, (index, device)| {
+            b.push_bind(day)
+                .push_bind(client_id)
+                .push_bind(*index)
+                .push_bind(format!(
+                    "{} {}",
+                    common::id_to_vendor(get_u16_from_u128(device.vendor_id, *index as usize))
+                        .unwrap_or("Unknown"),
+                    common::id_to_model(get_u16_from_u128(device.device_id, *index as usize))
+                        .unwrap_or("Unknown".to_string())
+                ))
+                .push_bind(Some(device.usage as f64))
+                .push_bind(Some(device.temp as f64))
+                .push_bind(Some(device.power_usage as f64))
+                .push_bind(Some(device.mem_usage as f64))
+                .push_bind(1)
+                .push_bind(timestamp)
+                .push_bind(bucket);
         });
 
         let t = DEVICE_DAILY_STATS_TABLE;
@@ -281,6 +287,9 @@ impl DeviceDailyStats {
             RETURNING *
             "
         ));
+        
+        let sql = query_builder.sql();
+        tracing::info!("DeviceDailyStats upsert SQL: {}", sql);
 
         let records = query_builder.build().execute(&mut **tx).await?;
 
@@ -403,28 +412,28 @@ pub async fn insert_heartbeat(
     if !devices_info.is_empty() {
         let mut values_placeholder = String::new();
         let params_per_device = 9;
-        // Build the values part of the query
-        for device_info in devices_info {
-            values_placeholder.push_str(
-                &((0..device_info.num)
-                    .map(|i| {
-                        let base = i * params_per_device;
-                        format!(
-                            "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, NOW(), NOW())",
-                            base + 1,
-                            base + 2,
-                            base + 3,
-                            base + 4,
-                            base + 5,
-                            base + 6,
-                            base + 7,
-                            base + 8,
-                            base + 9,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")),
-            );
+        
+        // Count total devices first for proper parameter indexing
+        let total_devices: u32 = devices_info.iter().map(|d| d.num as u32).sum();
+        
+        // Build the values part of the query with correct global parameter indexing
+        for global_idx in 0..total_devices {
+            let base = global_idx * params_per_device;
+            if global_idx > 0 {
+                values_placeholder.push_str(", ");
+            }
+            values_placeholder.push_str(&format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, NOW(), NOW())",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+            ));
         }
 
         // Build the full query
@@ -444,8 +453,12 @@ pub async fn insert_heartbeat(
             ) VALUES {}",
             DEVICE_INFO_TABLE, values_placeholder
         );
+        
+        tracing::info!("Generated device_info INSERT SQL: {}", query_str);
+        tracing::info!("Total devices: {}, Total params expected: {}", total_devices, total_devices * params_per_device);
 
         let mut query = sqlx::query(&query_str);
+        let mut param_count = 0;
         // Bind all parameters in order
         for device_info in devices_info {
             for device_index in 0..device_info.num {
@@ -471,8 +484,10 @@ pub async fn insert_heartbeat(
                     .bind(get_u8_from_u64(device_info.usage, device_index as usize) as i16)
                     .bind(get_u8_from_u64(device_info.power_usage, device_index as usize) as i16)
                     .bind(get_u8_from_u64(device_info.temp, device_index as usize) as i16);
+                param_count += 9;
             }
         }
+        tracing::info!("Total params bound: {}", param_count);
         query.execute(&mut **tx).await?;
     }
     Ok(())
