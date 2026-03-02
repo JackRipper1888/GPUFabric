@@ -380,7 +380,7 @@ async fn handle_single_client(
 
                 let turn_host =
                     std::env::var("TURN_HOST").map_err(|_| anyhow!("TURN_HOST env is required"))?;
-                let turn_port: u16 = std::env::var("TURN_TURNS_PORT")
+                let _turn_port: u16 = std::env::var("TURN_TURNS_PORT")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(5349);

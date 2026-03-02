@@ -2,6 +2,7 @@ pub mod apk;
 pub mod client;
 pub mod handle_api;
 pub mod models;
+pub mod points;
 
 use anyhow::Result;
 use redis::Client as RedisClient;

@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use chrono::{TimeZone, Utc};
+use rdkafka::message::Timestamp;
 use rdkafka::message::{Message, OwnedMessage};
 use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
@@ -26,13 +28,9 @@ pub async fn start_processor(
                 let pool = db_pool.clone();
                 let message_count = messages.len();
 
-                // Process messages in a blocking task to avoid blocking the async runtime
-                tokio::task::spawn_blocking(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    if let Err(e) = rt.block_on(process_batch(messages, pool)) {
-                        error!("Error processing batch: {}", e);
-                    }
-                });
+                if let Err(e) = process_batch(messages, pool).await {
+                    error!("Error processing batch: {}", e);
+                }
 
                 debug!("Processed batch of {} messages", message_count);
             }
@@ -48,11 +46,17 @@ pub async fn start_processor(
 
 #[allow(dead_code)]
 async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> Result<()> {
-    let mut transaction = db_pool.begin().await?;
-
     for message in messages {
         match message.key() {
             Some(_key) => {
+                let event_ts = match message.timestamp() {
+                    Timestamp::NotAvailable => Utc::now(),
+                    Timestamp::CreateTime(ms) | Timestamp::LogAppendTime(ms) => Utc
+                        .timestamp_millis_opt(ms)
+                        .single()
+                        .unwrap_or_else(Utc::now),
+                };
+
                 // Parse the message payload
                 let payload = match message.payload() {
                     Some(p) => p,
@@ -72,20 +76,33 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                     .with_little_endian();
                 // Try to deserialize as JSON first
                 let (heartbeat, _): (protoc::HeartbeatMessage, _) =
-                    bincode::decode_from_slice(payload, cfg)
-                        .map_err(|e| anyhow!("Failed to deserialize heartbeat: {}", e))?;
+                    match bincode::decode_from_slice(payload, cfg) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("Failed to deserialize heartbeat: {}", e);
+                            continue;
+                        }
+                    };
+
+                let mut transaction = match db_pool.begin().await {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        error!("Failed to start DB transaction: {}", e);
+                        continue;
+                    }
+                };
 
                 info!("Heartbeat received from client {} cpu_usage {}% memory_usage {}% disk_usage {}% network_up {} network_down {}", heartbeat.client_id, heartbeat.system_info.cpu_usage, heartbeat.system_info.memory_usage, heartbeat.system_info.disk_usage,  format_bytes!(heartbeat.system_info.network_tx),format_bytes!(heartbeat.system_info.network_rx));
-                // Update last seen timestamp
+                // Update last seen timestamp with safe type conversion
                 if let Err(e) = insert_heartbeat(
                     &mut transaction,
                     &heartbeat.client_id,
                     &heartbeat.system_info,
                     &heartbeat.devices_info,
-                    heartbeat.device_memtotal_gb.try_into().unwrap(),
-                    heartbeat.device_count.try_into().unwrap(),
-                    heartbeat.total_tflops.try_into().unwrap(),
-                    None,
+                    heartbeat.device_memtotal_gb.try_into().unwrap_or(0),
+                    heartbeat.device_count.try_into().unwrap_or(0),
+                    heartbeat.total_tflops.try_into().unwrap_or(0),
+                    Some(event_ts),
                 )
                 .await
                 {
@@ -93,6 +110,7 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                         "Failed to update heartbeat for client {:?}: {}",
                         heartbeat.client_id, e
                     );
+                    let _ = transaction.rollback().await;
                     continue;
                 }
 
@@ -102,8 +120,9 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                     Some(heartbeat.system_info.cpu_usage as f64),
                     Some(heartbeat.system_info.memory_usage as f64),
                     Some(heartbeat.system_info.disk_usage as f64),
-                    Some(heartbeat.system_info.network_rx.try_into().unwrap()),
-                    Some(heartbeat.system_info.network_tx.try_into().unwrap()),
+                    Some(heartbeat.system_info.network_rx.try_into().unwrap_or(0)),
+                    Some(heartbeat.system_info.network_tx.try_into().unwrap_or(0)),
+                    event_ts,
                 )
                 .await
                 {
@@ -111,12 +130,14 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                         "Failed to update client heartbeat for client {}: {}",
                         heartbeat.client_id, e
                     );
+                    let _ = transaction.rollback().await;
                     continue;
                 }
                 if let Err(e) = DeviceDailyStats::upsert_batch(
                     &mut transaction,
                     &heartbeat.client_id,
                     &heartbeat.devices_info,
+                    event_ts,
                 )
                 .await
                 {
@@ -124,6 +145,12 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                         "Failed to update device heartbeat for client {}: {}",
                         heartbeat.client_id, e
                     );
+                    let _ = transaction.rollback().await;
+                    continue;
+                }
+
+                if let Err(e) = transaction.commit().await {
+                    error!("Failed to commit transaction for client {}: {}", heartbeat.client_id, e);
                     continue;
                 }
 
@@ -138,9 +165,6 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
             }
         }
     }
-
-    // Commit the transaction if all updates were successful
-    transaction.commit().await?;
 
     Ok(())
 }

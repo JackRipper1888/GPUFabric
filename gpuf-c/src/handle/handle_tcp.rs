@@ -53,6 +53,8 @@ use tokio_rustls::{
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+const DEFAULT_TURNS_PORT: u16 = 5349;
+
 // Filter internal GGUF control tokens from streaming output
 fn filter_control_tokens(text: &str) -> String {
     let mut result = String::new();
@@ -731,7 +733,7 @@ impl ClientWorker {
             .host_str()
             .ok_or_else(|| anyhow!("TURN url missing host"))?
             .to_string();
-        let port = parsed.port().unwrap_or(5349);
+        let port = parsed.port().unwrap_or(DEFAULT_TURNS_PORT);
         Ok((host, port))
     }
 

@@ -29,6 +29,9 @@ pub struct Args {
 
     #[arg(long, default_value = "30")]
     pub sweep_interval_secs: u64,
+
+    #[arg(long, default_value = "600")]
+    pub points_refresh_interval_secs: u64,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,6 +83,36 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!("Sweeper failed to mark stale clients offline: {}", e);
+                }
+            }
+        }
+    });
+
+    let points_pool = db_pool.clone();
+    let points_refresh_interval_secs = args.points_refresh_interval_secs;
+    tokio::spawn(async move {
+        if points_refresh_interval_secs == 0 {
+            info!("Points refresher disabled (points_refresh_interval_secs=0)");
+            return;
+        }
+
+        let mut ticker = tokio::time::interval(Duration::from_secs(points_refresh_interval_secs));
+        loop {
+            ticker.tick().await;
+
+            let res = sqlx::query("SELECT refresh_device_points_daily();")
+                .execute(&points_pool)
+                .await;
+
+            match res {
+                Ok(_) => {
+                    info!(
+                        "Refreshed device_points_daily (interval_secs={})",
+                        points_refresh_interval_secs
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to refresh device_points_daily: {}", e);
                 }
             }
         }

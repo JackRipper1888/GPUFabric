@@ -23,6 +23,7 @@ use crate::inference::{
 use crate::util::protoc::ClientId;
 use common::OutputPhase;
 
+#[cfg(feature = "experimental")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelFamily {
     Llama3Instruct,
@@ -30,6 +31,7 @@ enum ModelFamily {
     ChatMLLike,
 }
 
+#[cfg(feature = "experimental")]
 fn detect_model_family(model_name: &str) -> ModelFamily {
     let m = model_name.to_ascii_lowercase();
     if m.contains("llama3") || m.contains("llama-3") || m.contains("llama_3") {
@@ -42,6 +44,7 @@ fn detect_model_family(model_name: &str) -> ModelFamily {
     ModelFamily::LegacyHashPrompt
 }
 
+#[cfg(feature = "experimental")]
 fn stop_markers_for_family(family: ModelFamily) -> &'static [&'static str] {
     match family {
         ModelFamily::Llama3Instruct => &["<|eot_id|>", "\n\n###"],
@@ -59,6 +62,7 @@ fn stop_markers_for_family(family: ModelFamily) -> &'static [&'static str] {
     }
 }
 
+#[cfg(feature = "experimental")]
 fn should_force_short_answer(messages: &[crate::inference::scheduler::ChatMessage]) -> bool {
     let last_user = messages.iter().rev().find(|m| m.role == "user");
     let Some(m) = last_user else {
@@ -73,6 +77,7 @@ fn should_force_short_answer(messages: &[crate::inference::scheduler::ChatMessag
         || c.contains("reply only")
 }
 
+#[cfg(feature = "experimental")]
 fn role_to_chatml(role: &str) -> &str {
     match role {
         "system" => "system",
@@ -213,7 +218,7 @@ pub async fn handle_completion(
     };
 
     if let Some(target) = target_client_id {
-        if auth.access_level == -1 {
+        if auth.access_level.is_metered() {
             let error_response = json!({
                 "error": {
                     "message": "x-target-client-id is not allowed for metered tokens",
@@ -256,7 +261,7 @@ pub async fn handle_completion(
 
         match stream_res {
             Ok((task_id, device_id, rx)) => {
-                if auth.access_level == -1 {
+                if auth.access_level.is_metered() {
                     let gateway = gateway.clone();
                     let request_id = request_id.clone();
                     let access_level = auth.access_level;
@@ -384,7 +389,7 @@ pub async fn handle_completion(
     {
         Ok(response) => {
             // Send metrics to Kafka if needed
-            if auth.access_level == -1 {
+            if auth.access_level.is_metered() {
                 if let Some(chosen_client_id) = auth.client_ids.first() {
                     if let Err(e) = gateway
                         .send_request_metrics(request_id, *chosen_client_id, auth.access_level)
@@ -484,7 +489,7 @@ pub async fn handle_chat_completion(
     };
 
     if let Some(target) = target_client_id {
-        if auth.access_level == -1 {
+        if auth.access_level.is_metered() {
             let error_response = json!({
                 "error": {
                     "message": "x-target-client-id is not allowed for metered tokens",
@@ -538,7 +543,7 @@ pub async fn handle_chat_completion(
 
         match stream_res {
             Ok((task_id, device_id, rx)) => {
-                if auth.access_level == -1 {
+                if auth.access_level.is_metered() {
                     let gateway = gateway.clone();
                     let request_id = request_id.clone();
                     let access_level = auth.access_level;
@@ -694,7 +699,7 @@ pub async fn handle_chat_completion(
 
     match stream_res {
         Ok((task_id, device_id, mut rx)) => {
-            if auth.access_level == -1 {
+            if auth.access_level.is_metered() {
                 let gateway = gateway.clone();
                 let request_id = request_id.clone();
                 let access_level = auth.access_level;
