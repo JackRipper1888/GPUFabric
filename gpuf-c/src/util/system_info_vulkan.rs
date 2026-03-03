@@ -194,11 +194,15 @@ pub async fn collect_device_info_vulkan_cross_platform() -> Result<(DevicesInfo,
         let tflops = if is_software_or_cpu {
             0
         } else {
-            estimate_gpu_tflops_cross_platform(
-                properties.vendor_id,
-                properties.device_id,
-                device_name.as_bytes(),
-            )
+            // Use config file lookup for accurate TFLOPS values
+            common::to_tflops(properties.device_id as u16).unwrap_or_else(|| {
+                // Fallback to estimation if not in config
+                estimate_gpu_tflops_cross_platform(
+                    properties.vendor_id,
+                    properties.device_id,
+                    device_name.as_bytes(),
+                ).into()
+            }) as u16
         };
         if !is_software_or_cpu {
             total_tflops = total_tflops.saturating_add(tflops);
