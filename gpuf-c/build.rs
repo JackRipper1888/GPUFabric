@@ -369,6 +369,60 @@ fn main() {
             llama_lib_dir.display()
         );
     }
+
+    // For iOS, link prebuilt llama.cpp static libraries from workspace target directory.
+    // This avoids building llama.cpp via cmake in build scripts.
+    if target_os == "ios" {
+        println!("cargo:rerun-if-env-changed=GPUF_LLAMA_IOS_LIB_DIR");
+
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let manifest_path = PathBuf::from(&manifest_dir);
+        let workspace_root = manifest_path.parent().unwrap();
+
+        let target_triple = env::var("TARGET").unwrap_or_else(|_| "aarch64-apple-ios".to_string());
+
+        let default_lib_dir = workspace_root
+            .join("target")
+            .join("llama-ios")
+            .join(&target_triple);
+
+        let llama_lib_dir = env::var("GPUF_LLAMA_IOS_LIB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(default_lib_dir);
+
+        if !llama_lib_dir.exists() {
+            println!("cargo:warning=llama-ios directory not found at: {}", llama_lib_dir.display());
+            println!("cargo:warning=Please build llama.cpp iOS static libraries first (scheme A)");
+            panic!("llama-ios directory not found");
+        }
+
+        println!("cargo:rustc-link-search=native={}", llama_lib_dir.display());
+
+        // Core llama.cpp libs
+        println!("cargo:rustc-link-lib=static=llama");
+        println!("cargo:rustc-link-lib=static=ggml");
+        println!("cargo:rustc-link-lib=static=ggml-base");
+        println!("cargo:rustc-link-lib=static=ggml-cpu");
+
+        let ggml_metal = llama_lib_dir.join("libggml-metal.a");
+        if ggml_metal.exists() {
+            println!("cargo:rustc-link-lib=static=ggml-metal");
+        }
+
+        let ggml_blas = llama_lib_dir.join("libggml-blas.a");
+        if ggml_blas.exists() {
+            println!("cargo:rustc-link-lib=static=ggml-blas");
+        }
+
+        // Optional multimodal libmtmd
+        let mtmd = llama_lib_dir.join("libmtmd.a");
+        if mtmd.exists() {
+            println!("cargo:rustc-link-lib=static=mtmd");
+        }
+
+        // C++ standard library
+        println!("cargo:rustc-link-lib=c++");
+    }
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=build.rs");
 }

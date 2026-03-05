@@ -1,0 +1,248 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1B2C3D40100000100000001 /* GPUFIosSimTestApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D30100000100000001 /* GPUFIosSimTestApp.swift */; };
+		A1B2C3D40100000100000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D30100000100000002 /* ContentView.swift */; };
+		A1B2C3D40100000100000003 /* gpuf_c_sdk.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D30100000100000010 /* gpuf_c_sdk.xcframework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		A1B2C3D30100000100000001 /* GPUFIosSimTestApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUFIosSimTestApp.swift; sourceTree = "<group>"; };
+		A1B2C3D30100000100000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A1B2C3D30100000100000003 /* GPufBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GPufBridge.h; sourceTree = "<group>"; };
+		A1B2C3D30100000100000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1B2C3D30100000100000010 /* gpuf_c_sdk.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = gpuf_c_sdk.xcframework; path = ../../build_ios/dist/gpuf_c_sdk.xcframework; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A1B2C3D20100000100000030 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D40100000100000003 /* gpuf_c_sdk.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A1B2C3D00100000100000001 = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D00100000100000002 /* GPUFIosSimTest */,
+				A1B2C3D00100000100000003 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		A1B2C3D00100000100000002 /* GPUFIosSimTest */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D30100000100000001 /* GPUFIosSimTestApp.swift */,
+				A1B2C3D30100000100000002 /* ContentView.swift */,
+				A1B2C3D30100000100000003 /* GPufBridge.h */,
+				A1B2C3D30100000100000004 /* Info.plist */,
+			);
+			path = GPUFIosSimTest;
+			sourceTree = "<group>";
+		};
+		A1B2C3D00100000100000003 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D30100000100000010 /* gpuf_c_sdk.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1B2C3D20100000100000010 /* GPUFIosSimTest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D20100000100000014 /* Build configuration list for PBXNativeTarget "GPUFIosSimTest" */;
+			buildPhases = (
+				A1B2C3D20100000100000020 /* Sources */,
+				A1B2C3D20100000100000030 /* Frameworks */,
+				A1B2C3D20100000100000040 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GPUFIosSimTest;
+			productName = GPUFIosSimTest;
+			productReference = A1B2C3D30100000100000020 /* GPUFIosSimTest.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1B2C3D20100000100000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A1B2C3D20100000100000010 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A1B2C3D20100000100000004 /* Build configuration list for PBXProject "GPUFIosSimTest" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = A1B2C3D00100000100000001;
+			productRefGroup = A1B2C3D00100000100000003;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1B2C3D20100000100000010 /* GPUFIosSimTest */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1B2C3D20100000100000040 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A1B2C3D20100000100000020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D40100000100000001 /* GPUFIosSimTestApp.swift in Sources */,
+				A1B2C3D40100000100000002 /* ContentView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A1B2C3D20100000100000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GPUFIosSimTest/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gpuf.iossimtest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphonesimulator;
+				SUPPORTED_PLATFORMS = "iphonesimulator";
+				SWIFT_OBJC_BRIDGING_HEADER = GPUFIosSimTest/GPufBridge.h;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					"Metal",
+					"-framework",
+					"Accelerate",
+				);
+			};
+			name = Debug;
+		};
+		A1B2C3D20100000100000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = GPUFIosSimTest/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.gpuf.iossimtest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphonesimulator;
+				SUPPORTED_PLATFORMS = "iphonesimulator";
+				SWIFT_OBJC_BRIDGING_HEADER = GPUFIosSimTest/GPufBridge.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					"Metal",
+					"-framework",
+					"Accelerate",
+				);
+			};
+			name = Release;
+		};
+
+		A1B2C3D20100000100000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = GPUFIosSimTest;
+			};
+			name = Debug;
+		};
+		A1B2C3D20100000100000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = GPUFIosSimTest;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A1B2C3D20100000100000004 /* Build configuration list for PBXProject "GPUFIosSimTest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D20100000100000007 /* Debug */,
+				A1B2C3D20100000100000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A1B2C3D20100000100000014 /* Build configuration list for PBXNativeTarget "GPUFIosSimTest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D20100000100000005 /* Debug */,
+				A1B2C3D20100000100000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin PBXFileReference (Products) */
+		A1B2C3D30100000100000020 /* GPUFIosSimTest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = GPUFIosSimTest.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference (Products) */
+
+	};
+	rootObject = A1B2C3D20100000100000000 /* Project object */;
+}
