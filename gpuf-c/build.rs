@@ -180,11 +180,11 @@ fn main() {
         println!("cargo:rustc-link-lib=omp");
     }
 
-    // For Android, link the static llama.cpp library
-    if target_os == "android" {
+    // Generate C bindings header for Android & iOS.
+    // iOS SDK packaging scripts will copy gpuf_c.h into the XCFramework headers.
+    if target_os == "android" || target_os == "ios" {
         let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
-        // Configure cbindgen directly, without relying on external config files
         cbindgen::Builder::new()
             .with_crate(crate_dir)
             .with_language(cbindgen::Language::C)
@@ -194,7 +194,10 @@ fn main() {
             .generate()
             .expect("Unable to generate bindings")
             .write_to_file("gpuf_c.h");
+    }
 
+    // For Android, link the static llama.cpp library
+    if target_os == "android" {
         println!("cargo:warning=Linking static llama.cpp library for Android...");
 
         // Get the absolute path to the llama library - now in target directory

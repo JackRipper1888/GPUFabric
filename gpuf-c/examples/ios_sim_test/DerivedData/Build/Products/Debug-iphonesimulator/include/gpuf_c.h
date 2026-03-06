@@ -162,7 +162,7 @@ typedef struct gpuf_multimodal_model {
   enum ProjectorType projector_type;
   const struct llama_vocab *vocab;
   bool is_multimodal;
-  const char *_media_marker;
+  CString _media_marker;
 } gpuf_multimodal_model;
 
 /**
@@ -630,8 +630,6 @@ extern int32_t llama_chat_apply_template(const char *tmpl,
                                          char *buf,
                                          int32_t length);
 
-#if defined(__ANDROID__)
-
 /**
  * Initialize the GPUFabric engine
  *
@@ -980,9 +978,7 @@ jint Java_com_gpuf_c_RemoteWorker_startRemoteWorkerTasks(JNIEnv _env,
  *
  * @return Status string or null on failure
  */
-#if defined(__ANDROID__)
 jstring Java_com_gpuf_c_RemoteWorker_getRemoteWorkerStatus(JNIEnv env, JClass _class);
-#endif
 
 /**
  * Stops the remote worker and cleans up resources
@@ -993,7 +989,5 @@ jstring Java_com_gpuf_c_RemoteWorker_getRemoteWorkerStatus(JNIEnv env, JClass _c
  * @return 0 on success, -1 on failure
  */
 jint Java_com_gpuf_c_RemoteWorker_stopRemoteWorker(JNIEnv _env, JClass _class);
-
-#endif
 
 #endif /* GPUF_C_H */

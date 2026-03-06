@@ -1,10 +1,38 @@
 use anyhow::{anyhow, Result};
-use common::{Command, CommandV1, DevicesInfo, EngineType as CommonEngineType, OsType, SystemInfo};
+use common::{Command, CommandV1, DevicesInfo, EngineType as CommonEngineType, Model, OsType, SystemInfo};
 use std::ffi::{c_char, c_void};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const CURRENT_VERSION: u32 = 1;
+
+fn client_id_to_hex(client_id: [u8; 16]) -> String {
+    hex::encode(client_id)
+}
+
+fn derive_model_id_from_path(model_path: &str) -> String {
+    let lower = model_path.to_ascii_lowercase();
+    if lower.contains("llama-3") || lower.contains("llama3") {
+        return "llama3".to_string();
+    }
+    if lower.contains("qwen") {
+        return "qwen".to_string();
+    }
+    if lower.contains("mistral") {
+        return "mistral".to_string();
+    }
+    "llama".to_string()
+}
+
+fn emit_callback(
+    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    msg: &str,
+) {
+    let Some(cb) = callback else { return };
+    let Ok(cmsg) = std::ffi::CString::new(msg) else { return };
+    unsafe { cb(cmsg.as_ptr(), std::ptr::null_mut()) };
+}
 
 static WORKER_TCP_STREAM: OnceLock<Mutex<Option<Arc<Mutex<std::net::TcpStream>>>>> = OnceLock::new();
 static WORKER_SERVER_ADDR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -39,6 +67,22 @@ pub async fn perform_login(
     client_id_hex: &str,
     auto_models: bool,
 ) -> Result<()> {
+    // If there is an existing worker running, stop its background tasks and close its TCP stream.
+    // Otherwise, old heartbeat threads can keep sending on the old connection, making the server
+    // appear to still use the previous client_id.
+    if let Some(stop) = WORKER_STOP_SIGNAL.get() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    if let Some(slot) = WORKER_TCP_STREAM.get() {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(existing) = guard.take() {
+                if let Ok(mut s) = existing.lock() {
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                }
+            }
+        }
+    }
+
     let mut stream = std::net::TcpStream::connect(format!("{}:{}", server_addr, control_port))
         .map_err(|e| anyhow!("Failed to connect to server: {}", e))?;
 
@@ -61,10 +105,11 @@ pub async fn perform_login(
     fixed_devices_info.vendor_id = 0x41;
     fixed_devices_info.device_id = 0x1000;
 
-    let client_id: [u8; 16] = hex::decode(client_id_hex)
-        .unwrap_or_default()
+    let decoded = hex::decode(client_id_hex)
+        .map_err(|e| anyhow!("Invalid client_id hex (expected 32 hex chars): {e}"))?;
+    let client_id: [u8; 16] = decoded
         .try_into()
-        .unwrap_or_default();
+        .map_err(|_| anyhow!("Invalid client_id length (expected 16 bytes / 32 hex chars)"))?;
 
     let login_cmd = CommandV1::Login {
         version: CURRENT_VERSION,
@@ -121,22 +166,70 @@ pub async fn start_worker_tasks_with_callback_ptr(
 
     let heartbeat_stop = stop_signal.clone();
     let heartbeat_callback = callback;
-    std::thread::spawn(move || loop {
-        if heartbeat_stop.load(Ordering::Relaxed) {
-            break;
-        }
+    let heartbeat_stream = tcp_stream.clone();
+    std::thread::spawn(move || {
+        loop {
+            if heartbeat_stop.load(Ordering::Relaxed) {
+                break;
+            }
 
-        if let Some(cb) = heartbeat_callback {
-            if let Ok(msg) = std::ffi::CString::new("HEARTBEAT - Sending heartbeat to server") {
-                unsafe { cb(msg.as_ptr(), std::ptr::null_mut()) };
+            let client_id = WORKER_CLIENT_ID
+                .get()
+                .and_then(|m| m.lock().ok().and_then(|g| *g))
+                .unwrap_or([0u8; 16]);
+
+            let system_info = SystemInfo::default();
+
+            let mut fixed_devices_info = DevicesInfo::default();
+            fixed_devices_info.num = 1;
+            fixed_devices_info.pod_id = 0;
+            fixed_devices_info.os_type = os_type();
+            fixed_devices_info.engine_type = CommonEngineType::Llama;
+            fixed_devices_info.vendor_id = 0x41;
+            fixed_devices_info.device_id = 0x1000;
+
+            let hb = CommandV1::Heartbeat {
+                client_id,
+                system_info,
+                device_count: 1,
+                device_memtotal_gb: 0,
+                device_total_tflops: 0,
+                devices_info: vec![fixed_devices_info],
+            };
+
+            let send_result = (|| {
+                let mut stream = heartbeat_stream.lock().map_err(|_| anyhow!("Heartbeat: stream mutex poisoned"))?;
+                common::write_command_sync(&mut *stream, &Command::V1(hb))
+                    .map_err(|e| anyhow!("Heartbeat: write_command_sync failed: {e}"))?;
+                stream
+                    .flush()
+                    .map_err(|e| anyhow!("Heartbeat: flush failed: {e}"))?;
+                Ok::<(), anyhow::Error>(())
+            })();
+
+            if let Some(cb) = heartbeat_callback {
+                let client_hex = client_id_to_hex(client_id);
+                let msg = match send_result {
+                    Ok(_) => format!("HEARTBEAT - Sent client_id={client_hex}"),
+                    Err(_) => format!("HEARTBEAT - Send failed client_id={client_hex}"),
+                };
+                if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                    unsafe { cb(cmsg.as_ptr(), std::ptr::null_mut()) };
+                }
+            }
+
+            // Sleep 120s, but check stop signal every 1s so stop is responsive.
+            for _ in 0..120 {
+                if heartbeat_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
-
-        // Sleep 120s (match existing behavior)
-        std::thread::sleep(std::time::Duration::from_secs(120));
     });
 
     let handler_stop = stop_signal.clone();
+    let handler_callback = callback;
     std::thread::spawn(move || {
         // Keep a local stream clone so reads don't fight with other writes.
         let mut stream = match tcp_stream.lock().ok().and_then(|g| g.try_clone().ok()) {
@@ -173,6 +266,46 @@ pub async fn start_worker_tasks_with_callback_ptr(
             };
 
             match v1 {
+                CommandV1::LoginResult {
+                    success,
+                    pods_model: _,
+                    error,
+                } => {
+                    if !success {
+                        let err = error.unwrap_or_else(|| "unknown".to_string());
+                        emit_callback(handler_callback, &format!("LOGIN_FAILED - {err}"));
+                        break;
+                    }
+
+                    emit_callback(handler_callback, "LOGIN_SUCCESS");
+
+                    let client_id = WORKER_CLIENT_ID
+                        .get()
+                        .and_then(|m| m.lock().ok().and_then(|g| *g))
+                        .unwrap_or([0u8; 16]);
+                    let current_model_path = crate::MODEL_STATUS
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.current_model.clone())
+                        .unwrap_or_else(|| "ios".to_string());
+                    let model_id = derive_model_id_from_path(&current_model_path);
+
+                    let models = vec![Model {
+                        id: model_id,
+                        object: "model".to_string(),
+                        created: 0,
+                        owned_by: "ios".to_string(),
+                    }];
+
+                    let model_status = CommandV1::ModelStatus {
+                        client_id,
+                        models,
+                        auto_models_device: Vec::new(),
+                    };
+
+                    let _ = common::write_command_sync(&mut stream, &Command::V1(model_status));
+                    emit_callback(handler_callback, "MODEL_STATUS_SENT");
+                }
                 CommandV1::InferenceTask {
                     task_id,
                     prompt,
@@ -183,18 +316,84 @@ pub async fn start_worker_tasks_with_callback_ptr(
                     repeat_penalty,
                     ..
                 } => {
+                    emit_callback(handler_callback, &format!("INFERENCE_TASK - {task_id}"));
+                    let effective_max_tokens = std::cmp::min(max_tokens, 512);
+                    if effective_max_tokens != max_tokens {
+                        emit_callback(
+                            handler_callback,
+                            &format!(
+                                "INFERENCE_PARAMS - {task_id} max_tokens={max_tokens} clamped_to={effective_max_tokens}"
+                            ),
+                        );
+                    }
+                    emit_callback(handler_callback, &format!("INFERENCE_START - {task_id}"));
                     // Execute inference synchronously and send back chunks.
-                    if let Err(_e) = handle_inference_task(
+                    if let Err(e) = handle_inference_task(
                         &mut stream,
                         task_id.clone(),
                         &prompt,
-                        max_tokens,
+                        effective_max_tokens,
                         temperature,
                         std::cmp::min(top_k, i32::MAX as u32) as i32,
                         top_p,
                         repeat_penalty,
                     ) {
-                        // best-effort
+                        emit_callback(
+                            handler_callback,
+                            &format!("INFERENCE_FAILED - {task_id} - {e}"),
+                        );
+                    } else {
+                        emit_callback(handler_callback, &format!("INFERENCE_DONE - {task_id}"));
+                    }
+                }
+                CommandV1::ChatInferenceTask {
+                    task_id,
+                    model: _,
+                    messages,
+                    max_tokens,
+                    temperature,
+                    top_k,
+                    top_p,
+                    repeat_penalty,
+                    ..
+                } => {
+                    emit_callback(handler_callback, &format!("CHAT_INFERENCE_TASK - {task_id}"));
+                    let effective_max_tokens = std::cmp::min(max_tokens, 512);
+                    if effective_max_tokens != max_tokens {
+                        emit_callback(
+                            handler_callback,
+                            &format!(
+                                "INFERENCE_PARAMS - {task_id} max_tokens={max_tokens} clamped_to={effective_max_tokens}"
+                            ),
+                        );
+                    }
+                    emit_callback(handler_callback, &format!("INFERENCE_START - {task_id}"));
+
+                    // Best-effort conversion: concatenate messages to a plain prompt.
+                    let mut prompt = String::new();
+                    for m in &messages {
+                        prompt.push_str(m.role.as_str());
+                        prompt.push_str(": ");
+                        prompt.push_str(m.content.as_str());
+                        prompt.push('\n');
+                    }
+
+                    if let Err(e) = handle_inference_task(
+                        &mut stream,
+                        task_id.clone(),
+                        &prompt,
+                        effective_max_tokens,
+                        temperature,
+                        std::cmp::min(top_k, i32::MAX as u32) as i32,
+                        top_p,
+                        repeat_penalty,
+                    ) {
+                        emit_callback(
+                            handler_callback,
+                            &format!("INFERENCE_FAILED - {task_id} - {e}"),
+                        );
+                    } else {
+                        emit_callback(handler_callback, &format!("INFERENCE_DONE - {task_id}"));
                     }
                 }
                 _ => {}
@@ -215,7 +414,199 @@ fn handle_inference_task(
     top_p: f32,
     repeat_penalty: f32,
 ) -> Result<()> {
-    use crate::{gpuf_generate_with_sampling, GLOBAL_CONTEXT_PTR, GLOBAL_MODEL_PTR, GLOBAL_INFERENCE_MUTEX};
+    use crate::{gpuf_start_generation_async, GLOBAL_CONTEXT_PTR, GLOBAL_MODEL_PTR, GLOBAL_INFERENCE_MUTEX};
+
+    fn filter_control_tokens(text: &str) -> String {
+        text.replace("<|end|>", "")
+            .replace("<|start|>", "")
+            .replace("<|channel|>", "")
+            .replace("<|message|>", "")
+            .replace("<|eot_id|>", "")
+            .replace("<|start_header_id|>", "")
+            .replace("<|end_header_id|>", "")
+    }
+
+    #[derive(Debug, Clone)]
+    struct PhaseSplitter {
+        phase: common::OutputPhase,
+        carry: String,
+    }
+
+    impl Default for PhaseSplitter {
+        fn default() -> Self {
+            Self {
+                phase: common::OutputPhase::Final,
+                carry: String::new(),
+            }
+        }
+    }
+
+    impl PhaseSplitter {
+        fn next_marker(rest: &str) -> Option<(usize, common::OutputPhase, usize)> {
+            let mut best: Option<(usize, common::OutputPhase, usize)> = None;
+
+            for (tag, to_phase) in [
+                ("<analysis>", common::OutputPhase::Analysis),
+                ("<think>", common::OutputPhase::Analysis),
+                ("<reasoning>", common::OutputPhase::Analysis),
+                ("<final>", common::OutputPhase::Final),
+            ] {
+                if let Some(idx) = rest.find(tag) {
+                    let cand = (idx, to_phase, tag.len());
+                    best = Some(match best {
+                        None => cand,
+                        Some(cur) => if cand.0 < cur.0 { cand } else { cur },
+                    });
+                }
+            }
+
+            for tag in ["</analysis>", "</think>", "</reasoning>", "</final>"] {
+                if let Some(idx) = rest.find(tag) {
+                    let cand = (idx, common::OutputPhase::Final, tag.len());
+                    best = Some(match best {
+                        None => cand,
+                        Some(cur) => if cand.0 < cur.0 { cand } else { cur },
+                    });
+                }
+            }
+
+            for (pat, to_phase) in [
+                ("### Final", common::OutputPhase::Final),
+                ("Final:", common::OutputPhase::Final),
+                ("final:", common::OutputPhase::Final),
+                ("final", common::OutputPhase::Final),
+                ("### Answer", common::OutputPhase::Final),
+                ("### 思考", common::OutputPhase::Analysis),
+                ("思考：", common::OutputPhase::Analysis),
+                ("分析：", common::OutputPhase::Analysis),
+                ("analysis:", common::OutputPhase::Analysis),
+                ("analysis", common::OutputPhase::Analysis),
+                ("### 答案", common::OutputPhase::Final),
+                ("答案：", common::OutputPhase::Final),
+            ] {
+                if rest.starts_with(pat) {
+                    if (pat == "analysis" || pat == "final")
+                        && rest.len() > pat.len()
+                        && !rest[pat.len()..].starts_with([' ', '\n', '\r', '\t', ':'])
+                    {
+                    } else {
+                        let cand = (0usize, to_phase, pat.len());
+                        best = Some(match best {
+                            None => cand,
+                            Some(cur) => if cand.0 < cur.0 { cand } else { cur },
+                        });
+                    }
+                }
+                let needle = format!("\n{}", pat);
+                if let Some(idx) = rest.find(&needle) {
+                    let cand = (idx + 1, to_phase, pat.len());
+                    best = Some(match best {
+                        None => cand,
+                        Some(cur) => if cand.0 < cur.0 { cand } else { cur },
+                    });
+                }
+            }
+
+            best
+        }
+
+        fn split_tail_for_carry<'a>(tail: &'a str) -> (&'a str, &'a str) {
+            let markers = [
+                "<analysis>", "</analysis>",
+                "<think>", "</think>",
+                "<reasoning>", "</reasoning>",
+                "<final>", "</final>",
+                "### Final", "Final:", "### Answer",
+                "final:", "final",
+                "### 思考", "思考：", "分析：",
+                "analysis:", "analysis",
+                "### 答案", "答案：",
+            ];
+            let max_len = markers.iter().map(|s| s.len()).max().unwrap_or(0);
+
+            let mut carry_len: usize = 0;
+            let max_scan = (max_len.saturating_sub(1)).min(tail.len());
+
+            for l in 1..=max_scan {
+                let start = tail.len() - l;
+                if !tail.is_char_boundary(start) {
+                    continue;
+                }
+                let suf = &tail[start..];
+                if markers.iter().any(|m| m.starts_with(suf)) {
+                    carry_len = l;
+                }
+                if markers.iter().any(|m| {
+                    let nm = format!("\n{}", m);
+                    nm.starts_with(suf)
+                }) {
+                    carry_len = l;
+                }
+            }
+
+            if carry_len == 0 {
+                return (tail, "");
+            }
+
+            let split = tail.len() - carry_len;
+            if !tail.is_char_boundary(split) {
+                return (tail, "");
+            }
+            (&tail[..split], &tail[split..])
+        }
+
+        fn phase(&self) -> common::OutputPhase {
+            self.phase
+        }
+
+        fn push(&mut self, text: &str) -> Vec<(common::OutputPhase, String)> {
+            if text.is_empty() {
+                return Vec::new();
+            }
+
+            let mut combined = String::new();
+            if !self.carry.is_empty() {
+                combined.push_str(&self.carry);
+                self.carry.clear();
+            }
+            combined.push_str(text);
+
+            let mut out: Vec<(common::OutputPhase, String)> = Vec::new();
+            let mut pos: usize = 0;
+
+            while pos < combined.len() {
+                let rest = &combined[pos..];
+
+                let Some((rel_pos, to_phase, marker_len)) = Self::next_marker(rest) else {
+                    let tail = &combined[pos..];
+                    let (safe, carry) = Self::split_tail_for_carry(tail);
+                    if !safe.is_empty() {
+                        out.push((self.phase, safe.to_string()));
+                    }
+                    self.carry = carry.to_string();
+                    break;
+                };
+
+                let tag_pos = pos + rel_pos;
+
+                if tag_pos > pos {
+                    let seg = &combined[pos..tag_pos];
+                    if !seg.is_empty() {
+                        out.push((self.phase, seg.to_string()));
+                    }
+                }
+
+                if tag_pos + marker_len > combined.len() {
+                    self.carry = combined[tag_pos..].to_string();
+                    break;
+                }
+
+                self.phase = to_phase;
+                pos = tag_pos + marker_len;
+            }
+            out
+        }
+    }
 
     let _lock = GLOBAL_INFERENCE_MUTEX.lock().unwrap();
 
@@ -235,21 +626,129 @@ fn handle_inference_task(
             analysis_tokens: 0,
             final_tokens: 0,
         };
-        let _ = common::write_command_sync(stream, &Command::V1(result_command));
+        common::write_command_sync(stream, &Command::V1(result_command))?;
+        stream.flush().ok();
         return Ok(());
     }
 
     let prompt_c = std::ffi::CString::new(prompt).map_err(|e| anyhow!("Invalid prompt: {}", e))?;
 
-    let output_len = 16 * 1024;
-    let mut output = vec![0i8; output_len];
+    #[repr(C)]
+    struct TokenCallbackState {
+        stream: std::net::TcpStream,
+        task_id: String,
+        seq: u32,
+        buf: String,
+        max_bytes: usize,
+        buf_phase: common::OutputPhase,
+        splitter: PhaseSplitter,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        analysis_tokens: u32,
+        final_tokens: u32,
+    }
 
-    let token_buf_size = 4096;
-    let mut token_buf: Vec<crate::LlamaToken> = vec![0; token_buf_size];
+    extern "C" fn on_token(token: *const c_char, user_data: *mut std::ffi::c_void) {
+        if token.is_null() || user_data.is_null() {
+            return;
+        }
+
+        let state = unsafe { &mut *(user_data as *mut TokenCallbackState) };
+        let token_str = unsafe { std::ffi::CStr::from_ptr(token).to_str() };
+        let Ok(token_str) = token_str else {
+            return;
+        };
+
+        if token_str.is_empty() {
+            return;
+        }
+
+        state.completion_tokens = state.completion_tokens.saturating_add(1);
+
+        let filtered = filter_control_tokens(token_str);
+        if filtered.is_empty() {
+            return;
+        }
+
+        let segs = state.splitter.push(&filtered);
+        for (phase, seg) in segs {
+            if seg.is_empty() {
+                continue;
+            }
+
+            match phase {
+                common::OutputPhase::Analysis => {
+                    state.analysis_tokens = state.analysis_tokens.saturating_add(1);
+                }
+                common::OutputPhase::Final => {
+                    state.final_tokens = state.final_tokens.saturating_add(1);
+                }
+                common::OutputPhase::Unknown => {}
+            }
+
+            if state.buf.is_empty() {
+                state.buf_phase = phase;
+            } else if state.buf_phase != phase {
+                let delta = std::mem::take(&mut state.buf);
+                let chunk = CommandV1::InferenceResultChunk {
+                    task_id: state.task_id.clone(),
+                    seq: state.seq,
+                    delta,
+                    phase: state.buf_phase,
+                    done: false,
+                    error: None,
+                    prompt_tokens: state.prompt_tokens,
+                    completion_tokens: state.completion_tokens,
+                    analysis_tokens: state.analysis_tokens,
+                    final_tokens: state.final_tokens,
+                };
+                state.seq = state.seq.wrapping_add(1);
+                let _ = common::write_command_sync(&mut state.stream, &Command::V1(chunk));
+                let _ = state.stream.flush();
+                state.buf_phase = phase;
+            }
+
+            state.buf.push_str(&seg);
+            if state.buf.len() < state.max_bytes {
+                continue;
+            }
+
+            let delta = std::mem::take(&mut state.buf);
+            let chunk = CommandV1::InferenceResultChunk {
+                task_id: state.task_id.clone(),
+                seq: state.seq,
+                delta,
+                phase: state.buf_phase,
+                done: false,
+                error: None,
+                prompt_tokens: state.prompt_tokens,
+                completion_tokens: state.completion_tokens,
+                analysis_tokens: state.analysis_tokens,
+                final_tokens: state.final_tokens,
+            };
+            state.seq = state.seq.wrapping_add(1);
+            let _ = common::write_command_sync(&mut state.stream, &Command::V1(chunk));
+            let _ = state.stream.flush();
+        }
+    }
+
+    let writer_stream = stream.try_clone()?;
+    let mut cb_state = TokenCallbackState {
+        stream: writer_stream,
+        task_id: task_id.clone(),
+        seq: 0,
+        buf: String::new(),
+        max_bytes: 8,
+        buf_phase: common::OutputPhase::Unknown,
+        splitter: PhaseSplitter::default(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        analysis_tokens: 0,
+        final_tokens: 0,
+    };
 
     let rc = unsafe {
-        gpuf_generate_with_sampling(
-            model_ptr,
+        gpuf_start_generation_async(
             ctx_ptr,
             prompt_c.as_ptr(),
             max_tokens as i32,
@@ -257,10 +756,8 @@ fn handle_inference_task(
             top_k,
             top_p,
             repeat_penalty,
-            output.as_mut_ptr() as *mut c_char,
-            output_len as i32,
-            token_buf.as_mut_ptr(),
-            token_buf_size as i32,
+            Some(on_token),
+            (&mut cb_state as *mut TokenCallbackState) as *mut std::ffi::c_void,
         )
     };
 
@@ -269,7 +766,7 @@ fn handle_inference_task(
             task_id,
             seq: 0,
             delta: String::new(),
-            phase: common::OutputPhase::Unknown,
+            phase: common::OutputPhase::Final,
             done: true,
             error: Some(format!("Inference failed: {}", rc)),
             prompt_tokens: 0,
@@ -277,48 +774,45 @@ fn handle_inference_task(
             analysis_tokens: 0,
             final_tokens: 0,
         };
-        let _ = common::write_command_sync(stream, &Command::V1(result_command));
+        common::write_command_sync(stream, &Command::V1(result_command))?;
+        stream.flush().ok();
         return Ok(());
     }
 
-    let text = unsafe { std::ffi::CStr::from_ptr(output.as_ptr() as *const c_char) }
-        .to_string_lossy()
-        .to_string();
-
-    let mut seq: u32 = 0;
-    let chunk_size = 256usize;
-    for chunk in text.as_bytes().chunks(chunk_size) {
-        let delta = String::from_utf8_lossy(chunk).to_string();
-        let cmd = CommandV1::InferenceResultChunk {
+    if !cb_state.buf.is_empty() {
+        let delta = std::mem::take(&mut cb_state.buf);
+        let chunk = CommandV1::InferenceResultChunk {
             task_id: task_id.clone(),
-            seq,
+            seq: cb_state.seq,
             delta,
-            phase: common::OutputPhase::Unknown,
+            phase: cb_state.buf_phase,
             done: false,
             error: None,
-            prompt_tokens: 0,
-            completion_tokens: rc as u32,
-            analysis_tokens: 0,
-            final_tokens: rc as u32,
+            prompt_tokens: cb_state.prompt_tokens,
+            completion_tokens: cb_state.completion_tokens,
+            analysis_tokens: cb_state.analysis_tokens,
+            final_tokens: cb_state.final_tokens,
         };
-        seq = seq.wrapping_add(1);
-        let _ = common::write_command_sync(stream, &Command::V1(cmd));
+        cb_state.seq = cb_state.seq.wrapping_add(1);
+        common::write_command_sync(stream, &Command::V1(chunk))?;
+        stream.flush().ok();
     }
 
     let done_cmd = CommandV1::InferenceResultChunk {
         task_id,
-        seq,
+        seq: cb_state.seq,
         delta: String::new(),
-        phase: common::OutputPhase::Unknown,
+        phase: cb_state.splitter.phase(),
         done: true,
         error: None,
-        prompt_tokens: 0,
-        completion_tokens: rc as u32,
-        analysis_tokens: 0,
-        final_tokens: rc as u32,
+        prompt_tokens: cb_state.prompt_tokens,
+        completion_tokens: cb_state.completion_tokens,
+        analysis_tokens: cb_state.analysis_tokens,
+        final_tokens: cb_state.final_tokens,
     };
 
-    let _ = common::write_command_sync(stream, &Command::V1(done_cmd));
+    common::write_command_sync(stream, &Command::V1(done_cmd))?;
+    stream.flush().ok();
 
     Ok(())
 }

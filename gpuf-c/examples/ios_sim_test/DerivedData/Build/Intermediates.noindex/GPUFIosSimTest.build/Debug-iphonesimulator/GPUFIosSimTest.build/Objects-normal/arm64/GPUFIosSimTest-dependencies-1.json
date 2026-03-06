@@ -465,7 +465,7 @@
   {
     "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/17\/include\/module.modulemap",
     "clangModulePath" : "\/Users\/jack\/codedir\/GPUFabric\/gpuf-c\/examples\/ios_sim_test\/DerivedData\/ModuleCache.noindex\/_Builtin_stdarg-6IA3MK1F4ORR00RJCK8YHZWN1.pcm",
-    "isBridgingHeaderDependency" : true,
+    "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdarg"
   },
@@ -479,7 +479,7 @@
   {
     "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Toolchains\/XcodeDefault.xctoolchain\/usr\/lib\/clang\/17\/include\/module.modulemap",
     "clangModulePath" : "\/Users\/jack\/codedir\/GPUFabric\/gpuf-c\/examples\/ios_sim_test\/DerivedData\/ModuleCache.noindex\/_Builtin_stdbool-CDTB8U4Q6RJ8TL3YCBRATQOD7.pcm",
-    "isBridgingHeaderDependency" : true,
+    "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdbool"
   },
@@ -521,7 +521,7 @@
   {
     "clangModuleMapPath" : "\/Applications\/Xcode.app\/Contents\/Developer\/Platforms\/iPhoneSimulator.platform\/Developer\/SDKs\/iPhoneSimulator.sdk\/usr\/include\/DarwinFoundation3.modulemap",
     "clangModulePath" : "\/Users\/jack\/codedir\/GPUFabric\/gpuf-c\/examples\/ios_sim_test\/DerivedData\/ModuleCache.noindex\/_DarwinFoundation3-9BTOB6AENLHCHL7R5DDC6AVGS.pcm",
-    "isBridgingHeaderDependency" : true,
+    "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_DarwinFoundation3"
   },

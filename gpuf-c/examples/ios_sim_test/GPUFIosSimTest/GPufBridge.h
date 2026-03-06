@@ -19,6 +19,6 @@ typedef void *jstring;
 typedef void *JString;
 #endif
 
-#include "gpuf_c.h"
+#include "gpuf_c_minimal.h"
 
 #endif /* GPufBridge_h */

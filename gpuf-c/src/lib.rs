@@ -3366,10 +3366,16 @@ pub fn allocate_from_pool(size: usize, alignment: usize) -> *mut u8 {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn reset_pool() {
+    #[cfg(target_os = "android")]
     unsafe {
         MEMORY_POOL.used = 0;
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = ();
     }
 }
 
@@ -3402,7 +3408,7 @@ pub extern "C" fn gpuf_stop_generation(_ctx: *mut llama_context) -> c_int {
 
 /// Start async generation with streaming callback (simplified version)
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_start_generation_async(
     ctx: *mut llama_context,
     prompt: *const c_char,
