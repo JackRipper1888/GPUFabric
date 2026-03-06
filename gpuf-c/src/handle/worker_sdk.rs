@@ -369,14 +369,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
                     }
                     emit_callback(handler_callback, &format!("INFERENCE_START - {task_id}"));
 
-                    // Best-effort conversion: concatenate messages to a plain prompt.
-                    let mut prompt = String::new();
-                    for m in &messages {
-                        prompt.push_str(m.role.as_str());
-                        prompt.push_str(": ");
-                        prompt.push_str(m.content.as_str());
-                        prompt.push('\n');
-                    }
+                    let prompt = build_chat_prompt_with_template(&messages);
 
                     if let Err(e) = handle_inference_task(
                         &mut stream,
@@ -402,6 +395,60 @@ pub async fn start_worker_tasks_with_callback_ptr(
     });
 
     Ok(())
+}
+
+fn build_chat_prompt_with_template(messages: &[common::ChatMessage]) -> String {
+    use crate::llama_chat_message;
+    
+    // Try to use model's built-in chat template first
+    let model_ptr = crate::GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
+    if !model_ptr.is_null() {
+        // Convert messages to C-style array
+        let mut c_messages: Vec<llama_chat_message> = Vec::with_capacity(messages.len());
+        let mut c_roles: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
+        let mut c_contents: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
+        
+        for msg in messages {
+            c_roles.push(std::ffi::CString::new(msg.role.clone()).unwrap_or_default());
+            c_contents.push(std::ffi::CString::new(msg.content.clone()).unwrap_or_default());
+            c_messages.push(llama_chat_message {
+                role: c_roles.last().unwrap().as_ptr(),
+                content: c_contents.last().unwrap().as_ptr(),
+            });
+        }
+        
+        // Try to apply model's built-in template (tmpl=nullptr)
+        let mut buffer = vec![0u8; 8192]; // 8KB buffer for template
+        let result = unsafe {
+            crate::llama_chat_apply_template(
+                std::ptr::null(), // Use model's built-in template
+                c_messages.as_ptr(),
+                messages.len(),
+                true, // add_ass=true
+                buffer.as_mut_ptr() as *mut i8,
+                buffer.len() as i32,
+            )
+        };
+        
+        if result > 0 {
+            if let Ok(prompt) = std::ffi::CStr::from_bytes_until_nul(&buffer[..result as usize]) {
+                if let Ok(prompt_str) = prompt.to_str() {
+                    return prompt_str.to_string();
+                }
+            }
+        }
+    }
+    
+    // Fallback to llama3 template
+    let mut prompt = String::from("<|begin_of_text|>");
+    for msg in messages {
+        prompt.push_str(&format!(
+            "<|start_header_id|>{}\n\n{}\n<|eot_id|>",
+            msg.role, msg.content
+        ));
+    }
+    prompt.push_str("<|start_header_id|>assistant\n\n");
+    prompt
 }
 
 fn handle_inference_task(
