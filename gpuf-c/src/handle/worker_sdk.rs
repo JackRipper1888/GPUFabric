@@ -230,36 +230,93 @@ pub async fn start_worker_tasks_with_callback_ptr(
 
     let handler_stop = stop_signal.clone();
     let handler_callback = callback;
+    let server_addr = WORKER_SERVER_ADDR
+        .get()
+        .and_then(|m| m.lock().ok().and_then(|g| g.clone()))
+        .unwrap_or_else(|| "8.140.251.142:17000".to_string());
+    
     std::thread::spawn(move || {
-        // Keep a local stream clone so reads don't fight with other writes.
-        let mut stream = match tcp_stream.lock().ok().and_then(|g| g.try_clone().ok()) {
-            Some(s) => s,
-            None => return,
-        };
-
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .ok();
-
+        let mut consecutive_failures = 0u32;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+        const RECONNECT_DELAY_MS: u64 = 5000; // 5 seconds
+        
         loop {
             if handler_stop.load(Ordering::Relaxed) {
                 break;
             }
-
-            let cmd = match common::read_command_sync(&mut stream) {
-                Ok(c) => c,
-                Err(e) => {
-                    if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
-                        if matches!(
-                            ioe.kind(),
-                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                        ) {
+            
+            // Try to get a working stream
+            let mut stream = match get_tcp_stream() {
+                Some(tcp_stream) => {
+                    match tcp_stream.lock().ok().and_then(|g| g.try_clone().ok()) {
+                        Some(s) => {
+                            consecutive_failures = 0; // Reset failure count on success
+                            s
+                        }
+                        None => {
+                            consecutive_failures += 1;
+                            emit_callback(handler_callback, &format!("STREAM_ERROR - Failed to clone stream, failures={}", consecutive_failures));
+                            std::thread::sleep(std::time::Duration::from_millis(RECONNECT_DELAY_MS));
                             continue;
                         }
                     }
-                    break;
+                }
+                None => {
+                    consecutive_failures += 1;
+                    emit_callback(handler_callback, &format!("CONNECTION_LOST - No TCP stream, attempting reconnect {}/{}", consecutive_failures, MAX_CONSECUTIVE_FAILURES));
+                    
+                    // Try to reconnect
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        emit_callback(handler_callback, "RECONNECT_FAILED - Max retries reached, stopping worker");
+                        break;
+                    }
+                    
+                    match std::net::TcpStream::connect(&server_addr) {
+                        Ok(new_stream) => {
+                            emit_callback(handler_callback, &format!("RECONNECT_SUCCESS - Connected to {}", server_addr));
+                            
+                            // Update the global stream
+                            if let Some(global_stream) = WORKER_TCP_STREAM.get() {
+                                if let Ok(mut guard) = global_stream.lock() {
+                                    *guard = Some(Arc::new(Mutex::new(new_stream.try_clone().unwrap())));
+                                }
+                            }
+                            
+                            consecutive_failures = 0;
+                            new_stream
+                        }
+                        Err(e) => {
+                            emit_callback(handler_callback, &format!("RECONNECT_FAILED - Error: {}, retrying in {}s", e, RECONNECT_DELAY_MS / 1000));
+                            std::thread::sleep(std::time::Duration::from_millis(RECONNECT_DELAY_MS));
+                            continue;
+                        }
+                    }
                 }
             };
+            
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .ok();
+            
+            // Process commands with this stream
+            let mut stream_valid = true;
+            while stream_valid && !handler_stop.load(Ordering::Relaxed) {
+                let cmd = match common::read_command_sync(&mut stream) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+                            if matches!(
+                                ioe.kind(),
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            ) {
+                                continue;
+                            }
+                        }
+                        emit_callback(handler_callback, &format!("READ_ERROR - Connection lost: {}", e));
+                        stream_valid = false;
+                        break;
+                    }
+                };
 
             let Command::V1(v1) = cmd else {
                 continue;
@@ -273,7 +330,8 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 } => {
                     if !success {
                         let err = error.unwrap_or_else(|| "unknown".to_string());
-                        emit_callback(handler_callback, &format!("LOGIN_FAILED - {err}"));
+                        emit_callback(handler_callback, &format!("LOGIN_FAILED - {}", err));
+                        stream_valid = false;
                         break;
                     }
 
@@ -391,6 +449,12 @@ pub async fn start_worker_tasks_with_callback_ptr(
                 }
                 _ => {}
             }
+            
+            // If we reach here, the stream is still valid, continue processing commands
+        }
+        
+        // If we exited the inner loop, the stream is invalid, go back to reconnection logic
+        emit_callback(handler_callback, "Stream invalidated, attempting reconnection...");
         }
     });
 
@@ -398,57 +462,71 @@ pub async fn start_worker_tasks_with_callback_ptr(
 }
 
 fn build_chat_prompt_with_template(messages: &[common::ChatMessage]) -> String {
-    use crate::llama_chat_message;
-    
-    // Try to use model's built-in chat template first
-    let model_ptr = crate::GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
-    if !model_ptr.is_null() {
-        // Convert messages to C-style array
-        let mut c_messages: Vec<llama_chat_message> = Vec::with_capacity(messages.len());
-        let mut c_roles: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
-        let mut c_contents: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        use crate::llama_chat_message;
         
-        for msg in messages {
-            c_roles.push(std::ffi::CString::new(msg.role.clone()).unwrap_or_default());
-            c_contents.push(std::ffi::CString::new(msg.content.clone()).unwrap_or_default());
-            c_messages.push(llama_chat_message {
-                role: c_roles.last().unwrap().as_ptr(),
-                content: c_contents.last().unwrap().as_ptr(),
-            });
-        }
-        
-        // Try to apply model's built-in template (tmpl=nullptr)
-        let mut buffer = vec![0u8; 8192]; // 8KB buffer for template
-        let result = unsafe {
-            crate::llama_chat_apply_template(
-                std::ptr::null(), // Use model's built-in template
-                c_messages.as_ptr(),
-                messages.len(),
-                true, // add_ass=true
-                buffer.as_mut_ptr() as *mut i8,
-                buffer.len() as i32,
-            )
-        };
-        
-        if result > 0 {
-            if let Ok(prompt) = std::ffi::CStr::from_bytes_until_nul(&buffer[..result as usize]) {
-                if let Ok(prompt_str) = prompt.to_str() {
-                    return prompt_str.to_string();
+        // Try to use model's built-in chat template first
+        let model_ptr = crate::GLOBAL_MODEL_PTR.load(std::sync::atomic::Ordering::SeqCst);
+        if !model_ptr.is_null() {
+            // Convert messages to C-style array
+            let mut c_messages: Vec<llama_chat_message> = Vec::with_capacity(messages.len());
+            let mut c_roles: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
+            let mut c_contents: Vec<std::ffi::CString> = Vec::with_capacity(messages.len());
+            
+            for msg in messages {
+                c_roles.push(std::ffi::CString::new(msg.role.clone()).unwrap_or_default());
+                c_contents.push(std::ffi::CString::new(msg.content.clone()).unwrap_or_default());
+                c_messages.push(llama_chat_message {
+                    role: c_roles.last().unwrap().as_ptr(),
+                    content: c_contents.last().unwrap().as_ptr(),
+                });
+            }
+            
+            // Try to apply model's built-in template (tmpl=nullptr)
+            let mut buffer = vec![0u8; 8192]; // 8KB buffer for template
+            let result = unsafe {
+                crate::llama_chat_apply_template(
+                    std::ptr::null(), // Use model's built-in template
+                    c_messages.as_ptr(),
+                    messages.len(),
+                    true, // add_ass=true
+                    buffer.as_mut_ptr() as *mut i8,
+                    buffer.len() as i32,
+                )
+            };
+            
+            if result > 0 {
+                if let Ok(prompt) = std::ffi::CStr::from_bytes_until_nul(&buffer[..result as usize]) {
+                    if let Ok(prompt_str) = prompt.to_str() {
+                        return prompt_str.to_string();
+                    }
                 }
             }
         }
+        
+        // Fallback to llama3 template
+        let mut prompt = String::from("<|begin_of_text|>");
+        for msg in messages {
+            prompt.push_str(&format!(
+                "<|start_header_id|>{}\n\n{}\n<|eot_id|>",
+                msg.role, msg.content
+            ));
+        }
+        prompt.push_str("<|start_header_id|>assistant\n\n");
+        prompt
     }
     
-    // Fallback to llama3 template
-    let mut prompt = String::from("<|begin_of_text|>");
-    for msg in messages {
-        prompt.push_str(&format!(
-            "<|start_header_id|>{}\n\n{}\n<|eot_id|>",
-            msg.role, msg.content
-        ));
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // For non-mobile platforms, use simple concatenation as fallback
+        let mut prompt = String::new();
+        for msg in messages {
+            prompt.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        }
+        prompt.push_str("assistant: ");
+        prompt
     }
-    prompt.push_str("<|start_header_id|>assistant\n\n");
-    prompt
 }
 
 fn handle_inference_task(
@@ -461,7 +539,9 @@ fn handle_inference_task(
     top_p: f32,
     repeat_penalty: f32,
 ) -> Result<()> {
-    use crate::{gpuf_start_generation_async, GLOBAL_CONTEXT_PTR, GLOBAL_MODEL_PTR, GLOBAL_INFERENCE_MUTEX};
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        use crate::{gpuf_start_generation_async, GLOBAL_CONTEXT_PTR, GLOBAL_MODEL_PTR, GLOBAL_INFERENCE_MUTEX};
 
     fn filter_control_tokens(text: &str) -> String {
         text.replace("<|end|>", "")
@@ -862,6 +942,13 @@ fn handle_inference_task(
     stream.flush().ok();
 
     Ok(())
+    }
+    
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // For non-mobile platforms, return an error as this module is for mobile workers only
+        return Err(anyhow!("handle_inference_task is only implemented for mobile platforms (Android/iOS)"));
+    }
 }
 
 pub async fn stop_global_worker() {

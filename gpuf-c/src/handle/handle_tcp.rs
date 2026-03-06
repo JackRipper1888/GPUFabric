@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(not(target_os = "macos"))]
 // LLM engine is not available in lightweight Android version
 #[cfg(not(target_os = "android"))]
 use crate::llm_engine::{self, llama_engine::LlamaEngine};
@@ -1301,6 +1300,19 @@ impl ClientWorker {
                 if let Some(existing_engine) = cached_engine.as_ref() {
                     // Reuse existing engine (reconnection scenario)
                     info!("Reusing existing LLAMA engine from cache (model already loaded)");
+
+                    // Ensure MODEL_STATUS is updated for reconnection scenario
+                    if let Some(ref model_path) = args.llama_model_path {
+                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                            if status.current_model.is_none() {
+                                status.current_model = Some(model_path.clone());
+                                status.is_loaded = true;
+                                status.loading_status = "Loaded".to_string();
+                                info!("Updated MODEL_STATUS for reconnection with local model path: {}", model_path);
+                            }
+                        }
+                    }
+
                     engine = Some(existing_engine.clone());
                 } else {
                     // First time initialization - create and init engine
@@ -1333,6 +1345,17 @@ impl ClientWorker {
                     match llama_worker.init().await {
                         Ok(_) => {
                             info!("LLAMA engine init success - model loaded into memory");
+
+                            // Update MODEL_STATUS with the local model path
+                            if let Some(ref model_path) = args.llama_model_path {
+                                if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                    status.current_model = Some(model_path.clone());
+                                    status.is_loaded = true;
+                                    status.loading_status = "Loaded".to_string();
+                                    info!("Updated MODEL_STATUS with local model path: {}", model_path);
+                                }
+                            }
+
                             // Start worker
                             match llama_worker.start_worker().await {
                                 Ok(_) => info!("LLAMA worker started"),
@@ -1402,6 +1425,86 @@ impl ClientWorker {
                 if let Err(e) = check_and_restart_ollama().await {
                     error!("Failed to manage Ollama process: {}", e);
                     // Decide whether to return error or continue without Ollama
+                }
+            } else if args.engine_type == EngineType::LLAMA {
+                // Check if engine is already initialized in global cache
+                let global_engine_cache = GLOBAL_ENGINE.get_or_init(|| {
+                    Arc::new(Mutex::new(None))
+                });
+                
+                let mut cached_engine = global_engine_cache.lock().await;
+                
+                if let Some(existing_engine) = cached_engine.as_ref() {
+                    // Reuse existing engine (reconnection scenario)
+                    info!("Reusing existing LLAMA engine from cache (model already loaded)");
+
+                    // Ensure MODEL_STATUS is updated for reconnection scenario
+                    if let Some(ref model_path) = args.llama_model_path {
+                        if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                            if status.current_model.is_none() {
+                                status.current_model = Some(model_path.clone());
+                                status.is_loaded = true;
+                                status.loading_status = "Loaded".to_string();
+                                info!("Updated MODEL_STATUS for reconnection with local model path: {}", model_path);
+                            }
+                        }
+                    }
+
+                    engine = Some(existing_engine.clone());
+                } else {
+                    // First time initialization - create and init engine
+                    info!("First time initialization - creating and loading LLAMA engine");
+                    
+                    let mut llama_worker = if let Some(model_path) = &args.llama_model_path {
+                        // Use provided model path
+                        info!("Creating LLAMA engine with model: {}", model_path);
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
+                            model_path.clone(),
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    } else {
+                        // Create engine without model (will be set later)
+                        info!("Creating LLAMA engine without model (will be set later)");
+                        llm_engine::AnyEngine::Llama(LlamaEngine::with_runtime_config(
+                            args.n_ctx,
+                            args.n_gpu_layers,
+                            args.llama_split_mode.clone(),
+                            args.llama_main_gpu,
+                            args.llama_devices.clone(),
+                        ))
+                    };
+
+                    // Initialize the engine (only on first startup)
+                    match llama_worker.init().await {
+                        Ok(_) => {
+                            info!("LLAMA engine init success - model loaded into memory");
+
+                            // Update MODEL_STATUS with the local model path
+                            if let Some(ref model_path) = args.llama_model_path {
+                                if let Ok(mut status) = crate::MODEL_STATUS.lock() {
+                                    status.current_model = Some(model_path.clone());
+                                    status.is_loaded = true;
+                                    status.loading_status = "Loaded".to_string();
+                                    info!("Updated MODEL_STATUS with local model path: {}", model_path);
+                                }
+                            }
+
+                            // Start worker
+                            match llama_worker.start_worker().await {
+                                Ok(_) => info!("LLAMA worker started"),
+                                Err(e) => warn!("LLAMA worker start failed: {}", e),
+                            }
+                        }
+                        Err(e) => error!("LLAMA init failed: {}", e),
+                    }
+                    
+                    // Store in global cache for future reconnections
+                    *cached_engine = Some(llama_worker.clone());
+                    engine = Some(llama_worker);
                 }
             }
         }
