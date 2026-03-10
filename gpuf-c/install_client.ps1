@@ -8,7 +8,7 @@ param(
 # check if running as administrator
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "error: please run this script as administrator" -ForegroundColor Red
+    Write-Host "错误：请以管理员身份运行此脚本" -ForegroundColor Red
     exit 1
 }
 
@@ -108,19 +108,19 @@ function Get-Md5PrefixFromFileName([string]$Path) {
 function Verify-Md5PrefixIfPossible([string]$Path) {
     $prefix = Get-Md5PrefixFromFileName $Path
     if (-not $prefix) {
-        Write-Host "warning: md5 prefix not found in filename (skip md5 prefix check): $([System.IO.Path]::GetFileName($Path))" -ForegroundColor Yellow
+        Write-Host "警告：文件名中未找到 md5 前缀（跳过 md5 前缀检查）：$([System.IO.Path]::GetFileName($Path))" -ForegroundColor Yellow
         return
     }
 
     $md5 = (Get-FileHash -Algorithm MD5 -Path $Path).Hash.ToLower()
     if ($md5.Substring(0, 6) -ne $prefix) {
-        Write-Host "error: md5 prefix mismatch for $Path" -ForegroundColor Red
-        Write-Host "expected prefix: $prefix" -ForegroundColor Yellow
-        Write-Host "actual md5:      $md5" -ForegroundColor Yellow
+        Write-Host "错误：$Path 的 md5 前缀不匹配" -ForegroundColor Red
+        Write-Host "期望前缀：$prefix" -ForegroundColor Yellow
+        Write-Host "实际 md5：      $md5" -ForegroundColor Yellow
         exit 1
     }
 
-    Write-Host "md5 prefix match ok: $md5" -ForegroundColor Green
+    Write-Host "md5 前缀匹配正确：$md5" -ForegroundColor Green
 }
 
 function Get-PeMachine([string]$Path) {
@@ -148,14 +148,14 @@ function Get-PeMachine([string]$Path) {
 function Assert-ExeCompatible([string]$Path) {
     $machine = Get-PeMachine $Path
     if (-not $machine) {
-        Write-Host "error: extracted file is not a valid Windows executable: $Path" -ForegroundColor Red
+        Write-Host "错误：提取的文件不是有效的 Windows 可执行文件：$Path" -ForegroundColor Red
         exit 1
     }
 
     $is64 = [Environment]::Is64BitOperatingSystem
     if (-not $is64 -and $machine -eq 0x8664) {
-        Write-Host "error: this package contains an x64 executable but your Windows appears to be 32-bit" -ForegroundColor Red
-        Write-Host "hint: install a 32-bit build or use a 64-bit Windows" -ForegroundColor Yellow
+        Write-Host "错误：此包包含 x64 可执行文件，但您的 Windows 似乎是 32 位" -ForegroundColor Red
+        Write-Host "提示：安装 32 位构建或使用 64 位 Windows" -ForegroundColor Yellow
         exit 1
     }
 
@@ -163,8 +163,8 @@ function Assert-ExeCompatible([string]$Path) {
     $arch2 = $env:PROCESSOR_ARCHITEW6432
     $isArm = ($arch -eq 'ARM64' -or $arch2 -eq 'ARM64')
     if (-not $isArm -and $machine -eq 0xAA64) {
-        Write-Host "error: this package contains an ARM64 executable but your Windows is not ARM64" -ForegroundColor Red
-        Write-Host "hint: install the x64 build" -ForegroundColor Yellow
+        Write-Host "错误：此包包含 ARM64 可执行文件，但您的 Windows 不是 ARM64" -ForegroundColor Red
+        Write-Host "提示：安装 x64 构建" -ForegroundColor Yellow
         exit 1
     }
 }
@@ -198,9 +198,9 @@ function Write-DownloadProgress([int64]$Done, [int64]$Total) {
     $doneMb = [math]::Round($Done / 1MB, 2)
     if ($Total -gt 0) {
         $totalMb = [math]::Round($Total / 1MB, 2)
-        $line = "Downloading [$bar] $pct% ($doneMb/$totalMb MB)"
+        $line = "下载中 [$bar] $pct% ($doneMb/$totalMb MB)"
     } else {
-        $line = "Downloading [$bar] $doneMb MB"
+        $line = "下载中 [$bar] $doneMb MB"
     }
 
     $pad = ""
@@ -344,10 +344,10 @@ function Download-FilePreferCurl([string]$Url, [string]$OutFile) {
 
             return
         } catch {
-            Write-Host "warning: curl.exe download failed, fallback to direct download: $_" -ForegroundColor Yellow
+            Write-Host "警告：curl.exe 下载失败，回退到直接下载：$_" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "warning: curl.exe not found, fallback to direct download" -ForegroundColor Yellow
+        Write-Host "警告：未找到 curl.exe，回退到直接下载" -ForegroundColor Yellow
     }
 
     Download-FileWithProgress $Url $OutFile
@@ -364,16 +364,16 @@ if ($cudaVersion) {
 }
 
 if (-not $hasVulkan -and -not $cudaOk) {
-    Write-Host "error: Windows requires Vulkan runtime OR CUDA version >= 13.0" -ForegroundColor Red
+    Write-Host "错误：Windows 需要 Vulkan 运行时或 CUDA 版本 >= 13.0" -ForegroundColor Red
     if ($hasVulkan) {
-        Write-Host "Vulkan detected" -ForegroundColor Green
+        Write-Host "检测到 Vulkan" -ForegroundColor Green
     } else {
-        Write-Host "Vulkan not detected (vulkan-1.dll not found)" -ForegroundColor Yellow
+        Write-Host "未检测到 Vulkan（未找到 vulkan-1.dll）" -ForegroundColor Yellow
     }
     if ($cudaVersionStr) {
-        Write-Host "CUDA detected: $cudaVersionStr (require >= 13.0)" -ForegroundColor Yellow
+        Write-Host "检测到 CUDA：$cudaVersionStr（需要 >= 13.0）" -ForegroundColor Yellow
     } else {
-        Write-Host "CUDA not detected (nvidia-smi/nvcc/registry not found)" -ForegroundColor Yellow
+        Write-Host "未检测到 CUDA（未找到 nvidia-smi/nvcc/注册表）" -ForegroundColor Yellow
     }
     exit 1
 }
@@ -391,8 +391,8 @@ try {
         Set-Content -Path $testPath -Value "1" -Encoding Ascii -Force
         Remove-Item -Path $testPath -Force -ErrorAction SilentlyContinue
     } catch {
-        Write-Host "error: cannot write to DownloadDir: $DownloadDir" -ForegroundColor Red
-        Write-Host "hint: use -DownloadDir C:\\gpuf or a directory you can write to" -ForegroundColor Yellow
+        Write-Host "错误：无法写入 DownloadDir：$DownloadDir" -ForegroundColor Red
+        Write-Host "提示：使用 -DownloadDir C:\\gpuf 或您可以写入的目录" -ForegroundColor Yellow
         exit 1
     }
 
@@ -408,30 +408,30 @@ try {
     }
     if ($expectedVer -and $installedVer -and (Test-Path $installedExe) -and ((Parse-Version $installedVer) -eq (Parse-Version $expectedVer))) {
         Ensure-InstallDirOnPath $InstallDir
-        Write-Host "gpuf-c is already installed and up to date (version $installedVer). Skip download." -ForegroundColor Green
+        Write-Host "gpuf-c 已安装且是最新版本（版本 $installedVer）。跳过下载。" -ForegroundColor Green
         exit 0
     }
 
     if (-not $expectedVer) {
-        Write-Host "warning: cannot parse expected version from PackageName: $PackageName (will reinstall)" -ForegroundColor Yellow
+        Write-Host "警告：无法从 PackageName 解析期望版本：$PackageName（将重新安装）" -ForegroundColor Yellow
     } else {
         $markerPath = Join-Path $InstallDir ".gpuf_version"
         if (Test-Path $markerPath) {
             $markerVer = Get-InstalledVersionMarker $InstallDir
             if ((-not (Test-Path $installedExe)) -and $markerVer -and ((Parse-Version $markerVer) -eq (Parse-Version $expectedVer))) {
-                Write-Host "warning: version marker indicates up-to-date ($markerVer) but gpuf-c.exe is missing; will reinstall" -ForegroundColor Yellow
+                Write-Host "警告：版本标记指示最新（$markerVer）但 gpuf-c.exe 缺失；将重新安装" -ForegroundColor Yellow
             } elseif ($markerVer -and ((Parse-Version $markerVer) -ne (Parse-Version $expectedVer))) {
-                Write-Host "warning: installed version marker ($markerVer) != expected ($expectedVer), will reinstall" -ForegroundColor Yellow
+                Write-Host "警告：已安装版本标记（$markerVer）!= 期望（$expectedVer），将重新安装" -ForegroundColor Yellow
             }
         } elseif ($installedVer) {
-            Write-Host "warning: detected installed version ($installedVer) but expected ($expectedVer), will reinstall" -ForegroundColor Yellow
+            Write-Host "警告：检测到已安装版本（$installedVer）但期望（$expectedVer），将重新安装" -ForegroundColor Yellow
         } elseif (Test-Path $installedExe) {
-            Write-Host "warning: gpuf-c.exe exists but version cannot be determined (marker missing and --version parse failed), will reinstall" -ForegroundColor Yellow
+            Write-Host "警告：gpuf-c.exe 存在但无法确定版本（标记缺失且 --version 解析失败），将重新安装" -ForegroundColor Yellow
         }
     }
 
-    Write-Host "Downloading: $pkgUrl" -ForegroundColor Yellow
-    Write-Host "DownloadPath: $archivePath" -ForegroundColor Yellow
+    Write-Host "下载中：$pkgUrl" -ForegroundColor Yellow
+    Write-Host "下载路径：$archivePath" -ForegroundColor Yellow
     if (Test-Path $archivePath) {
         Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
     }
@@ -443,31 +443,31 @@ try {
     try {
         Move-Item -Path $tmpArchivePath -Destination $archivePath -Force
     } catch {
-        Write-Host "error: failed to finalize archive move to $archivePath" -ForegroundColor Red
-        Write-Host "hint: the destination file may be locked by another process; archive remains at: $tmpArchivePath" -ForegroundColor Yellow
+        Write-Host "错误：无法完成归档移动到 $archivePath" -ForegroundColor Red
+        Write-Host "提示：目标文件可能被其他进程锁定；归档保留在：$tmpArchivePath" -ForegroundColor Yellow
         throw
     }
 
     # Extract (.tar.gz) using tar.exe (available on most Windows 10/11)
     $tar = Get-Command tar -ErrorAction SilentlyContinue
     if (-not $tar) {
-        Write-Host "error: tar command not found. Please install tar/bsdtar or use a zip-based package." -ForegroundColor Red
+        Write-Host "错误：未找到 tar 命令。请安装 tar/bsdtar 或使用基于 zip 的包。" -ForegroundColor Red
         exit 1
     }
 
     # Clean up old installation files before extracting new version
-    Write-Host "Cleaning old installation files..." -ForegroundColor Yellow
+    Write-Host "清理旧安装文件..." -ForegroundColor Yellow
     if (Test-Path $InstallDir) {
         try {
             # Remove all files in InstallDir but keep the directory
             Get-ChildItem -Path $InstallDir -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-            Write-Host "Old files removed" -ForegroundColor Green
+            Write-Host "旧文件已删除" -ForegroundColor Green
         } catch {
-            Write-Host "warning: failed to clean some old files: $_" -ForegroundColor Yellow
+            Write-Host "警告：删除一些旧文件失败：$_" -ForegroundColor Yellow
         }
     }
 
-    Write-Host "Extracting to: $InstallDir" -ForegroundColor Yellow
+    Write-Host "解压到：$InstallDir" -ForegroundColor Yellow
     & tar -xzf $archivePath -C $InstallDir
 
     # Expect gpuf-c.exe inside root of the archive.
@@ -482,9 +482,9 @@ try {
             $candidate = Get-ChildItem -Path $InstallDir -Recurse -Filter "*.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
         }
         if (-not $candidate) {
-            Write-Host "error: no .exe found after extraction in $InstallDir" -ForegroundColor Red
-            Write-Host "hint: archive may contain unexpected layout or is not a Windows package" -ForegroundColor Yellow
-            Write-Host "extracted files (top 50):" -ForegroundColor Yellow
+            Write-Host "错误：在 $InstallDir 中解压后未找到 .exe" -ForegroundColor Red
+            Write-Host "提示：归档可能包含意外的布局或不是 Windows 包" -ForegroundColor Yellow
+            Write-Host "解压文件（前 50 个）：" -ForegroundColor Yellow
             Get-ChildItem -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 50 FullName
             exit 1
         }
@@ -525,11 +525,11 @@ try {
 
     Remove-Item -Path $archivePath -Force -ErrorAction SilentlyContinue
 
-    Write-Host "gpuf-c (llama.cpp) installed successfully!" -ForegroundColor Green
-    Write-Host "InstallDir: $InstallDir" -ForegroundColor Yellow
-    Write-Host "Please restart terminal to make PATH changes take effect." -ForegroundColor Yellow
+    Write-Host "gpuf-c (llama.cpp) 安装成功！" -ForegroundColor Green
+    Write-Host "安装目录：$InstallDir" -ForegroundColor Yellow
+    Write-Host "请重启终端以使 PATH 更改生效。" -ForegroundColor Yellow
 
 } catch {
-    Write-Host "installation failed: $_" -ForegroundColor Red
+    Write-Host "安装失败：$_" -ForegroundColor Red
     exit 1
 }
