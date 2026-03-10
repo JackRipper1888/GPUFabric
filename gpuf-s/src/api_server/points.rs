@@ -103,7 +103,7 @@ pub async fn get_user_points(
     };
 
     // Build the base query with dynamic WHERE conditions
-    let mut query_conditions = vec!["ga.user_id = $1".to_string()];
+    let mut query_conditions = vec!["ga.user_id = $1".to_string(), "dpd.points > 0".to_string()];
     let mut param_index = 2;
 
     // Add client_id filter if provided (hex string)
@@ -145,7 +145,7 @@ pub async fn get_user_points(
                 COALESCE(ga.client_name, '') as client_name,
                 dpd.date,
                 dpd.total_heartbeats,
-                COALESCE(dpd.device_name, 'Unknown Device') as device_name,
+                COALESCE(dpd.device_name, '-') as device_name,
                 COALESCE(dpd.device_id, 0) as device_id,
                 dpd.device_index,
                 (dpd.points)::DOUBLE PRECISION as points,
