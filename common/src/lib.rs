@@ -585,6 +585,7 @@ const VENDOR_TO_ID: &[(&str, u16)] = &[
     ("Apple", 0x6810),
     ("Intel", 0x8086),
     ("AMD", 0x1022),
+    ("AMD", 0x1002),
     ("NVIDIA", 0x10de),
 ];
 

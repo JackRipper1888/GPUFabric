@@ -164,41 +164,47 @@ impl LlamaEngine {
                 }).clone();
 
                 use llama_cpp_2::model::params::LlamaSplitMode as LlamaCppSplitMode;
+                use crate::util::nvswitch_check;
 
-                let mut model_params =
-                    LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+                // Check NVSwitch availability before CUDA init (HGX/A100/A800)
+                if !nvswitch_check::check_hgx_nvswitch_available() {
+                    return Err(anyhow!(
+                        "NVSwitch/HGX not ready - CUDA will fail with error 802. \
+                         Run: sudo systemctl start nvidia-fabricmanager"
+                    ));
+                }
 
                 let split_mode = match llama_split_mode {
                     LlamaSplitModeArg::None => LlamaCppSplitMode::None,
                     LlamaSplitModeArg::Layer => LlamaCppSplitMode::Layer,
                     LlamaSplitModeArg::Row => LlamaCppSplitMode::Row,
                 };
-                model_params = model_params
-                    .with_split_mode(split_mode)
-                    .with_main_gpu(llama_main_gpu);
 
-                info!(
-                    "llama.cpp model params: n_gpu_layers={}, split_mode={:?}, main_gpu={}, devices={:?}",
-                    n_gpu_layers,
-                    split_mode,
-                    llama_main_gpu,
-                    llama_devices
-                );
+                // Build base model params step by step
+                let mut model_params =
+                    LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+                model_params = model_params.with_split_mode(split_mode);
+                model_params = model_params.with_main_gpu(llama_main_gpu);
 
-                if let Some(devs) = llama_devices {
+                // Apply devices if provided (rebuild on success to avoid move issues)
+                if let Some(ref devs) = llama_devices {
                     let devs = devs.trim();
                     if !devs.is_empty() {
-                        let parsed = devs
-                            .split(',')
-                            .map(|v| v.trim())
-                            .filter(|v| !v.is_empty())
-                            .map(|v| v.parse::<usize>())
-                            .collect::<std::result::Result<Vec<_>, _>>()
-                            .map_err(|e| anyhow!("Invalid llama_devices '{}': {}", devs, e))?;
-                        if !parsed.is_empty() {
-                            model_params = model_params
-                                .with_devices(&parsed)
-                                .map_err(|e| anyhow!("Failed to set llama devices: {:?}", e))?;
+                        if let Ok(devices) = devs.split(',').map(|s| s.trim().parse::<usize>()).collect::<Result<Vec<_>, _>>() {
+                            // Rebuild params with devices to avoid with_devices move issue
+                            let new_params = LlamaModelParams::default()
+                                .with_n_gpu_layers(n_gpu_layers)
+                                .with_split_mode(split_mode)
+                                .with_main_gpu(llama_main_gpu)
+                                .with_devices(&devices);
+                            if let Ok(p) = new_params {
+                                model_params = p;
+                                info!("Applied llama_devices: {:?}", devices);
+                            } else {
+                                warn!("Failed to apply llama_devices: {:?}", devices);
+                            }
+                        } else {
+                            warn!("Failed to parse llama_devices: '{}'", devs);
                         }
                     }
                 }
