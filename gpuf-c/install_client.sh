@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 # init log file
 LOG_FILE="/tmp/gpuf_c_llamacpp_install_$(date +%Y%m%d_%H%M%S).log"
-echo "安装开始于 $(date)" > "$LOG_FILE"
+echo "Installation started at $(date)" > "$LOG_FILE"
 
 # log function
 log() {
@@ -20,7 +20,7 @@ log() {
 # check command exists
 check_command() {
     if ! command -v "$1" &> /dev/null; then
-        log "${RED}错误：需要 $1 但未安装${NC}"
+        log "${RED}error: need $1 but not installed${NC}"
         exit 1
     fi
 }
@@ -33,16 +33,16 @@ verify_macos_binary_format() {
     fi
 
     if ! command -v file &> /dev/null; then
-        log "${YELLOW}警告：未找到 'file' 命令；跳过 macOS 二进制格式检查${NC}"
+        log "${YELLOW}warning: 'file' command not found; skip macOS binary format check${NC}"
         return 0
     fi
 
     local out
     out=$(file "$file_path" 2>/dev/null || true)
     if [[ "$out" != *"Mach-O"* ]]; then
-        log "${RED}macOS 的 gpuf-c 二进制文件无效（期望 Mach-O，但得到其他格式）${NC}"
+        log "${RED}invalid gpuf-c binary for macOS (expect Mach-O, got something else)${NC}"
         log "${YELLOW}$out${NC}"
-        log "${YELLOW}提示：您的下载包可能错误（例如，Linux 压缩包上传到 mac 密钥）${NC}"
+        log "${YELLOW}hint: your download package may be wrong (e.g., Linux tarball uploaded to mac key)${NC}"
         return 1
     fi
 
@@ -51,14 +51,14 @@ verify_macos_binary_format() {
     case "$mach" in
         arm64)
             if [[ "$out" != *"arm64"* ]]; then
-                log "${RED}此 Mac 的 gpuf-c 二进制架构无效（需要 arm64）${NC}"
+                log "${RED}invalid gpuf-c binary architecture for this Mac (need arm64)${NC}"
                 log "${YELLOW}$out${NC}"
                 return 1
             fi
             ;;
         x86_64)
             if [[ "$out" != *"x86_64"* && "$out" != *"x86-64"* ]]; then
-                log "${RED}此 Mac 的 gpuf-c 二进制架构无效（需要 x86_64）${NC}"
+                log "${RED}invalid gpuf-c binary architecture for this Mac (need x86_64)${NC}"
                 log "${YELLOW}$out${NC}"
                 return 1
             fi
@@ -73,7 +73,7 @@ verify_macos_binary_format() {
 # NOTE: This installer is for the llama.cpp version of gpuf-c.
 # It downloads a compressed release archive and extracts it.
 detect_system() {
-    echo "=== 系统检测 ==="
+    echo "=== system detect ==="
 
     local u
     u="$(uname)"
@@ -82,22 +82,22 @@ detect_system() {
         Darwin)
             OS="darwin"
             ARCH="$(uname -m)"
-            echo "操作系统：macOS ($ARCH)"
+            echo "OS: macOS ($ARCH)"
             ;;
         Linux)
             OS="linux"
             ARCH="$(uname -m)"
-            echo "操作系统：Linux ($ARCH)"
+            echo "OS: Linux ($ARCH)"
             ;;
         MINGW*|MSYS*|CYGWIN*)
             OS="windows"
             ARCH="x86_64"
-            echo "操作系统：Windows (通过 $u)"
+            echo "OS: Windows (via $u)"
             ;;
         *)
             OS="linux"
             ARCH="$(uname -m)"
-            echo "操作系统：$u ($ARCH)"
+            echo "OS: $u ($ARCH)"
             ;;
     esac
 
@@ -178,13 +178,13 @@ verify_md5_contains_if_needed() {
     fi
 
     if [ ! -f "$file" ]; then
-        log "${RED}md5 检查失败：文件未找到：$file${NC}"
+        log "${RED}md5 check failed: file not found: $file${NC}"
         return 1
     fi
 
     local md5
     if ! md5=$(calc_md5 "$file"); then
-        log "${RED}md5 检查失败：md5 工具不可用（需要 md5sum/md5/openssl）${NC}"
+        log "${RED}md5 check failed: md5 tool not available (need md5sum/md5/openssl)${NC}"
         return 1
     fi
 
@@ -192,13 +192,13 @@ verify_md5_contains_if_needed() {
     hint=$(echo "$hint" | tr '[:upper:]' '[:lower:]')
 
     if [[ "$md5" != *"$hint"* ]]; then
-        log "${RED}$file 的 md5 不匹配${NC}"
-        log "${YELLOW}期望包含：$hint${NC}"
-        log "${YELLOW}实际 md5：        $md5${NC}"
+        log "${RED}md5 mismatch for $file${NC}"
+        log "${YELLOW}expected contains: $hint${NC}"
+        log "${YELLOW}actual md5:        $md5${NC}"
         return 1
     fi
 
-    log "${GREEN}md5 匹配正确：$md5${NC}"
+    log "${GREEN}md5 match ok: $md5${NC}"
 }
 
 read_md5_prefix_from_filename() {
@@ -220,33 +220,33 @@ verify_md5_prefix_from_filename_if_possible() {
     local file="$1"
 
     if [ ! -f "$file" ]; then
-        log "${RED}md5 检查失败：文件未找到：$file${NC}"
+        log "${RED}md5 check failed: file not found: $file${NC}"
         return 1
     fi
 
     local prefix
     prefix=$(read_md5_prefix_from_filename "$file")
     if [ -z "$prefix" ]; then
-        log "${YELLOW}警告：文件名中未找到 md5 前缀（跳过 md5 前缀检查）：$(basename "$file")${NC}"
+        log "${YELLOW}warning: md5 prefix not found in filename (skip md5 prefix check): $(basename "$file")${NC}"
         return 0
     fi
 
     local md5
     if ! md5=$(calc_md5 "$file"); then
-        log "${RED}md5 检查失败：md5 工具不可用（需要 md5sum/md5/openssl）${NC}"
+        log "${RED}md5 check failed: md5 tool not available (need md5sum/md5/openssl)${NC}"
         return 1
     fi
 
     md5=$(echo "$md5" | tr '[:upper:]' '[:lower:]')
 
     if [ "${md5:0:6}" != "$prefix" ]; then
-        log "${RED}$file 的 md5 前缀不匹配${NC}"
-        log "${YELLOW}期望前缀：$prefix${NC}"
-        log "${YELLOW}实际 md5：      $md5${NC}"
+        log "${RED}md5 prefix mismatch for $file${NC}"
+        log "${YELLOW}expected prefix: $prefix${NC}"
+        log "${YELLOW}actual md5:      $md5${NC}"
         return 1
     fi
 
-    log "${GREEN}md5 前缀匹配正确：$md5${NC}"
+    log "${GREEN}md5 prefix match ok: $md5${NC}"
 }
 
 verify_md5_prefixes_from_extracted_dir_if_needed() {
@@ -291,14 +291,14 @@ download_file() {
     local url="$1"
     local out="$2"
 
-    log "${YELLOW}下载：$url${NC}"
+    log "${YELLOW}download: $url${NC}"
     # Use curl with progress bar (-#) instead of silent mode
     # -f: fail silently on HTTP errors
     # -L: follow redirects
     # -#: show progress bar
     # -o: output file
     if ! curl -fL# "$url" -o "$out" 2>&1 | tee -a "$LOG_FILE"; then
-        log "${RED}下载失败：$url${NC}"
+        log "${RED}download failed: $url${NC}"
         return 1
     fi
     echo "" # Add newline after progress bar
@@ -320,7 +320,7 @@ extract_archive() {
             unzip -q "$archive" -d "$dest_dir" >> "$LOG_FILE" 2>&1
             ;;
         *)
-            log "${RED}不支持的压缩包格式：$archive${NC}"
+            log "${RED}unsupported archive format: $archive${NC}"
             return 1
             ;;
     esac
@@ -338,39 +338,39 @@ install_from_extracted_dir() {
 
     if [ "$OS" = "linux" ]; then
         if [ -z "$linux_cuda" ] && [ -z "$linux_vulkan" ]; then
-            log "${RED}在解压目录中未找到 Linux 二进制文件：$extracted_dir${NC}"
+            log "${RED}not found linux binaries in extracted directory: $extracted_dir${NC}"
             return 1
         fi
 
         if [ -n "$linux_vulkan" ] && [ -f "$linux_vulkan" ]; then
             sudo install -m 0755 "$linux_vulkan" "$INSTALL_DIR/gpuf-c-vulkan" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c-vulkan${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c-vulkan${NC}"
         fi
 
         if [ -n "$linux_cuda" ] && [ -f "$linux_cuda" ]; then
             sudo install -m 0755 "$linux_cuda" "$INSTALL_DIR/gpuf-c-cuda" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c-cuda${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c-cuda${NC}"
         fi
 
         if command -v nvidia-smi &> /dev/null && [ -f "$INSTALL_DIR/gpuf-c-cuda" ]; then
             sudo ln -sf "$INSTALL_DIR/gpuf-c-cuda" "$INSTALL_DIR/gpuf-c" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c (CUDA)${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c (CUDA)${NC}"
         elif command -v vulkaninfo &> /dev/null && [ -f "$INSTALL_DIR/gpuf-c-vulkan" ]; then
             sudo ln -sf "$INSTALL_DIR/gpuf-c-vulkan" "$INSTALL_DIR/gpuf-c" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c (Vulkan)${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c (Vulkan)${NC}"
         elif [ -f "$INSTALL_DIR/gpuf-c-cuda" ]; then
             sudo ln -sf "$INSTALL_DIR/gpuf-c-cuda" "$INSTALL_DIR/gpuf-c" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c (CUDA)${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c (CUDA)${NC}"
         elif [ -f "$INSTALL_DIR/gpuf-c-vulkan" ]; then
             sudo ln -sf "$INSTALL_DIR/gpuf-c-vulkan" "$INSTALL_DIR/gpuf-c" >> "$LOG_FILE" 2>&1
-            log "${GREEN}已安装：$INSTALL_DIR/gpuf-c (Vulkan)${NC}"
+            log "${GREEN}installed: $INSTALL_DIR/gpuf-c (Vulkan)${NC}"
         else
-            log "${RED}选择默认 gpuf-c 二进制文件失败${NC}"
+            log "${RED}failed to select default gpuf-c binary${NC}"
             return 1
         fi
     else
         if [ -z "$mac_bin" ]; then
-            log "${RED}在解压目录中未找到 Mac 二进制文件：$extracted_dir${NC}"
+            log "${RED}not found mac binary in extracted directory: $extracted_dir${NC}"
             return 1
         fi
 
@@ -378,7 +378,7 @@ install_from_extracted_dir() {
         verify_md5_prefix_from_filename_if_possible "$mac_bin"
 
         sudo install -m 0755 "$mac_bin" "$INSTALL_DIR/gpuf-c" >> "$LOG_FILE" 2>&1
-        log "${GREEN}已安装：$INSTALL_DIR/gpuf-c${NC}"
+        log "${GREEN}installed: $INSTALL_DIR/gpuf-c${NC}"
     fi
 
     if [ -f "$extracted_dir/read.txt" ]; then
@@ -386,37 +386,37 @@ install_from_extracted_dir() {
         share_dir=$(get_share_dir)
         sudo mkdir -p "$share_dir" >> "$LOG_FILE" 2>&1
         sudo install -m 0644 "$extracted_dir/read.txt" "$share_dir/read.txt" >> "$LOG_FILE" 2>&1
-        log "${GREEN}已安装：$share_dir/read.txt${NC}"
+        log "${GREEN}installed: $share_dir/read.txt${NC}"
     fi
 
     if [ -f "$extracted_dir/ca-cert.pem" ]; then
         sudo install -m 0644 "$extracted_dir/ca-cert.pem" "$INSTALL_DIR/ca-cert.pem" >> "$LOG_FILE" 2>&1
-        log "${GREEN}已安装：$INSTALL_DIR/ca-cert.pem${NC}"
+        log "${GREEN}installed: $INSTALL_DIR/ca-cert.pem${NC}"
     fi
 }
 
 verify_installation() {
-    log "${GREEN}=== 安装完成 ===${NC}"
-    log "${YELLOW}验证安装：${NC}"
+    log "${GREEN}=== installation completed ===${NC}"
+    log "${YELLOW}verify installation:${NC}"
 
     local share_dir
     share_dir=$(get_share_dir)
     if [ -f "$share_dir/read.txt" ]; then
-        log "${YELLOW}使用指南：${NC}"
+        log "${YELLOW}usage guide:${NC}"
         log "  ${GREEN}$share_dir/read.txt${NC}"
     fi
 
     if command -v gpuf-c &> /dev/null; then
-        log "${GREEN}✓ gpuf-c 安装成功${NC}"
+        log "${GREEN}✓ gpuf-c installed successfully${NC}"
         gpuf-c --version 2>/dev/null || true
     else
-        log "${RED}✗ gpuf-c 安装失败${NC}"
+        log "${RED}✗ gpuf-c installation failed${NC}"
     fi
 }
 
 # main install function
 main() {
-    log "${YELLOW}=== gpuf-c (llama.cpp) 安装过程 ===${NC}"
+    log "${YELLOW}=== gpuf-c (llama.cpp) Install process ===${NC}"
 
     detect_system
 
@@ -458,7 +458,7 @@ main() {
             local payload
             payload="$extract_dir"
             if [ ! -d "$payload" ]; then
-                log "${RED}未能定位解压后的内容${NC}"
+                log "${RED}failed to locate extracted payload${NC}"
                 exit 1
             fi
 
@@ -472,11 +472,11 @@ main() {
 
             if [ "$OS" = "linux" ]; then
                 if command -v nvidia-smi &> /dev/null; then
-                    log "${GREEN}检测到：NVIDIA (CUDA)${NC}"
+                    log "${GREEN}detected: NVIDIA (CUDA)${NC}"
                 elif command -v vulkaninfo &> /dev/null; then
-                    log "${GREEN}检测到：Vulkan 运行时${NC}"
+                    log "${GREEN}detected: Vulkan runtime${NC}"
                 else
-                    log "${RED}错误：Linux 需要 nvidia-smi (CUDA) 或 vulkaninfo (Vulkan 运行时)${NC}"
+                    log "${RED}error: Linux requires nvidia-smi (CUDA) OR vulkaninfo (Vulkan runtime)${NC}"
                     exit 1
                 fi
             fi
@@ -486,7 +486,7 @@ main() {
             rm -rf "$tmp_dir"
             ;;
         *)
-            log "${RED}不支持操作系统：$OS${NC}"
+            log "${RED}not support os: $OS${NC}"
             exit 1
             ;;
     esac
