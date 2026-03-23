@@ -3,6 +3,7 @@ pub mod cmd;
 pub mod config;
 pub mod device_info;
 pub mod model_downloader;
+#[cfg(not(target_os = "ios"))]
 pub mod model_downloader_example;
 pub mod network_info;
 pub mod nvswitch_check;

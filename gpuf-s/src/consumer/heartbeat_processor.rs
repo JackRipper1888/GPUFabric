@@ -92,7 +92,7 @@ async fn process_batch(messages: Vec<OwnedMessage>, db_pool: Pool<Postgres>) -> 
                     }
                 };
 
-                info!("Heartbeat received from client {} cpu_usage {}% memory_usage {}% disk_usage {}% network_up {} network_down {}", heartbeat.client_id, heartbeat.system_info.cpu_usage, heartbeat.system_info.memory_usage, heartbeat.system_info.disk_usage,  format_bytes!(heartbeat.system_info.network_tx),format_bytes!(heartbeat.system_info.network_rx));
+                info!("Heartbeat received from client {} total_tflops {} cpu_usage {}% memory_usage {}% disk_usage {}% network_up {} network_down {}", heartbeat.client_id, heartbeat.total_tflops, heartbeat.system_info.cpu_usage, heartbeat.system_info.memory_usage, heartbeat.system_info.disk_usage,  format_bytes!(heartbeat.system_info.network_tx),format_bytes!(heartbeat.system_info.network_rx));
                 // Update last seen timestamp with safe type conversion
                 if let Err(e) = insert_heartbeat(
                     &mut transaction,

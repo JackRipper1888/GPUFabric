@@ -585,6 +585,7 @@ const VENDOR_TO_ID: &[(&str, u16)] = &[
     ("Apple", 0x6810),
     ("Intel", 0x8086),
     ("AMD", 0x1022),
+    ("AMD", 0x1002),
     ("NVIDIA", 0x10de),
 ];
 
@@ -603,13 +604,14 @@ const OS_TPYE_MAP: &[(&str, OsType)] = &[
     ("linux", OsType::LINUX),
     ("win", OsType::WINDOWS),
     ("android", OsType::ANDROID),
+    ("ios",OsType::IOS)
 ];
 
 #[inline]
 pub fn os_type_str(os_type_src: &OsType) -> Option<&'static str> {
     OS_TPYE_MAP
         .iter()
-        .find(|(_, os_type)| *os_type == *os_type_src)
+        .find(|(_, os_type)| os_type == os_type_src)
         .map(|(s, _)| *s)
 }
 

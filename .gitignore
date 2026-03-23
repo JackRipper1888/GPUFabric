@@ -34,3 +34,7 @@ android_test_app/app/build/
 
 # gpuf-c Android build artifacts
 gpuf-c/build_android/android_test
+
+# gpuf-c iOS build artifacts
+gpuf-c/build_ios/dist/
+gpuf-c/examples/*/DerivedData/

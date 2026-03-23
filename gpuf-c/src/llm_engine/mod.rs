@@ -1,4 +1,5 @@
 pub mod inference_service;
+#[cfg(not(target_os = "ios"))]
 pub mod llama_engine;
 pub mod llama_server;
 pub mod ollama_engine;
@@ -6,8 +7,43 @@ pub mod vllm_engine;
 
 // Re-export commonly used types
 use crate::util::cmd::EngineType;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+
+#[cfg(not(target_os = "ios"))]
 pub use llama_engine::LlamaEngine;
+
+#[cfg(target_os = "ios")]
+#[derive(Clone, Default)]
+pub struct LlamaEngine;
+
+#[cfg(target_os = "ios")]
+impl LlamaEngine {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(target_os = "ios")]
+impl Engine for LlamaEngine {
+    fn init(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Err(anyhow!("LlamaEngine is not available on iOS in this build")) }
+    }
+
+    fn set_models(
+        &mut self,
+        _models: Vec<String>,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Err(anyhow!("LlamaEngine is not available on iOS in this build")) }
+    }
+
+    fn start_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Err(anyhow!("LlamaEngine is not available on iOS in this build")) }
+    }
+
+    fn stop_worker(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Ok(()) }
+    }
+}
 use reqwest::Client;
 
 const OLLAMA_DEFAULT_PORT: u16 = 11434;

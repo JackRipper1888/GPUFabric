@@ -16,11 +16,15 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring};
 #[cfg(target_os = "android")]
 use jni::JNIEnv;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use libc::size_t;
+#[cfg(target_os = "ios")]
 use libc::size_t;
 use once_cell::sync::Lazy;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 #[cfg(target_os = "android")]
+use std::io::Write;
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use std::os::raw::c_ulonglong;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
@@ -90,9 +94,17 @@ static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 });
 
 // Export modules
+#[cfg(not(target_os = "ios"))]
 pub mod handle;
+#[cfg(not(target_os = "ios"))]
 pub mod llm_engine;
 pub mod util;
+
+// iOS builds don't compile the full `handle` module (it depends on llm_engine).
+// Expose worker runtime directly.
+#[cfg(target_os = "ios")]
+#[path = "handle/worker_sdk.rs"]
+pub mod worker_sdk;
 
 // JNI wrapper modules
 #[cfg(target_os = "android")]
@@ -412,7 +424,7 @@ impl ModelStatusInfo {
 // Real llama.cpp API Functions (for Android)
 // ============================================================================
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 extern "C" {
     // Backend functions
     fn llama_backend_init() -> c_int;
@@ -556,7 +568,7 @@ extern "C" {
 // Real llama.cpp API Wrappers
 // ============================================================================
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_backend_init() -> c_int {
     unsafe {
         llama_backend_init();
@@ -565,12 +577,12 @@ fn real_llama_backend_init() -> c_int {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_backend_free() {
     unsafe { llama_backend_free() }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_model_load_from_file(
     path: *const c_char,
     params: llama_model_params,
@@ -578,13 +590,13 @@ fn real_llama_model_load_from_file(
     unsafe { llama_load_model_from_file(path, params) }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
 fn real_llama_model_free(model: *mut llama_model) {
     unsafe { llama_model_free(model) }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_init_from_model(
     model: *const llama_model,
     params: llama_context_params,
@@ -592,7 +604,7 @@ fn real_llama_init_from_model(
     unsafe { llama_init_from_model(model, params) }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[allow(dead_code)]
 fn real_llama_free(ctx: *mut llama_context) {
     unsafe { llama_free(ctx) }
@@ -611,7 +623,7 @@ fn safe_llama_tokenize_with_pool(
     0
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 // llama-cpp-rs
 pub(crate) unsafe fn safe_tokenize(
     ctx: *mut llama_context,
@@ -740,7 +752,7 @@ fn simple_char_tokenize(
 }
 
 // Safe test function to check if llama_token_to_piece works
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn test_token_decode(model: *const llama_model, token: LlamaToken) -> Option<String> {
     // Use a static buffer to avoid unwind issues
     static mut BUFFER: [u8; 64] = [0u8; 64];
@@ -775,7 +787,7 @@ fn test_token_decode(model: *const llama_model, token: LlamaToken) -> Option<Str
 }
 
 // Enhanced token decoding with larger buffer and special token support
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn decode_token_to_text(model: *const llama_model, token: LlamaToken) -> String {
     // CRITICAL FIX: Use larger buffer to handle multi-byte tokens
     static mut BUFFER: [u8; 1024] = [0u8; 1024]; // Increased from 64 to 1024
@@ -830,7 +842,7 @@ fn decode_token_to_text(model: *const llama_model, token: LlamaToken) -> String 
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn manual_llama_completion(
     model: *const llama_model,
     ctx: *mut llama_context,
@@ -1167,7 +1179,7 @@ pub fn manual_llama_completion(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_n_ctx(ctx: *const llama_context) -> c_int {
     unsafe { llama_n_ctx(ctx) }
 }
@@ -1205,7 +1217,7 @@ fn real_llama_token_to_piece(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn real_llama_token_eos(model: *const llama_model) -> LlamaToken {
     unsafe { llama_token_eos(model) }
 }
@@ -1228,17 +1240,17 @@ fn real_llama_detokenize(
 // Non-Android (fallback to simulation)
 // ============================================================================
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn real_llama_backend_init() -> c_int {
     simulate_llama_backend_init()
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn real_llama_backend_free() {
     simulate_llama_backend_free()
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn real_llama_model_load_from_file(
     path: *const c_char,
     params: llama_model_params,
@@ -1246,13 +1258,13 @@ fn real_llama_model_load_from_file(
     simulate_llama_model_load_from_file(path, params)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[allow(dead_code)]
 fn real_llama_model_free(model: *mut llama_model) {
     simulate_llama_model_free(model)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn real_llama_init_from_model(
     model: *const llama_model,
     params: llama_context_params,
@@ -1260,13 +1272,13 @@ fn real_llama_init_from_model(
     simulate_llama_init_from_model(model, params)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[allow(dead_code)]
 fn real_llama_free(ctx: *mut llama_context) {
     simulate_llama_free(ctx)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 //
 // fn real_llama_tokenize(
 //     ctx: *mut llama_context,
@@ -1277,7 +1289,7 @@ fn real_llama_free(ctx: *mut llama_context) {
 // ) -> c_int {
 //     simulate_llama_tokenize(ctx, text, tokens, n_max_tokens, add_bos)
 // }
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn real_llama_n_ctx(ctx: *const llama_context) -> c_int {
     simulate_llama_n_ctx(ctx)
 }
@@ -1426,7 +1438,7 @@ fn simulate_llama_context_default_params() -> llama_context_params {
 /// `model` must be a valid pointer to a `llama_model` created by this library (or the linked
 /// llama.cpp bindings) and must remain valid for the duration of this call.
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_context {
     if model.is_null() {
         return std::ptr::null_mut();
@@ -1447,6 +1459,12 @@ pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_con
     println!("✅ Context created: {:p}", result);
 
     result
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_context(_model: *mut llama_model) -> *mut llama_context {
+    std::ptr::null_mut()
 }
 
 // Async Model Loading and Context Creation Functions
@@ -1540,6 +1558,12 @@ pub extern "C" fn gpuf_load_model_async_start(path: *const c_char) -> bool {
     true
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_async_start(_path: *const c_char) -> bool {
+    false
+}
+
 /// Get loading status (realistic polling)
 #[no_mangle]
 pub extern "C" fn gpuf_load_model_get_status() -> i32 {
@@ -1608,6 +1632,12 @@ pub extern "C" fn gpuf_load_model_wait() -> i32 {
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_wait() -> i32 {
+    0
+}
+
 /// Cleanup async loading state
 #[no_mangle]
 #[cfg(target_os = "android")]
@@ -1622,6 +1652,10 @@ pub extern "C" fn gpuf_load_model_cleanup() {
         ASYNC_LOADING_STATE = None;
     }
 }
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_cleanup() {}
 
 /// Legacy async model loading with callback (for backward compatibility)
 #[no_mangle]
@@ -1661,6 +1695,16 @@ pub extern "C" fn gpuf_load_model_async(
     model_ptr
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model_async(
+    _path: *const c_char,
+    _on_progress: Option<extern "C" fn(f32, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> *mut llama_model {
+    std::ptr::null_mut()
+}
+
 /// Context creation remains synchronous (fast operation)
 /// Use the regular gpuf_create_context for context creation
 #[no_mangle]
@@ -1685,6 +1729,16 @@ pub extern "C" fn gpuf_create_context_async(
     }
 
     context_ptr
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_context_async(
+    _model: *mut llama_model,
+    _on_progress: Option<extern "C" fn(f32, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> *mut llama_context {
+    std::ptr::null_mut()
 }
 
 /// Check if model is loaded (non-blocking)
@@ -1786,7 +1840,7 @@ pub struct MultimodalModel {
 /// `path` must be a valid, NUL-terminated C string pointer and must remain valid for the duration
 /// of this call.
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_load_model(path: *const c_char) -> *mut llama_model {
     if path.is_null() {
         return std::ptr::null_mut();
@@ -1806,6 +1860,12 @@ pub extern "C" fn gpuf_load_model(path: *const c_char) -> *mut llama_model {
     println!("✅ real_llama_model_load_from_file returned: {:p}", result);
 
     result
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_model(_path: *const c_char) -> *mut llama_model {
+    std::ptr::null_mut()
 }
 
 // 🆕 Helper function to detect model type from filename
@@ -1931,6 +1991,15 @@ pub extern "C" fn gpuf_load_multimodal_model(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_load_multimodal_model(
+    _text_model_path: *const c_char,
+    _mmproj_path: *const c_char,
+) -> *mut gpuf_multimodal_model {
+    std::ptr::null_mut()
+}
+
 // Create context for multimodal model
 ///
 /// # Safety
@@ -1959,6 +2028,14 @@ pub extern "C" fn gpuf_create_multimodal_context(
     real_llama_init_from_model(model, ctx_params)
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_create_multimodal_context(
+    _multimodal_model: *mut gpuf_multimodal_model,
+) -> *mut llama_context {
+    std::ptr::null_mut()
+}
+
 /// # Safety
 /// - `multimodal_model` must be a valid pointer returned by `gpuf_load_multimodal_model`.
 /// - `ctx` may be null (a fresh context may be created internally); if non-null it must be a valid
@@ -1967,6 +2044,25 @@ pub extern "C" fn gpuf_create_multimodal_context(
 /// - `image_data` must be a valid pointer to `image_size` bytes (may be null only if
 ///   `image_size == 0`).
 /// - `output` must be a valid writable buffer of at least `output_len` bytes.
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_multimodal(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _ctx: *mut llama_context,
+    _text_prompt: *const c_char,
+    _image_data: *const u8,
+    _image_size: c_ulonglong,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _output: *mut c_char,
+    _output_len: c_int,
+) -> c_int {
+    -1
+}
+
 #[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_multimodal(
@@ -2271,6 +2367,26 @@ pub extern "C" fn gpuf_generate_multimodal(
 
 // 🆕 Streaming version with callbacks
 #[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_multimodal_stream(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _ctx: *mut llama_context,
+    _text_prompt: *const c_char,
+    _image_data: *const u8,
+    _image_size: c_ulonglong,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _on_token: TokenCallback,
+    _on_complete: CompletionCallback,
+    _user_data: *mut c_void,
+) -> c_int {
+    -1
+}
+
+#[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_generate_multimodal_stream(
     multimodal_model: *mut gpuf_multimodal_model,
@@ -2552,6 +2668,10 @@ pub extern "C" fn gpuf_generate_multimodal_stream(
 
 // Free multimodal model with libmtmd support
 #[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_free_multimodal_model(_multimodal_model: *mut gpuf_multimodal_model) {}
+
+#[no_mangle]
 #[cfg(target_os = "android")]
 pub extern "C" fn gpuf_free_multimodal_model(multimodal_model: *mut gpuf_multimodal_model) {
     if !multimodal_model.is_null() {
@@ -2587,6 +2707,14 @@ pub extern "C" fn gpuf_multimodal_supports_vision(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_multimodal_supports_vision(
+    _multimodal_model: *mut gpuf_multimodal_model,
+) -> bool {
+    false
+}
+
 // Get multimodal model info
 #[no_mangle]
 #[cfg(target_os = "android")]
@@ -2607,6 +2735,15 @@ pub extern "C" fn gpuf_get_multimodal_info(
         *has_vision = mtmd_support_vision(model_ref.mtmd_context);
         0
     }
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_get_multimodal_info(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _has_vision: *mut bool,
+) -> c_int {
+    -1
 }
 
 // 🆕 Get vision tokens for the detected model type
@@ -2655,6 +2792,18 @@ pub extern "C" fn gpuf_get_vision_tokens(
         // Return model type as integer for debugging
         model_ref.projector_type as c_int
     }
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_get_vision_tokens(
+    _multimodal_model: *mut gpuf_multimodal_model,
+    _start_token: *mut c_char,
+    _end_token: *mut c_char,
+    _media_token: *mut c_char,
+    _max_length: c_int,
+) -> c_int {
+    -1
 }
 
 #[cfg(target_os = "android")]
@@ -3126,7 +3275,7 @@ pub extern "C" fn gpuf_generate_final_solution_text(
 }
 
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_generate_with_sampling(
     model: *const llama_model,
     ctx: *mut llama_context,
@@ -3175,6 +3324,25 @@ pub extern "C" fn gpuf_generate_with_sampling(
             output_len,
         )
     }
+}
+
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_generate_with_sampling(
+    _model: *const llama_model,
+    _ctx: *mut llama_context,
+    _prompt: *const c_char,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _output: *mut c_char,
+    _output_len: c_int,
+    _token_buffer: *mut LlamaToken,
+    _token_buffer_size: c_int,
+) -> c_int {
+    -1
 }
 
 #[no_mangle]
@@ -3356,10 +3524,16 @@ pub fn allocate_from_pool(size: usize, alignment: usize) -> *mut u8 {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn reset_pool() {
+    #[cfg(target_os = "android")]
     unsafe {
         MEMORY_POOL.used = 0;
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = ();
     }
 }
 
@@ -3392,7 +3566,7 @@ pub extern "C" fn gpuf_stop_generation(_ctx: *mut llama_context) -> c_int {
 
 /// Start async generation with streaming callback (simplified version)
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_start_generation_async(
     ctx: *mut llama_context,
     prompt: *const c_char,
@@ -3676,9 +3850,25 @@ pub extern "C" fn gpuf_start_generation_async(
     }
 }
 
+#[no_mangle]
+#[cfg(target_os = "ios")]
+pub extern "C" fn gpuf_start_generation_async(
+    _ctx: *mut llama_context,
+    _prompt: *const c_char,
+    _max_tokens: c_int,
+    _temperature: f32,
+    _top_k: c_int,
+    _top_p: f32,
+    _repeat_penalty: f32,
+    _on_token_callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    _user_data: *mut c_void,
+) -> c_int {
+    -1
+}
+
 /// Simple single token generation for testing
 #[no_mangle]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub extern "C" fn gpuf_generate_single_token(
     model: *const llama_model,
     ctx: *mut llama_context,
@@ -3773,7 +3963,7 @@ pub extern "C" fn gpuf_generate_single_token(
 // ============================================================================
 
 /// Start remote worker and initialize global worker (C API)
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn start_remote_worker(
     server_addr: *const c_char,
@@ -3782,7 +3972,6 @@ pub extern "C" fn start_remote_worker(
     worker_type: *const c_char,
     client_id: *const c_char,
 ) -> c_int {
-    use crate::handle::android_sdk::init_global_worker;
     use crate::util::cmd::{Args, EngineType, LlamaSplitModeArg, WorkerType};
 
     println!("🔥 GPUFabric C API: Starting remote worker");
@@ -3874,13 +4063,13 @@ pub extern "C" fn start_remote_worker(
         stream_chunk_bytes: 256,
     };
 
+
     #[cfg(target_os = "android")]
     {
-        // Initialize global worker using Android-native login
+        // Keep existing Android behavior for now.
         println!("🚀 C API: Initializing global worker with Android-native login...");
         std::io::stdout().flush().unwrap();
 
-        // Use the dedicated Android login module with a simple runtime
         let local_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3891,14 +4080,11 @@ pub extern "C" fn start_remote_worker(
                 server_addr_str,
                 control_port as u16,
                 client_id_str,
-                false, // auto_models from args
+                false,
             )
             .await
         }) {
-            Ok(_) => {
-                println!("✅ C API: Android worker started and logged in successfully");
-                0
-            }
+            Ok(_) => 0,
             Err(e) => {
                 eprintln!("❌ C API: Failed to start and login Android worker: {}", e);
                 -1
@@ -3906,38 +4092,42 @@ pub extern "C" fn start_remote_worker(
         }
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
-        // Initialize global worker in Tokio runtime for other platforms
-        println!("🚀 C API: Initializing global worker...");
-        println!("📍 DEBUG: About to access TOKIO_RUNTIME and call block_on...");
-        std::io::stdout().flush().unwrap();
-
-        // Bypass global runtime - create local runtime to avoid Lazy initialization issues
-        println!("🔧 DEBUG: Creating local current_thread runtime...");
-        std::io::stdout().flush().unwrap();
-
+        // iOS: login via cross-platform worker_sdk.
         let local_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("Failed to create local tokio runtime");
 
-        println!("✅ DEBUG: Local runtime created, calling block_on...");
-        std::io::stdout().flush().unwrap();
-
-        match local_runtime
-            .block_on(async { crate::handle::android_sdk::init_global_worker(args).await })
-        {
-            Ok(_) => {
-                println!("✅ C API: Remote worker started successfully");
-                0
-            }
+        match local_runtime.block_on(async {
+            crate::worker_sdk::perform_login(
+                server_addr_str,
+                control_port as u16,
+                client_id_str,
+                args.auto_models,
+            )
+            .await
+        }) {
+            Ok(_) => 0,
             Err(e) => {
-                eprintln!("❌ C API: Failed to start remote worker: {}", e);
+                eprintln!("❌ C API: Failed to login iOS worker: {}", e);
                 -1
             }
         }
     }
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker(
+    _server_addr: *const c_char,
+    _control_port: c_int,
+    _proxy_port: c_int,
+    _worker_type: *const c_char,
+    _client_id: *const c_char,
+) -> c_int {
+    -1
 }
 
 // Global backend initialization flag
@@ -3988,7 +4178,7 @@ fn ensure_backend_initialized() -> c_int {
 /// This function can be called multiple times without stopping the worker.
 /// Inference requests will be briefly paused during the swap but the worker
 /// remains connected and continues processing afterward.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn set_remote_worker_model(model_path: *const c_char) -> c_int {
     use std::sync::atomic::Ordering;
@@ -4088,65 +4278,131 @@ pub extern "C" fn set_remote_worker_model(model_path: *const c_char) -> c_int {
     0 // Success
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn set_remote_worker_model(_model_path: *const c_char) -> c_int {
+    -1
+}
+
 /// Start remote worker background tasks (C API)
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn start_remote_worker_tasks() -> c_int {
-    use crate::handle::android_sdk::start_worker_tasks;
-
     println!("🔥 GPUFabric C API: Starting remote worker background tasks");
 
-    match TOKIO_RUNTIME.block_on(async { crate::handle::android_sdk::start_worker_tasks().await }) {
-        Ok(_) => {
-            println!("✅ C API: Background tasks started successfully");
-            0 as c_int
+    #[cfg(target_os = "android")]
+    {
+        match TOKIO_RUNTIME
+            .block_on(async { crate::handle::android_sdk::start_worker_tasks().await })
+        {
+            Ok(_) => 0 as c_int,
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start background tasks: {}", e);
+                -1 as c_int
+            }
         }
-        Err(e) => {
-            eprintln!("❌ C API: Failed to start background tasks: {}", e);
-            -1 as c_int
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create local tokio runtime");
+
+        match local_runtime
+            .block_on(async { crate::worker_sdk::start_worker_tasks_with_callback_ptr(None).await })
+        {
+            Ok(_) => 0 as c_int,
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start background tasks: {}", e);
+                -1 as c_int
+            }
         }
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks() -> c_int {
+    -1
+}
+
 /// Start remote worker background tasks with callback support (C API)
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
     callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
 ) -> c_int {
-    use crate::handle::android_sdk::start_worker_tasks_with_callback_ptr;
-
     println!("🔥 GPUFabric C API: Starting remote worker background tasks with callback");
 
-    match TOKIO_RUNTIME.block_on(async {
-        crate::handle::android_sdk::start_worker_tasks_with_callback_ptr(callback).await
-    }) {
-        Ok(_) => {
-            println!("✅ C API: Background tasks with callback started successfully");
-            0 as c_int
+    #[cfg(target_os = "android")]
+    {
+        match TOKIO_RUNTIME.block_on(async {
+            crate::handle::android_sdk::start_worker_tasks_with_callback_ptr(callback).await
+        }) {
+            Ok(_) => 0 as c_int,
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start background tasks with callback: {}", e);
+                -1 as c_int
+            }
         }
-        Err(e) => {
-            eprintln!(
-                "❌ C API: Failed to start background tasks with callback: {}",
-                e
-            );
-            -1 as c_int
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create local tokio runtime");
+
+        match local_runtime
+            .block_on(async { crate::worker_sdk::start_worker_tasks_with_callback_ptr(callback).await })
+        {
+            Ok(_) => 0 as c_int,
+            Err(e) => {
+                eprintln!("❌ C API: Failed to start background tasks with callback: {}", e);
+                -1 as c_int
+            }
         }
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
+    _callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+) -> c_int {
+    -1
+}
+
 /// Stop remote worker and cleanup (C API)
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn stop_remote_worker() -> c_int {
-    use crate::handle::android_sdk::stop_global_worker;
-
     println!("🔥 GPUFabric C API: Stopping remote worker");
 
-    TOKIO_RUNTIME.block_on(async { crate::handle::android_sdk::stop_global_worker().await });
+    #[cfg(target_os = "android")]
+    {
+        TOKIO_RUNTIME.block_on(async { crate::handle::android_sdk::stop_global_worker().await });
+        0
+    }
 
-    println!("✅ C API: Remote worker stopped");
-    0
+    #[cfg(target_os = "ios")]
+    {
+        let local_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create local tokio runtime");
+        local_runtime.block_on(async { crate::worker_sdk::stop_global_worker().await });
+        0
+    }
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn stop_remote_worker() -> c_int {
+    -1
 }
 
 /// Get remote worker status (C API)
@@ -4161,11 +4417,9 @@ pub extern "C" fn stop_remote_worker() -> c_int {
 ///
 /// # Safety
 /// Caller must ensure `buffer` is valid and can hold `buffer_size` bytes
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: size_t) -> c_int {
-    use crate::handle::android_sdk::get_worker_status;
-
     println!("🔥 GPUFabric C API: Getting remote worker status");
 
     if buffer.is_null() {
@@ -4179,11 +4433,29 @@ pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: siz
     }
 
     // Get status from async function
-    let status = TOKIO_RUNTIME.block_on(async {
-        crate::handle::android_sdk::get_worker_status()
-            .await
-            .unwrap_or_else(|_| "Error".to_string())
-    });
+    let status: String = {
+        #[cfg(target_os = "android")]
+        {
+            TOKIO_RUNTIME.block_on(async {
+                crate::handle::android_sdk::get_worker_status()
+                    .await
+                    .unwrap_or_else(|_| "Error".to_string())
+            })
+        }
+
+        #[cfg(target_os = "ios")]
+        {
+            let local_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create local tokio runtime");
+            local_runtime.block_on(async {
+                crate::worker_sdk::get_worker_status()
+                    .await
+                    .unwrap_or_else(|_| "Error".to_string())
+            })
+        }
+    };
 
     println!("📊 C API: Status: {}", status);
 
@@ -4213,4 +4485,17 @@ pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: siz
 
     println!("✅ C API: Status written to buffer");
     0 as c_int
+}
+
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn get_remote_worker_status(buffer: *mut c_char, buffer_size: size_t) -> c_int {
+    if buffer.is_null() || buffer_size == 0 {
+        return -1;
+    }
+
+    unsafe {
+        *buffer = 0;
+    }
+    -1
 }
