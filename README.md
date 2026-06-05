@@ -112,7 +112,7 @@ cargo run --release --bin gpuf-s -- \
   --proxy-port 17001 \
   --public-port 18080 \
   --api-port 18081 \
-  --database-url "postgres://postgres:password@localhost:5432/GPUFabric" \
+  --database-url "<DATABASE_URL>" \
   --redis-url "redis://127.0.0.1:6379" \
   --bootstrap-server "localhost:9092" \
   --api-key "your-secure-api-key" \
@@ -160,7 +160,7 @@ docker compose -f docker/gpuf_s_compose.yaml up -d
 
 ```bash
 cargo run --release --bin heartbeat_consumer -- \
-  --database-url "postgres://postgres:password@localhost:5432/GPUFabric" \
+  --database-url "<DATABASE_URL>" \
   --bootstrap-server "localhost:9092" \
   --batch-size 100 \
   --batch-timeout 5
@@ -225,7 +225,7 @@ The gpuf-s server supports comprehensive configuration via command-line argument
 | `--proxy-port` | u16 | 17001 | Port for client proxy connections |
 | `--public-port` | u16 | 18080 | Port for public user connections |
 | `--api-port` | u16 | 18081 | Port for HTTP API server |
-| `--database-url` | string | `postgres://...` | PostgreSQL connection string |
+| `--database-url` | string | `<DATABASE_URL>` | PostgreSQL connection string |
 | `--redis-url` | string | `redis://127.0.0.1:6379` | Redis connection string |
 | `--bootstrap-server` | string | `localhost:9092` | Kafka broker address |
 | `--api-key` | string | `abc123` | Fallback API key |
@@ -237,7 +237,7 @@ The gpuf-s server supports comprehensive configuration via command-line argument
 You can also configure using environment variables:
 
 ```bash
-export DATABASE_URL="postgres://postgres:password@localhost:5432/GPUFabric"
+export DATABASE_URL="<DATABASE_URL>"
 export REDIS_URL="redis://localhost:6379"
 export API_KEY="your-api-key"
 export RUST_LOG="gpuf-s=info"

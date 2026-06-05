@@ -176,11 +176,11 @@ public static native int startRemoteWorker(
 **参数**:
 | 参数名 | 类型 | 说明 |
 |--------|------|------|
-| `serverAddr` | String | 服务器 IP 地址或主机名<br>例如: `"8.140.251.142"` |
+| `serverAddr` | String | 服务器 IP 地址或主机名<br>例如: `"<GPUF_SERVER_HOST>"` |
 | `controlPort` | int | 控制端口号<br>例如: `17000` |
 | `proxyPort` | int | 代理端口号<br>例如: `17001` |
 | `workerType` | String | 工作器类型<br>可选值: `"TCP"` 或 `"WS"` (WebSocket) |
-| `clientId` | String | 客户端唯一标识符（32位十六进制字符）<br>例如: `"50ef7b5e7b5b4c79991087bb9f62cef1"` |
+| `clientId` | String | 客户端唯一标识符（32位十六进制字符）<br>例如: `"<CLIENT_ID_HEX_32>"` |
 
 **返回值**:
 - `0`: 成功连接到服务器
@@ -194,11 +194,11 @@ public static native int startRemoteWorker(
 **示例**:
 ```java
 int result = RemoteWorker.startRemoteWorker(
-    "8.140.251.142",  // 服务器地址
+    "<GPUF_SERVER_HOST>",  // 服务器地址
     17000,            // 控制端口
     17001,            // 代理端口
     "TCP",            // 连接类型
-    "50ef7b5e7b5b4c79991087bb9f62cef1"  // 客户端ID
+    "<CLIENT_ID_HEX_32>"  // 客户端ID
 );
 if (result == 0) {
     Log.i("GPUFabric", "远程工作器启动成功");
@@ -376,11 +376,11 @@ if (result != 0) {
 
 // 3. 启动远程工作器
 result = RemoteWorker.startRemoteWorker(
-    "8.140.251.142",
+    "<GPUF_SERVER_HOST>",
     17000,
     17001,
     "TCP",
-    "50ef7b5e7b5b4c79991087bb9f62cef1"
+    "<CLIENT_ID_HEX_32>"
 );
 if (result != 0) {
     Log.e("GPUFabric", "工作器启动失败");

@@ -585,10 +585,14 @@ pub async fn get_client_stats(
 
 #[tokio::test]
 async fn test_device_daily_stats() {
-    //let pool = PgPool::connect("postgres://postgres:postgres@localhost:5432/postgres").unwrap();
-    let pool = PgPool::connect("postgres://postgres:postgres@localhost:5432/postgres")
-        .await
-        .unwrap();
+    let database_url = match std::env::var("GPUF_TEST_DATABASE_URL") {
+        Ok(value) if !value.is_empty() => value,
+        _ => {
+            eprintln!("skipping test_device_daily_stats: GPUF_TEST_DATABASE_URL is not set");
+            return;
+        }
+    };
+    let pool = PgPool::connect(&database_url).await.unwrap();
     let client_id = [0; 16];
     let device_index = 1;
     let device_info = common::DevicesInfo {

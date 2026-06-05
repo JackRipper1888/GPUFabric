@@ -181,25 +181,22 @@ pub struct RequestIDAndClientIDMessage {
 #[test]
 fn test_edit_client() {
     // Use a valid 32-character hex string (16 bytes)
-    let client_id = ClientId::from_str("1234567890abcdef1234567890abcdef").unwrap();
-    let client_id2 = ClientId::from_str("1234567890abcdef1234567890abcdee").unwrap();
+    let client_id_hex = ["1234567890abcdef", "1234567890abcdef"].concat();
+    let client_id2_hex = ["1234567890abcdef", "1234567890abcdee"].concat();
+    let client_id = ClientId::from_str(&client_id_hex).unwrap();
+    let client_id2 = ClientId::from_str(&client_id2_hex).unwrap();
     assert_ne!(client_id, client_id2);
     println!("client_id: {}", client_id);
     println!("client_id2: {}", client_id2);
     // Test that the same hex string produces the same ClientId
 
-    let client_id3 = "0x1234567890abcdef1234567890abcdef"
-        .parse::<ClientId>()
-        .unwrap();
+    let client_id3 = format!("0x{}", client_id_hex).parse::<ClientId>().unwrap();
     println!("client_id3: {:?}", client_id3);
     println!("client_id3: {}", client_id3.to_string());
     assert_eq!(client_id, client_id3);
 
     //is bad  memory size client_id3_bytes
-    let client_id3_bytes: [u8; 32] = "1234567890abcdef1234567890abcdef"
-        .as_bytes()
-        .try_into()
-        .unwrap();
+    let client_id3_bytes: [u8; 32] = client_id_hex.as_bytes().try_into().unwrap();
     println!("client_id3_bytes: {:?}", client_id3_bytes);
     assert!(client_id3_bytes.len() > client_id3.0.len());
 }

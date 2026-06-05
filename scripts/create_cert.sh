@@ -20,7 +20,7 @@ subjectAltName = @alt_names
 DNS.1 = localhost
 DNS.2 = agent.gpunexus.com
 IP.1 = 127.0.0.1
-IP.3 = 8.140.251.142
+IP.3 = 192.0.2.10
 IP.4 = 192.168.110.100
 EOL
 

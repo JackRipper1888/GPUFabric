@@ -15,10 +15,7 @@ pub struct Args {
     #[arg(long, default_value = "5")]
     pub batch_timeout: u64,
 
-    #[arg(
-        long,
-        default_value = "postgres://username:password@localhost/database"
-    )]
+    #[arg(long, env = "DATABASE_URL")]
     pub database_url: String,
 
     #[arg(long, default_value = "localhost:9092")]

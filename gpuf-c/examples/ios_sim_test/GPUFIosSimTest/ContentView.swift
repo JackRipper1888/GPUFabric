@@ -69,7 +69,7 @@ private func startRemoteWorker(modelPath: String?) -> String {
     let controlPort: Int32 = 17000
     let proxyPort: Int32 = 17001
     let workerType = "TCP"
-    let clientId = "00000000000000000000000000000000"
+    let clientId = String(repeating: "0", count: 32)
 
     remoteWorkerLogger.info("Starting remote worker with clientId: \(clientId, privacy: .public)")
 

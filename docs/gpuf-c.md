@@ -26,7 +26,7 @@ control_port = 17000
 proxy_port = 17001
 
 [client]
-client_id = "6e1131b4b9cc454aa6ce3294ab860b2d"
+client_id = "<CLIENT_ID_HEX_32>"
 local_addr = "127.0.0.1"
 local_port = 11434
 worker_type = "tcp"  # or "ws" for WebSocket

@@ -23,10 +23,7 @@ pub struct Args {
     pub api_key: String,
 
     /// Database URL for PostgreSQL connection
-    #[arg(
-        long,
-        default_value = "postgres://username:password@localhost/database"
-    )]
+    #[arg(long, env = "DATABASE_URL")]
     pub database_url: String,
 
     /// Path to the certificate chain file

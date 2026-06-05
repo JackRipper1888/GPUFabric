@@ -9,9 +9,9 @@ services:
     image: postgres:15-alpine
     container_name: gpuf-postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: GPUFabric
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-GPUFabric}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5432:5432"
@@ -21,7 +21,7 @@ services:
     networks:
       - frpx-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -166,14 +166,13 @@ services:
       - ./key.pem:/app/key.pem:ro
       # - ../config:/app/config  # Currently unused, all configs via CLI args
     environment:
-      DATABASE_URL: postgres://postgres:password@postgres:5432/GPUFabric
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for gpuf-s}
       REDIS_URL: redis://redis:6379
       RUST_LOG: gpuf-s=info
     command: >
       --control-port 17000
       --proxy-port 17001
       --public-port 18080
-      --database-url postgres://postgres:password@postgres:5432/GPUFabric
       --redis-url redis://redis:6379
       --bootstrap-server kafka:29092
       --api-key abc123
@@ -204,12 +203,11 @@ services:
     ports:
       - "18081:18081"  # API port
     environment:
-      DATABASE_URL: postgres://postgres:password@postgres:5432/GPUFabric
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for api-server}
       REDIS_URL: redis://redis:6379
       RUST_LOG: api_server=info
     command: >
       --port 18081
-      --database-url postgres://postgres:password@postgres:5432/GPUFabric
       --redis-url redis://redis:6379
     networks:
       - frpx-net
@@ -237,12 +235,11 @@ services:
       kafka-init:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgres://postgres:password@postgres:5432/GPUFabric
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for heartbeat-consumer}
       RUST_LOG: heartbeat_consumer=info
     command: >
       --batch-size 100
       --batch-timeout 5
-      --database-url postgres://postgres:password@postgres:5432/GPUFabric
       --bootstrap-server kafka:29092
     networks:
       - frpx-net

@@ -31,6 +31,15 @@ void worker_status_callback(const char* message, void* user_data) {
 int main() {
     printf("🔥 GPUFabric Android C API Test (with Callback Support)\n");
     printf("========================================================\n");
+    const char* server_addr = getenv("GPUF_SERVER_ADDR");
+    if (server_addr == NULL || server_addr[0] == '\0') {
+        server_addr = "127.0.0.1";
+    }
+    const char* client_id = getenv("GPUF_CLIENT_ID");
+    if (client_id == NULL || client_id[0] == '\0') {
+        printf("❌ GPUF_CLIENT_ID must be set to a 32-character hex client id\n");
+        return -1;
+    }
     
     // Test 1: Set remote worker model (new function)
     printf("\n🤖 Test 1: Loading initial model...\n");
@@ -51,11 +60,11 @@ int main() {
     // Test 2: Start remote worker
     printf("\n📡 Test 2: Starting remote worker...\n");
     result = start_remote_worker(
-        "8.140.251.142",  // server_addr (remote server in China)
+        server_addr,   // server_addr
         17000,        // control_port
         17001,        // proxy_port
         "TCP",        // worker_type
-        "50ef7b5e7b5b4c79991087bb9f62cef1"  // client_id (32 hex chars)
+        client_id      // client_id (32 hex chars)
     );
     
     if (result == 0) {
@@ -134,7 +143,7 @@ int main() {
     // Test 7: Continuous monitoring for inference requests
     printf("\n🔍 Test 7: Continuous monitoring for remote inference requests...\n");
     printf("📡 Android device is now ready to receive inference tasks!\n");
-    printf("🌐 Send requests to: http://8.140.251.142:8081/v1/completions\n");
+    printf("🌐 Send requests to: http://127.0.0.1:8081/v1/completions\n");
     printf("⏱️  Monitoring for 1 hour (3600 seconds)...\n");
     printf("📊 Status updates every 30 seconds:\n\n");
     
@@ -173,11 +182,11 @@ int main() {
     // Test 2: Start remote worker
     printf("\n📡 Test 2: Starting remote worker...\n");
     result = start_remote_worker(
-        "8.140.251.142",  // server_addr (remote server in China)
+        server_addr,   // server_addr
         17000,        // control_port
         17001,        // proxy_port
         "TCP",        // worker_type
-        "50ef7b5e7b5b4c79991087bb9f62cef1"  // client_id (32 hex chars)
+        client_id      // client_id (32 hex chars)
     );
     
     // 设置新模型
@@ -219,11 +228,11 @@ void test_error_handling() {
     printf("\n🧪 Testing error handling...\n");
     
     // Test null server address
-    int result = start_remote_worker(NULL, 17000, 17001, "TCP", "1234567890abcdef1234567890abcdef");
+    int result = start_remote_worker(NULL, 17000, 17001, "TCP", "GPUF_CLIENT_ID_HEX_32");
     handle_error("null server address", result);
     
     // Test invalid worker type
-    result = start_remote_worker("127.0.0.1", 17000, 17001, "INVALID", "1234567890abcdef1234567890abcdef");
+    result = start_remote_worker("127.0.0.1", 17000, 17001, "INVALID", "GPUF_CLIENT_ID_HEX_32");
     handle_error("invalid worker type", result);
     
     // Test null buffer for status

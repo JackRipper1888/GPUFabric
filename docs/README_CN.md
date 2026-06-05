@@ -126,7 +126,7 @@ cargo run --release --bin gpuf-s -- \
   --proxy-port 17001 \
   --public-port 18080 \
   --api-port 18081 \
-  --database-url "postgres://postgres:password@localhost:5432/GPUFabric" \
+  --database-url "<DATABASE_URL>" \
   --redis-url "redis://127.0.0.1:6379" \
   --bootstrap-server "localhost:9092" \
   --api-key "your-secure-api-key" \
@@ -180,7 +180,7 @@ docker compose -f docker/gpuf_s_compose.yaml up -d
 
 ```bash
 cargo run --release --bin heartbeat_consumer -- \
-  --database-url "postgres://postgres:password@localhost:5432/GPUFabric" \
+  --database-url "<DATABASE_URL>" \
   --bootstrap-server "localhost:9092" \
   --batch-size 100 \
   --batch-timeout 5
@@ -216,7 +216,7 @@ gpuf-s 支持通过命令行参数进行完整配置：
 | `--proxy-port` | u16 | 17001 | 客户端代理连接端口 |
 | `--public-port` | u16 | 18080 | 面向外部用户的访问端口 |
 | `--api-port` | u16 | 18081 | HTTP API 端口 |
-| `--database-url` | string | `postgres://...` | PostgreSQL 连接串 |
+| `--database-url` | string | `<DATABASE_URL>` | PostgreSQL 连接串 |
 | `--redis-url` | string | `redis://127.0.0.1:6379` | Redis 连接串 |
 | `--bootstrap-server` | string | `localhost:9092` | Kafka Broker 地址 |
 | `--api-key` | string | `abc123` | 兜底 API Key |
@@ -228,7 +228,7 @@ gpuf-s 支持通过命令行参数进行完整配置：
 你也可以使用环境变量进行配置：
 
 ```bash
-export DATABASE_URL="postgres://postgres:password@localhost:5432/GPUFabric"
+export DATABASE_URL="<DATABASE_URL>"
 export REDIS_URL="redis://localhost:6379"
 export API_KEY="your-api-key"
 export RUST_LOG="gpuf-s=info"
