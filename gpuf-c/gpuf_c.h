@@ -643,6 +643,8 @@ int start_remote_worker_tasks(void);
  */
 int start_remote_worker_tasks_with_callback_ptr(void (*callback)(const char*, void*));
 
+int gpuf_register_remote_worker_callback(void (*callback)(const char*, void*), void *user_data);
+
 /**
  * Stop remote worker and cleanup (C API)
  */

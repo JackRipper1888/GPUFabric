@@ -4296,6 +4296,15 @@ pub extern "C" fn start_remote_worker_tasks_with_callback_ptr(
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn gpuf_register_remote_worker_callback(
+    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    user_data: *mut c_void,
+) -> c_int {
+    crate::worker_sdk::register_remote_worker_callback(callback, user_data)
+}
+
 /// Stop remote worker and cleanup (C API)
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[no_mangle]

@@ -48,18 +48,19 @@ async fn main() -> Result<()> {
     let _server_state4 = Arc::clone(&server_state);
 
     // Start inference gateway on port 8081
+    let api_port = args.api_port;
     let inference_gateway = Arc::new(inference::InferenceGateway::new(
         server_state.inference_scheduler.clone(),
         server_state.db_pool.clone(),
         server_state.producer.clone(),
     ));
     let inference_gateway_task = tokio::spawn(async move {
-        info!("Starting Inference Gateway on port 8081...");
-        if let Err(e) = inference_gateway.run(8081).await {
+        info!("Starting Inference Gateway on port {}...", api_port);
+        if let Err(e) = inference_gateway.run(api_port).await {
             error!("Inference gateway failed: {}", e);
         }
     });
-    info!("Inference Gateway spawned and will start on port 8081");
+    info!("Inference Gateway spawned and will start on port {}", api_port);
 
     tokio::spawn(async move {
         #[cfg(target_os = "linux")]
@@ -81,8 +82,10 @@ async fn main() -> Result<()> {
 
         #[cfg(not(target_os = "linux"))]
         {
-            // On Windows, we'll use Ctrl-C handling through tokio's default signal handling
-            info!("Running on Windows - signal handling through default mechanisms");
+            info!("Running on non-Linux - waiting for Ctrl-C");
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                error!("Failed to listen for Ctrl-C: {}", e);
+            }
         }
 
         // Send shutdown signal

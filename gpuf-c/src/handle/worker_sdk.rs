@@ -6,6 +6,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const CURRENT_VERSION: u32 = 1;
+pub type WorkerStatusCallback = extern "C" fn(*const c_char, *mut c_void);
+
+#[derive(Clone, Copy)]
+pub struct WorkerCallback {
+    callback: WorkerStatusCallback,
+    user_data: usize,
+}
+
+impl WorkerCallback {
+    fn emit(self, msg: &str) {
+        let Ok(cmsg) = std::ffi::CString::new(msg) else { return };
+        (self.callback)(cmsg.as_ptr(), self.user_data as *mut c_void);
+    }
+}
+
+static WORKER_REGISTERED_CALLBACK: OnceLock<Mutex<Option<WorkerCallback>>> = OnceLock::new();
 
 fn client_id_to_hex(client_id: [u8; 16]) -> String {
     hex::encode(client_id)
@@ -26,12 +42,11 @@ fn derive_model_id_from_path(model_path: &str) -> String {
 }
 
 fn emit_callback(
-    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    callback: Option<WorkerCallback>,
     msg: &str,
 ) {
     let Some(cb) = callback else { return };
-    let Ok(cmsg) = std::ffi::CString::new(msg) else { return };
-    unsafe { cb(cmsg.as_ptr(), std::ptr::null_mut()) };
+    cb.emit(msg);
 }
 
 static WORKER_TCP_STREAM: OnceLock<Mutex<Option<Arc<Mutex<std::net::TcpStream>>>>> = OnceLock::new();
@@ -40,6 +55,28 @@ static WORKER_CONTROL_PORT: OnceLock<Mutex<Option<u16>>> = OnceLock::new();
 static WORKER_CLIENT_ID: OnceLock<Mutex<Option<[u8; 16]>>> = OnceLock::new();
 static WORKER_STOP_SIGNAL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static WORKER_CANCELLED_TASK: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+pub fn register_remote_worker_callback(
+    callback: Option<WorkerStatusCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    let slot = WORKER_REGISTERED_CALLBACK.get_or_init(|| Mutex::new(None));
+    let Ok(mut guard) = slot.lock() else {
+        return -1;
+    };
+
+    *guard = callback.map(|cb| WorkerCallback {
+        callback: cb,
+        user_data: user_data as usize,
+    });
+    0
+}
+
+fn registered_remote_worker_callback() -> Option<WorkerCallback> {
+    WORKER_REGISTERED_CALLBACK
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|guard| *guard))
+}
 
 fn os_type() -> OsType {
     #[cfg(target_os = "ios")]
@@ -152,8 +189,14 @@ pub async fn perform_login(
 }
 
 pub async fn start_worker_tasks_with_callback_ptr(
-    callback: Option<extern "C" fn(*const c_char, *mut c_void)>,
+    callback: Option<WorkerStatusCallback>,
 ) -> Result<()> {
+    let callback = callback
+        .map(|cb| WorkerCallback {
+            callback: cb,
+            user_data: 0,
+        })
+        .or_else(registered_remote_worker_callback);
     let tcp_stream = get_tcp_stream().ok_or_else(|| anyhow!("TCP connection not initialized"))?;
 
     let stop_signal = if let Some(existing) = WORKER_STOP_SIGNAL.get() {
@@ -214,9 +257,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
                     Ok(_) => format!("HEARTBEAT - Sent client_id={client_hex}"),
                     Err(_) => format!("HEARTBEAT - Send failed client_id={client_hex}"),
                 };
-                if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                    unsafe { cb(cmsg.as_ptr(), std::ptr::null_mut()) };
-                }
+                cb.emit(&msg);
             }
 
             // Sleep 120s, but check stop signal every 1s so stop is responsive.
@@ -234,7 +275,7 @@ pub async fn start_worker_tasks_with_callback_ptr(
     let server_addr = WORKER_SERVER_ADDR
         .get()
         .and_then(|m| m.lock().ok().and_then(|g| g.clone()))
-        .unwrap_or_else(|| "8.140.251.142:17000".to_string());
+        .unwrap_or_else(|| "127.0.0.1:17000".to_string());
     
     std::thread::spawn(move || {
         let mut consecutive_failures = 0u32;

@@ -92,15 +92,27 @@ IOS_SIM_X64_TARGET="x86_64-apple-ios"
 BUILD_DIR="$PROJECT_ROOT/build_ios"
 DIST_DIR="$BUILD_DIR/dist"
 INCLUDE_DIR="$DIST_DIR/include"
+SDK_LIB_NAME="libgpuf_c_sdk.a"
+PACKAGE_DIR="$BUILD_DIR/package"
+PACKAGE_ROOT="$PACKAGE_DIR/GPUFabric-iOS-SDK"
+PACKAGE_ZIP="$PACKAGE_DIR/GPUFabric-iOS-SDK.zip"
 
 mkdir -p "$BUILD_DIR" "$DIST_DIR" "$INCLUDE_DIR"
 
-if [ -f "$PROJECT_ROOT/gpuf_c_minimal.h" ]; then
-    cp "$PROJECT_ROOT/gpuf_c_minimal.h" "$INCLUDE_DIR/"
-fi
-if [ -f "$PROJECT_ROOT/gpuf_c.h" ]; then
-    cp "$PROJECT_ROOT/gpuf_c.h" "$INCLUDE_DIR/"
-fi
+copy_ios_headers() {
+    mkdir -p "$INCLUDE_DIR"
+    if [ -f "$PROJECT_ROOT/gpuf_c_minimal.h" ]; then
+        cp "$PROJECT_ROOT/gpuf_c_minimal.h" "$INCLUDE_DIR/"
+    fi
+    if [ -f "$PROJECT_ROOT/gpuf_c_ios.h" ]; then
+        cp "$PROJECT_ROOT/gpuf_c_ios.h" "$INCLUDE_DIR/gpuf_c.h"
+        cp "$PROJECT_ROOT/gpuf_c_ios.h" "$INCLUDE_DIR/"
+    elif [ -f "$PROJECT_ROOT/gpuf_c.h" ]; then
+        cp "$PROJECT_ROOT/gpuf_c.h" "$INCLUDE_DIR/"
+    fi
+}
+
+copy_ios_headers
 
 echo "🦀 Ensuring Rust targets are installed..."
 rustup target add "$IOS_DEVICE_TARGET" >/dev/null 2>&1 || true
@@ -210,8 +222,12 @@ merge_one() {
 LLAMA_DEVICE_DIR="$WORKSPACE_ROOT/target/llama-ios/$IOS_DEVICE_TARGET"
 LLAMA_SIM_ARM64_DIR="$WORKSPACE_ROOT/target/llama-ios/$IOS_SIM_ARM64_TARGET"
 
-MERGED_DEVICE_LIB="$DIST_DIR/libgpuf_c_device.a"
-MERGED_SIM_LIB="$DIST_DIR/libgpuf_c_simulator_merged.a"
+DEVICE_SLICE_DIR="$DIST_DIR/ios-arm64"
+SIM_SLICE_DIR="$DIST_DIR/ios-arm64-simulator"
+mkdir -p "$DEVICE_SLICE_DIR" "$SIM_SLICE_DIR"
+
+MERGED_DEVICE_LIB="$DEVICE_SLICE_DIR/$SDK_LIB_NAME"
+MERGED_SIM_LIB="$SIM_SLICE_DIR/$SDK_LIB_NAME"
 
 merge_one "$DEVICE_LIB" "$LLAMA_DEVICE_DIR" "$MERGED_DEVICE_LIB"
 merge_one "$SIM_UNIVERSAL_LIB" "$LLAMA_SIM_ARM64_DIR" "$MERGED_SIM_LIB"
@@ -219,12 +235,31 @@ merge_one "$SIM_UNIVERSAL_LIB" "$LLAMA_SIM_ARM64_DIR" "$MERGED_SIM_LIB"
 XCFRAMEWORK_OUT="$DIST_DIR/gpuf_c_sdk.xcframework"
 rm -rf "$XCFRAMEWORK_OUT"
 
+copy_ios_headers
+
 echo "📦 Creating XCFramework..."
 xcodebuild -create-xcframework \
     -library "$MERGED_DEVICE_LIB" -headers "$INCLUDE_DIR" \
     -library "$MERGED_SIM_LIB" -headers "$INCLUDE_DIR" \
     -output "$XCFRAMEWORK_OUT"
 
+echo "📦 Creating SDK package..."
+rm -rf "$PACKAGE_ROOT" "$PACKAGE_ZIP"
+mkdir -p "$PACKAGE_ROOT"
+cp -R "$XCFRAMEWORK_OUT" "$PACKAGE_ROOT/"
+
+if [ -f "$PROJECT_ROOT/docs/IOS_SDK_INTEGRATION.md" ]; then
+    cp "$PROJECT_ROOT/docs/IOS_SDK_INTEGRATION.md" "$PACKAGE_ROOT/IOS_SDK_INTEGRATION.md"
+    cp "$PROJECT_ROOT/docs/IOS_SDK_INTEGRATION.md" "$PACKAGE_ROOT/IOS_INTEGRATION.md"
+fi
+
+(
+    cd "$PACKAGE_DIR"
+    zip -qry "$(basename "$PACKAGE_ZIP")" "$(basename "$PACKAGE_ROOT")"
+)
+
 echo "✅ iOS SDK build completed!"
 echo "📦 XCFramework: $XCFRAMEWORK_OUT"
 echo "📁 Headers: $INCLUDE_DIR"
+echo "📦 Package: $PACKAGE_ROOT"
+echo "🗜️  Zip: $PACKAGE_ZIP"

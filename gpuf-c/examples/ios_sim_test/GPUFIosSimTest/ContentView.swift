@@ -51,36 +51,37 @@ private func startRemoteWorkerOnce() -> String {
 
     if let documentsModelPath, FileManager.default.fileExists(atPath: documentsModelPath) {
         remoteWorkerLogger.info("Using model from Documents: \(documentsModelPath, privacy: .public)")
-        return startRemoteWorkerWithModelPath(documentsModelPath)
+        return startRemoteWorker(modelPath: documentsModelPath)
     }
 
-    guard let modelPath = Bundle.main.path(forResource: "Llama-3.2-1B-Instruct-Q8_0", ofType: "gguf") else {
-        remoteWorkerLogger.error("Model not found in bundle or Documents")
-        let docsHint = documentsModelPath ?? "<Documents>"
-        return "❌ Model not found. Add \(modelFileName) to Copy Bundle Resources, or push it to: \n\(docsHint)"
+    if let modelPath = Bundle.main.path(forResource: "Llama-3.2-1B-Instruct-Q8_0", ofType: "gguf") {
+        remoteWorkerLogger.info("Using model from bundle: \(modelPath, privacy: .public)")
+        return startRemoteWorker(modelPath: modelPath)
     }
 
-    remoteWorkerLogger.info("Using model from bundle: \(modelPath, privacy: .public)")
-    return startRemoteWorkerWithModelPath(modelPath)
+    let docsHint = documentsModelPath ?? "<Documents>"
+    remoteWorkerLogger.warning("Model not found, testing gpuf-s connection without local model. Documents path: \(docsHint, privacy: .public)")
+    return startRemoteWorker(modelPath: nil)
 }
 
-private func startRemoteWorkerWithModelPath(_ modelPath: String) -> String {
-    remoteWorkerLogger.info("Model path: \(modelPath, privacy: .public)")
-
-    let serverAddr = "8.140.251.142"
+private func startRemoteWorker(modelPath: String?) -> String {
+    let serverAddr = "127.0.0.1"
     let controlPort: Int32 = 17000
     let proxyPort: Int32 = 17001
     let workerType = "TCP"
-    let clientId = "e64dcb400f9c41e68abf38e3105b935b"
+    let clientId = "00000000000000000000000000000000"
 
     remoteWorkerLogger.info("Starting remote worker with clientId: \(clientId, privacy: .public)")
 
-    let modelRc = modelPath.withCString { cstr in
-        set_remote_worker_model(cstr)
-    }
-    if modelRc != 0 {
-        remoteWorkerLogger.error("set_remote_worker_model failed: \(modelRc)")
-        return "❌ set_remote_worker_model failed: \(modelRc)"
+    if let modelPath {
+        remoteWorkerLogger.info("Model path: \(modelPath, privacy: .public)")
+        let modelRc = modelPath.withCString { cstr in
+            set_remote_worker_model(cstr)
+        }
+        if modelRc != 0 {
+            remoteWorkerLogger.error("set_remote_worker_model failed: \(modelRc)")
+            return "❌ set_remote_worker_model failed: \(modelRc)"
+        }
     }
 
     let startRc = serverAddr.withCString { s in
@@ -96,16 +97,21 @@ private func startRemoteWorkerWithModelPath(_ modelPath: String) -> String {
     }
 
     let cb: (@convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void) = remoteWorkerCallback
-    let cbPtr: Int64 = unsafeBitCast(cb, to: Int64.self)
-    let tasksRc = start_remote_worker_tasks_with_callback_ptr(cbPtr)
+    let registerRc = gpuf_register_remote_worker_callback(cb, nil)
+    if registerRc != 0 {
+        remoteWorkerLogger.error("gpuf_register_remote_worker_callback failed: \(registerRc)")
+        return "❌ gpuf_register_remote_worker_callback failed: \(registerRc)"
+    }
+
+    let tasksRc = start_remote_worker_tasks()
     if tasksRc != 0 {
-        remoteWorkerLogger.error("start_remote_worker_tasks_with_callback_ptr failed: \(tasksRc)")
-        return "❌ start_remote_worker_tasks_with_callback_ptr failed: \(tasksRc)"
+        remoteWorkerLogger.error("start_remote_worker_tasks failed: \(tasksRc)")
+        return "❌ start_remote_worker_tasks failed: \(tasksRc)"
     }
 
     var buffer = [CChar](repeating: 0, count: 512)
     let statusRc = buffer.withUnsafeMutableBufferPointer { buf in
-        get_remote_worker_status(buf.baseAddress, Int32(buf.count))
+        get_remote_worker_status(buf.baseAddress, buf.count)
     }
     if statusRc == 0 {
         let statusText = String(cString: buffer)
@@ -115,4 +121,3 @@ private func startRemoteWorkerWithModelPath(_ modelPath: String) -> String {
 
     return "✅ Remote worker started"
 }
-
