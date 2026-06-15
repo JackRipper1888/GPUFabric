@@ -174,10 +174,11 @@ cargo run --release --bin heartbeat_consumer -- \
 
 ```bash
 # Test with API key
-curl -H "Authorization: Bearer your-api-key" http://localhost:18080
+AUTH_HEADER="Authorization: Bearer ${GPUF_API_KEY}"
+curl -H "$AUTH_HEADER" http://localhost:18080
 
 # Test Ollama integration
-curl -H "Authorization: Bearer your-api-key" \
+curl -H "$AUTH_HEADER" \
   -H "Content-Type: application/json" \
   http://localhost:18080/v1/chat/completions \
   -d '{
@@ -186,7 +187,7 @@ curl -H "Authorization: Bearer your-api-key" \
   }'
 
 # Test streaming (SSE)
-curl -N -H "Authorization: Bearer your-api-key" \
+curl -N -H "$AUTH_HEADER" \
   -H "Content-Type: application/json" \
   http://localhost:18080/v1/chat/completions \
   -d '{
@@ -247,7 +248,7 @@ You can also configure using environment variables:
 ```bash
 export DATABASE_URL="postgres://<db-user>:<db-password>@localhost:5432/<db-name>"
 export REDIS_URL="redis://localhost:6379"
-export API_KEY="your-api-key"
+export API_KEY="replace-with-a-local-api-key"
 export RUST_LOG="gpuf-s=info"
 ```
 

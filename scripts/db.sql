@@ -334,11 +334,11 @@ BEGIN
         IF EXISTS (SELECT 1 FROM public.users WHERE id = 2)
            AND NOT EXISTS (
                SELECT 1 FROM tokens
-               WHERE key = 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4'
+               WHERE key = 'CHANGE_ME_TEST_GATEWAY_TOKEN_48_CHARACTERS______'
            )
         THEN
             INSERT INTO tokens (user_id, key, status, expired_time, deleted_at, access_level)
-            VALUES (2, 'HSSb0OFrZon7wapKUduWqSxqpELMI62eTPyW017QanhnMyy4', 1, -1, NULL, 1);
+            VALUES (2, 'CHANGE_ME_TEST_GATEWAY_TOKEN_48_CHARACTERS______', 1, -1, NULL, 1);
         END IF;
     END IF;
 END $$;
