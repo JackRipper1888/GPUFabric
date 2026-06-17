@@ -213,6 +213,8 @@ pub enum CommandV1 {
     // Inference task from server to client
     InferenceTask {
         task_id: String,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
         prompt: String,
         max_tokens: u32,
         temperature: f32,
@@ -226,6 +228,8 @@ pub enum CommandV1 {
     // Chat inference task from server to client
     ChatInferenceTask {
         task_id: String,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
         model: String,
         messages: Vec<ChatMessage>,
         max_tokens: u32,
@@ -904,5 +908,76 @@ async fn test_command_serialization_roundtrip() {
             }
         }
         _ => panic!("Command version mismatch"),
+    }
+}
+
+#[tokio::test]
+async fn test_inference_task_preserves_session_fields() {
+    let inference_cmd = Command::V1(CommandV1::InferenceTask {
+        task_id: "task-1".to_string(),
+        session_id: Some("session-1234567890".to_string()),
+        cache_policy: Some("reset".to_string()),
+        prompt: "hello".to_string(),
+        max_tokens: 16,
+        temperature: 0.2,
+        top_k: 8,
+        top_p: 0.9,
+        repeat_penalty: 1.05,
+        repeat_last_n: 32,
+        min_keep: 1,
+    });
+
+    let chat_cmd = Command::V1(CommandV1::ChatInferenceTask {
+        task_id: "task-2".to_string(),
+        session_id: Some("session-2234567890".to_string()),
+        cache_policy: Some("bypass".to_string()),
+        model: "gpuf".to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "ping".to_string(),
+        }],
+        max_tokens: 32,
+        temperature: 0.3,
+        top_k: 16,
+        top_p: 0.95,
+        repeat_penalty: 1.0,
+        repeat_last_n: 8,
+        min_keep: 1,
+    });
+
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+
+    let encoded_inference = bincode::encode_to_vec(&inference_cmd, config).unwrap();
+    let (decoded_inference, _) =
+        bincode::decode_from_slice::<Command, _>(&encoded_inference, config).unwrap();
+
+    let encoded_chat = bincode::encode_to_vec(&chat_cmd, config).unwrap();
+    let (decoded_chat, _) =
+        bincode::decode_from_slice::<Command, _>(&encoded_chat, config).unwrap();
+
+    match decoded_inference {
+        Command::V1(CommandV1::InferenceTask {
+            session_id,
+            cache_policy,
+            ..
+        }) => {
+            assert_eq!(session_id.as_deref(), Some("session-1234567890"));
+            assert_eq!(cache_policy.as_deref(), Some("reset"));
+        }
+        _ => panic!("unexpected inference variant"),
+    }
+
+    match decoded_chat {
+        Command::V1(CommandV1::ChatInferenceTask {
+            session_id,
+            cache_policy,
+            ..
+        }) => {
+            assert_eq!(session_id.as_deref(), Some("session-2234567890"));
+            assert_eq!(cache_policy.as_deref(), Some("bypass"));
+        }
+        _ => panic!("unexpected chat variant"),
     }
 }

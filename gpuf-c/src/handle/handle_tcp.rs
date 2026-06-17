@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(not(target_os = "android"))]
 use crate::handle::handle_udp::{P2PReplayWindow, P2PUdpReassemblyState};
+use crate::handle::session_cache::record_worker_cache_decision;
 // LLM engine is not available in lightweight Android version
 #[cfg(not(target_os = "android"))]
 use crate::llm_engine::{self, llama_engine::LlamaEngine};
@@ -509,6 +510,8 @@ impl ClientWorker {
         repeat_penalty: f32,
         repeat_last_n: i32,
         min_keep: u32,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
     ) -> Result<()> {
         #[cfg(not(target_os = "android"))]
         {
@@ -558,7 +561,13 @@ impl ClientWorker {
             };
 
             let stream = llama
-                .stream_with_cached_model_sampling(&prompt, max_tokens as usize, &sampling)
+                .stream_with_session_state_sampling(
+                    &prompt,
+                    max_tokens as usize,
+                    &sampling,
+                    session_id.as_deref(),
+                    cache_policy.as_deref(),
+                )
                 .await?;
 
             let mut stream = Box::pin(stream);
@@ -715,6 +724,8 @@ impl ClientWorker {
                 repeat_penalty,
                 repeat_last_n,
                 min_keep,
+                session_id,
+                cache_policy,
             );
             Err(anyhow!("Android streaming is not implemented"))
         }
@@ -2563,6 +2574,8 @@ impl WorkerHandle for ClientWorker {
                             }
                             CommandV1::ChatInferenceTask {
                                 task_id,
+                                session_id,
+                                cache_policy,
                                 model: _model,
                                 messages,
                                 max_tokens,
@@ -2578,6 +2591,18 @@ impl WorkerHandle for ClientWorker {
                                     task_id,
                                     messages.len(),
                                     max_tokens
+                                );
+                                let cache_decision = record_worker_cache_decision(
+                                    session_id.as_deref(),
+                                    cache_policy.as_deref(),
+                                );
+                                info!(
+                                    task_id = %task_id,
+                                    session = cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                    policy = cache_decision.policy.as_str(),
+                                    status = cache_decision.status.as_str(),
+                                    kv_reuse_enabled = cache_decision.kv_reuse_enabled,
+                                    "Worker session cache decision for chat task"
                                 );
                                 let prompt = {
                                     #[cfg(target_os = "android")]
@@ -2668,6 +2693,8 @@ impl WorkerHandle for ClientWorker {
                                         repeat_penalty,
                                         repeat_last_n,
                                         min_keep,
+                                        session_id,
+                                        cache_policy,
                                     )
                                     .await;
 
@@ -2689,6 +2716,8 @@ impl WorkerHandle for ClientWorker {
                             }
                             CommandV1::InferenceTask {
                                 task_id,
+                                session_id,
+                                cache_policy,
                                 prompt,
                                 max_tokens,
                                 temperature,
@@ -2701,6 +2730,18 @@ impl WorkerHandle for ClientWorker {
                                 info!(
                                     "Received inference task: {} max_tokens: {}",
                                     task_id, max_tokens
+                                );
+                                let cache_decision = record_worker_cache_decision(
+                                    session_id.as_deref(),
+                                    cache_policy.as_deref(),
+                                );
+                                info!(
+                                    task_id = %task_id,
+                                    session = cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                    policy = cache_decision.policy.as_str(),
+                                    status = cache_decision.status.as_str(),
+                                    kv_reuse_enabled = cache_decision.kv_reuse_enabled,
+                                    "Worker session cache decision for inference task"
                                 );
 
                                 let start_time = std::time::Instant::now();
@@ -2718,6 +2759,8 @@ impl WorkerHandle for ClientWorker {
                                             repeat_penalty,
                                             repeat_last_n,
                                             min_keep,
+                                            session_id,
+                                            cache_policy,
                                         )
                                         .await;
 

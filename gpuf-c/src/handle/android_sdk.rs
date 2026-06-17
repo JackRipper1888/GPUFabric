@@ -5,6 +5,8 @@
 //! and blocking I/O operations.
 
 #[cfg(target_os = "android")]
+use crate::handle::session_cache::record_worker_cache_decision;
+#[cfg(target_os = "android")]
 use crate::util::mobile_control_stream::connect_mobile_control_stream;
 use crate::util::mobile_control_stream::{MobileControlStream, MobileControlTlsConfig};
 #[cfg(target_os = "android")]
@@ -1191,6 +1193,8 @@ pub async fn start_worker_tasks() -> Result<()> {
                             }
                             CommandV1::InferenceTask {
                                 task_id,
+                                session_id,
+                                cache_policy,
                                 prompt,
                                 max_tokens,
                                 temperature,
@@ -1201,6 +1205,18 @@ pub async fn start_worker_tasks() -> Result<()> {
                                 min_keep: _,
                             } => {
                                 println!("🔧 Android: Received inference task: {}", task_id);
+                                let cache_decision = record_worker_cache_decision(
+                                    session_id.as_deref(),
+                                    cache_policy.as_deref(),
+                                );
+                                println!(
+                                    "🔧 Android: Session cache decision: task={} session={} policy={} status={} kv_reuse={}",
+                                    task_id,
+                                    cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                    cache_decision.policy.as_str(),
+                                    cache_decision.status.as_str(),
+                                    cache_decision.kv_reuse_enabled
+                                );
                                 println!("📝 Android: Prompt received ({} bytes)", prompt.len());
                                 println!("⚙️ Android: Parameters: max_tokens={}, temp={}, top_k={}, top_p={}", 
                                                              max_tokens, temperature, top_k, top_p);
@@ -1485,6 +1501,8 @@ pub async fn start_worker_tasks() -> Result<()> {
                             }
                             CommandV1::ChatInferenceTask {
                                 task_id,
+                                session_id,
+                                cache_policy,
                                 model: _,
                                 messages,
                                 max_tokens,
@@ -1496,6 +1514,18 @@ pub async fn start_worker_tasks() -> Result<()> {
                                 min_keep: _,
                             } => {
                                 println!("🔧 Android: Received chat inference task: {}", task_id);
+                                let cache_decision = record_worker_cache_decision(
+                                    session_id.as_deref(),
+                                    cache_policy.as_deref(),
+                                );
+                                println!(
+                                    "🔧 Android: Session cache decision: task={} session={} policy={} status={} kv_reuse={}",
+                                    task_id,
+                                    cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                    cache_decision.policy.as_str(),
+                                    cache_decision.status.as_str(),
+                                    cache_decision.kv_reuse_enabled
+                                );
 
                                 use crate::llama_context;
                                 use crate::{
@@ -2199,6 +2229,8 @@ pub async fn start_worker_tasks_with_callback_ptr(callback: Option<StatusCallbac
                                 }
                                 CommandV1::InferenceTask {
                                     task_id,
+                                    session_id,
+                                    cache_policy,
                                     prompt,
                                     max_tokens,
                                     temperature,
@@ -2209,6 +2241,18 @@ pub async fn start_worker_tasks_with_callback_ptr(callback: Option<StatusCallbac
                                     min_keep: _,
                                 } => {
                                     println!("🔧 Android: Received inference task: {}", task_id);
+                                    let cache_decision = record_worker_cache_decision(
+                                        session_id.as_deref(),
+                                        cache_policy.as_deref(),
+                                    );
+                                    println!(
+                                        "🔧 Android: Session cache decision: task={} session={} policy={} status={} kv_reuse={}",
+                                        task_id,
+                                        cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                        cache_decision.policy.as_str(),
+                                        cache_decision.status.as_str(),
+                                        cache_decision.kv_reuse_enabled
+                                    );
                                     println!(
                                         "📝 Android: Prompt received ({} bytes)",
                                         prompt.len()
@@ -2529,6 +2573,8 @@ pub async fn start_worker_tasks_with_callback_ptr(callback: Option<StatusCallbac
 
                                 CommandV1::ChatInferenceTask {
                                     task_id,
+                                    session_id,
+                                    cache_policy,
                                     model: _,
                                     messages,
                                     max_tokens,
@@ -2542,6 +2588,18 @@ pub async fn start_worker_tasks_with_callback_ptr(callback: Option<StatusCallbac
                                     println!(
                                         "🔧 Android: Received chat inference task: {}",
                                         task_id
+                                    );
+                                    let cache_decision = record_worker_cache_decision(
+                                        session_id.as_deref(),
+                                        cache_policy.as_deref(),
+                                    );
+                                    println!(
+                                        "🔧 Android: Session cache decision: task={} session={} policy={} status={} kv_reuse={}",
+                                        task_id,
+                                        cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                        cache_decision.policy.as_str(),
+                                        cache_decision.status.as_str(),
+                                        cache_decision.kv_reuse_enabled
                                     );
 
                                     invoke_callback(

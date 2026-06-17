@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{sse::Event, sse::Sse, IntoResponse, Response},
     Json,
 };
@@ -16,8 +16,8 @@ use tracing::{debug, error, info};
 use crate::inference::{
     gateway::{AuthContext, InferenceGateway},
     scheduler::{
-        ChatCompletionRequest, ChatCompletionResponse, CompletionRequest, DeviceInfo, ModelInfo,
-        StreamEvent,
+        validate_session_id, CachePolicy, ChatCompletionRequest, ChatCompletionResponse,
+        CompletionRequest, DeviceInfo, ModelInfo, SessionRouteOutcome, SessionRouting, StreamEvent,
     },
 };
 use crate::util::protoc::ClientId;
@@ -175,6 +175,196 @@ impl Drop for StreamCancelGuard {
 
 // OpenAI Compatible API Handlers
 
+fn json_error(status: StatusCode, message: impl Into<String>, error_type: &str) -> Response {
+    let error_response = json!({
+        "error": {
+            "message": message.into(),
+            "type": error_type,
+            "code": status.as_u16()
+        }
+    });
+    (status, Json(error_response)).into_response()
+}
+
+fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_session_id(
+    headers: &HeaderMap,
+    body_session_id: Option<&str>,
+) -> Result<Option<String>, Response> {
+    let header_session_id = optional_header(headers, "x-gpuf-session-id");
+    let body_session_id = body_session_id.map(str::trim).filter(|s| !s.is_empty());
+
+    match (header_session_id, body_session_id) {
+        (None, None) => Ok(None),
+        (Some(raw), None) | (None, Some(raw)) => validate_session_id(raw).map(Some).map_err(|e| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                e.to_string(),
+                "invalid_request_error",
+            )
+        }),
+        (Some(header_raw), Some(body_raw)) => {
+            let header = validate_session_id(header_raw).map_err(|e| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    e.to_string(),
+                    "invalid_request_error",
+                )
+            })?;
+            let body = validate_session_id(body_raw).map_err(|e| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    e.to_string(),
+                    "invalid_request_error",
+                )
+            })?;
+            if header != body {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "x-gpuf-session-id and body session_id must match",
+                    "invalid_request_error",
+                ));
+            }
+            Ok(Some(header))
+        }
+    }
+}
+
+fn parse_cache_policy(
+    headers: &HeaderMap,
+    body_cache_policy: Option<&str>,
+) -> Result<CachePolicy, Response> {
+    let header_policy = optional_header(headers, "x-gpuf-cache-policy");
+    let body_policy = body_cache_policy.map(str::trim).filter(|s| !s.is_empty());
+
+    let parsed = match (header_policy, body_policy) {
+        (None, None) => CachePolicy::Auto,
+        (Some(raw), None) | (None, Some(raw)) => CachePolicy::parse(Some(raw)).map_err(|e| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                e.to_string(),
+                "invalid_request_error",
+            )
+        })?,
+        (Some(header_raw), Some(body_raw)) => {
+            let header = CachePolicy::parse(Some(header_raw)).map_err(|e| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    e.to_string(),
+                    "invalid_request_error",
+                )
+            })?;
+            let body = CachePolicy::parse(Some(body_raw)).map_err(|e| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    e.to_string(),
+                    "invalid_request_error",
+                )
+            })?;
+            if header != body {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "x-gpuf-cache-policy and body cache_policy must match",
+                    "invalid_request_error",
+                ));
+            }
+            header
+        }
+    };
+
+    Ok(parsed)
+}
+
+fn session_routing_for_request(
+    headers: &HeaderMap,
+    body_session_id: Option<&str>,
+    body_cache_policy: Option<&str>,
+    model_id: Option<String>,
+    auth: &AuthContext,
+    explicit_target: bool,
+) -> Result<Option<SessionRouting>, Response> {
+    let session_id = parse_session_id(headers, body_session_id)?;
+    let cache_policy = parse_cache_policy(headers, body_cache_policy)?;
+
+    let Some(session_id) = session_id else {
+        if cache_policy != CachePolicy::Auto {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "cache_policy requires session_id or x-gpuf-session-id",
+                "invalid_request_error",
+            ));
+        }
+        return Ok(None);
+    };
+
+    Ok(Some(SessionRouting::new(
+        session_id,
+        format!("bearer:{}", auth.token_hash),
+        cache_policy,
+        model_id,
+        explicit_target,
+    )))
+}
+
+fn scheduler_error_response(error: &anyhow::Error) -> Response {
+    let message = error.to_string();
+    let status =
+        if message.contains("session owner mismatch") || message.contains("no longer allowed") {
+            StatusCode::FORBIDDEN
+        } else if message.contains("No available Android devices found") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+
+    json_error(status, message, "api_error")
+}
+
+fn apply_route_headers(response: &mut Response, outcome: &SessionRouteOutcome) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&outcome.client_id.to_string()) {
+        headers.insert(HeaderName::from_static("x-gpuf-client-id"), value);
+    }
+    if let Some(session_id) = &outcome.session_id {
+        if let Ok(value) = HeaderValue::from_str(session_id) {
+            headers.insert(HeaderName::from_static("x-gpuf-session-id"), value);
+        }
+    }
+    if let Some(status) = outcome.cache_status {
+        headers.insert(
+            HeaderName::from_static("x-gpuf-cache-status"),
+            HeaderValue::from_static(status.as_str()),
+        );
+    }
+}
+
+fn response_with_route_headers(mut response: Response, outcome: &SessionRouteOutcome) -> Response {
+    apply_route_headers(&mut response, outcome);
+    response
+}
+
+fn apply_completion_route_metadata(
+    response: &mut crate::inference::scheduler::CompletionResponse,
+    outcome: &SessionRouteOutcome,
+) {
+    response.session_id = outcome.session_id.clone();
+    response.client_id = Some(outcome.client_id);
+    response.cache_status = outcome.cache_status;
+}
+
+fn apply_chat_route_metadata(response: &mut ChatCompletionResponse, outcome: &SessionRouteOutcome) {
+    response.session_id = outcome.session_id.clone();
+    response.client_id = Some(outcome.client_id);
+    response.cache_status = outcome.cache_status;
+}
+
 /// Handle text completion requests
 pub async fn handle_completion(
     State(gateway): State<Arc<InferenceGateway>>,
@@ -241,9 +431,21 @@ pub async fn handle_completion(
         }
     }
 
+    let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+    let session_routing = match session_routing_for_request(
+        &headers,
+        request.session_id.as_deref(),
+        request.cache_policy.as_deref(),
+        Some(model_name.clone()),
+        &auth,
+        target_client_id.is_some(),
+    ) {
+        Ok(routing) => routing,
+        Err(response) => return response,
+    };
+
     if request.stream.unwrap_or(false) {
         let max_tokens_effective: u32 = request.max_tokens.unwrap_or(4090);
-        let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
         let created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -256,15 +458,16 @@ pub async fn handle_completion(
 
         let stream_res = gateway
             .scheduler
-            .execute_inference_stream(request, Some(allowed_ids))
+            .execute_inference_stream(request, session_routing.clone(), Some(allowed_ids))
             .await;
 
         match stream_res {
-            Ok((task_id, device_id, rx)) => {
+            Ok((task_id, route_outcome, rx)) => {
                 if auth.access_level.is_metered() {
                     let gateway = gateway.clone();
                     let request_id = request_id.clone();
                     let access_level = auth.access_level;
+                    let device_id = route_outcome.client_id;
                     tokio::spawn(async move {
                         if let Err(e) = gateway
                             .send_request_metrics(request_id, device_id, access_level)
@@ -279,7 +482,7 @@ pub async fn handle_completion(
                 let guard = Arc::new(StreamCancelGuard {
                     scheduler: gateway.scheduler.clone(),
                     task_id: task_id.clone(),
-                    device_id,
+                    device_id: route_outcome.client_id,
                     finished: finished.clone(),
                 });
                 let stop_state: Arc<Mutex<StopMarkerState>> =
@@ -363,14 +566,11 @@ pub async fn handle_completion(
                     })
                     .filter_map(|ev| async move { ev });
 
-                return Sse::new(s).into_response();
+                return response_with_route_headers(Sse::new(s).into_response(), &route_outcome);
             }
             Err(e) => {
                 error!("Completion request failed: {}", e);
-                let error_response = json!({
-                    "error": {"message": e.to_string(), "type": "api_error", "code": 500}
-                });
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+                return scheduler_error_response(&e);
             }
         }
     }
@@ -384,24 +584,23 @@ pub async fn handle_completion(
 
     match gateway
         .scheduler
-        .execute_inference(request, Some(allowed_ids))
+        .execute_inference(request, session_routing, Some(allowed_ids))
         .await
     {
-        Ok(response) => {
+        Ok((response, route_outcome)) => {
             // Send metrics to Kafka if needed
             if auth.access_level.is_metered() {
-                if let Some(chosen_client_id) = auth.client_ids.first() {
-                    if let Err(e) = gateway
-                        .send_request_metrics(request_id, *chosen_client_id, auth.access_level)
-                        .await
-                    {
-                        error!("Failed to send request metrics: {}", e);
-                        // Don't fail the request, just log the error
-                    }
+                if let Err(e) = gateway
+                    .send_request_metrics(request_id, route_outcome.client_id, auth.access_level)
+                    .await
+                {
+                    error!("Failed to send request metrics: {}", e);
+                    // Don't fail the request, just log the error
                 }
             }
 
             let mut response = response;
+            apply_completion_route_metadata(&mut response, &route_outcome);
             let finish_reason = if response.usage.completion_tokens >= max_tokens_effective {
                 "length"
             } else {
@@ -413,35 +612,11 @@ pub async fn handle_completion(
             }
 
             info!("Completion request completed successfully");
-            Json(response).into_response()
+            response_with_route_headers(Json(response).into_response(), &route_outcome)
         }
         Err(e) => {
             error!("Completion request failed: {}", e);
-            // Return appropriate HTTP status code with JSON error message
-            let (status, error_message) = if e
-                .to_string()
-                .contains("No available Android devices found")
-            {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE, // 503 - No devices available
-                    "No available Android devices found. Please ensure at least one device is online and valid."
-                )
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR, // 500 - Other errors
-                    "Internal server error occurred while processing the request.",
-                )
-            };
-
-            let error_response = json!({
-                "error": {
-                    "message": error_message,
-                    "type": "api_error",
-                    "code": status.as_u16()
-                }
-            });
-
-            (status, Json(error_response)).into_response()
+            scheduler_error_response(&e)
         }
     }
 }
@@ -512,9 +687,21 @@ pub async fn handle_chat_completion(
         }
     }
 
+    let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+    let session_routing = match session_routing_for_request(
+        &headers,
+        request.session_id.as_deref(),
+        request.cache_policy.as_deref(),
+        Some(model_name.clone()),
+        &auth,
+        target_client_id.is_some(),
+    ) {
+        Ok(routing) => routing,
+        Err(response) => return response,
+    };
+
     if request.stream.unwrap_or(false) {
         let max_tokens_effective: u32 = request.max_tokens.unwrap_or(4090);
-        let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
         let created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -537,16 +724,18 @@ pub async fn handle_chat_completion(
                 request.repeat_penalty.unwrap_or(1.1),
                 request.repeat_last_n.unwrap_or(64),
                 request.min_keep.unwrap_or(1),
+                session_routing.clone(),
                 Some(allowed_ids),
             )
             .await;
 
         match stream_res {
-            Ok((task_id, device_id, rx)) => {
+            Ok((task_id, route_outcome, rx)) => {
                 if auth.access_level.is_metered() {
                     let gateway = gateway.clone();
                     let request_id = request_id.clone();
                     let access_level = auth.access_level;
+                    let device_id = route_outcome.client_id;
                     tokio::spawn(async move {
                         if let Err(e) = gateway
                             .send_request_metrics(request_id, device_id, access_level)
@@ -561,7 +750,7 @@ pub async fn handle_chat_completion(
                 let guard = Arc::new(StreamCancelGuard {
                     scheduler: gateway.scheduler.clone(),
                     task_id: task_id.clone(),
-                    device_id,
+                    device_id: route_outcome.client_id,
                     finished: finished.clone(),
                 });
                 let stop_state: Arc<Mutex<StopMarkerState>> =
@@ -658,19 +847,15 @@ pub async fn handle_chat_completion(
                     })
                     .filter_map(|ev| async move { ev });
 
-                return Sse::new(s).into_response();
+                return response_with_route_headers(Sse::new(s).into_response(), &route_outcome);
             }
             Err(e) => {
                 error!("Chat completion request failed: {}", e);
-                let error_response = json!({
-                    "error": {"message": e.to_string(), "type": "api_error", "code": 500}
-                });
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response();
+                return scheduler_error_response(&e);
             }
         }
     }
 
-    let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -693,16 +878,18 @@ pub async fn handle_chat_completion(
             request.repeat_penalty.unwrap_or(1.1),
             request.repeat_last_n.unwrap_or(64),
             request.min_keep.unwrap_or(1),
+            session_routing,
             Some(allowed_ids),
         )
         .await;
 
     match stream_res {
-        Ok((task_id, device_id, mut rx)) => {
+        Ok((task_id, route_outcome, mut rx)) => {
             if auth.access_level.is_metered() {
                 let gateway = gateway.clone();
                 let request_id = request_id.clone();
                 let access_level = auth.access_level;
+                let device_id = route_outcome.client_id;
                 tokio::spawn(async move {
                     if let Err(e) = gateway
                         .send_request_metrics(request_id, device_id, access_level)
@@ -756,6 +943,9 @@ pub async fn handle_chat_completion(
                 object: "chat.completion".to_string(),
                 created,
                 model: model_name,
+                session_id: None,
+                client_id: None,
+                cache_status: None,
                 choices: vec![crate::inference::scheduler::ChatCompletionChoice {
                     index: 0,
                     message: crate::inference::scheduler::ChatMessage {
@@ -766,15 +956,14 @@ pub async fn handle_chat_completion(
                 }],
                 usage,
             };
+            let mut chat_response = chat_response;
+            apply_chat_route_metadata(&mut chat_response, &route_outcome);
 
-            Json(chat_response).into_response()
+            response_with_route_headers(Json(chat_response).into_response(), &route_outcome)
         }
         Err(e) => {
             error!("Chat completion request failed: {}", e);
-            let error_response = json!({
-                "error": {"message": e.to_string(), "type": "api_error", "code": 500}
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+            scheduler_error_response(&e)
         }
     }
 }
@@ -806,6 +995,13 @@ pub async fn list_devices(
         .get_available_devices(Some(auth.client_ids.as_slice()))
         .await;
     Json(devices)
+}
+
+pub async fn session_route_metrics(
+    State(gateway): State<Arc<InferenceGateway>>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Json<crate::inference::scheduler::SessionRouteMetricsSnapshot> {
+    Json(gateway.scheduler.session_route_metrics().await)
 }
 
 /// Get device status by ID

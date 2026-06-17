@@ -117,6 +117,7 @@ nvml = ["nvml-wrapper"]
 rocm = ["rocm_smi_lib"]
 
 [dev-dependencies]
+filetime = "0.2"
 tempfile = "3.3"
 
 [build-dependencies]

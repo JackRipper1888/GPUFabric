@@ -1,3 +1,4 @@
+use crate::handle::session_cache::record_worker_cache_decision;
 use crate::util::mobile_control_stream::{
     connect_mobile_control_stream, MobileControlStream, MobileControlTlsConfig,
 };
@@ -544,6 +545,8 @@ pub async fn start_worker_tasks_with_callback_ptr(
                     }
                     CommandV1::InferenceTask {
                         task_id,
+                        session_id,
+                        cache_policy,
                         prompt,
                         max_tokens,
                         temperature,
@@ -553,6 +556,20 @@ pub async fn start_worker_tasks_with_callback_ptr(
                         ..
                     } => {
                         emit_callback(handler_callback, &format!("INFERENCE_TASK - {task_id}"));
+                        let cache_decision = record_worker_cache_decision(
+                            session_id.as_deref(),
+                            cache_policy.as_deref(),
+                        );
+                        emit_callback(
+                            handler_callback,
+                            &format!(
+                                "SESSION_CACHE - {task_id} session={} policy={} status={} kv_reuse={}",
+                                cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                cache_decision.policy.as_str(),
+                                cache_decision.status.as_str(),
+                                cache_decision.kv_reuse_enabled
+                            ),
+                        );
                         let effective_max_tokens = std::cmp::min(max_tokens, 512);
                         if effective_max_tokens != max_tokens {
                             emit_callback(
@@ -599,6 +616,8 @@ pub async fn start_worker_tasks_with_callback_ptr(
                     }
                     CommandV1::ChatInferenceTask {
                         task_id,
+                        session_id,
+                        cache_policy,
                         model: _,
                         messages,
                         max_tokens,
@@ -611,6 +630,20 @@ pub async fn start_worker_tasks_with_callback_ptr(
                         emit_callback(
                             handler_callback,
                             &format!("CHAT_INFERENCE_TASK - {task_id}"),
+                        );
+                        let cache_decision = record_worker_cache_decision(
+                            session_id.as_deref(),
+                            cache_policy.as_deref(),
+                        );
+                        emit_callback(
+                            handler_callback,
+                            &format!(
+                                "SESSION_CACHE - {task_id} session={} policy={} status={} kv_reuse={}",
+                                cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                cache_decision.policy.as_str(),
+                                cache_decision.status.as_str(),
+                                cache_decision.kv_reuse_enabled
+                            ),
                         );
                         let effective_max_tokens = std::cmp::min(max_tokens, 512);
                         if effective_max_tokens != max_tokens {

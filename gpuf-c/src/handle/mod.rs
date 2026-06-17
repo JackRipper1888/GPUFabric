@@ -2,6 +2,7 @@ pub mod android_sdk;
 pub mod handle_tcp;
 pub mod handle_udp;
 pub mod handle_ws;
+pub mod session_cache;
 pub mod worker_sdk;
 use crate::util::cmd::{Args, EngineType, WorkerType};
 use crate::util::log_icon;

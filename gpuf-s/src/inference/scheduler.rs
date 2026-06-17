@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::sync::{oneshot, Mutex};
@@ -30,6 +32,10 @@ pub struct CompletionRequest {
     pub model: Option<String>,
     #[allow(dead_code)] // Streaming support to be implemented later
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub cache_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +50,10 @@ pub struct ChatCompletionRequest {
     pub repeat_last_n: Option<i32>,
     pub min_keep: Option<u32>,
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub cache_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -58,6 +68,12 @@ pub struct CompletionResponse {
     pub object: String,
     pub created: u64,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<ClientId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_status: Option<SessionCacheStatus>,
     pub choices: Vec<CompletionChoice>,
     pub usage: CompletionUsage,
 }
@@ -68,6 +84,12 @@ pub struct ChatCompletionResponse {
     pub object: String,
     pub created: u64,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<ClientId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_status: Option<SessionCacheStatus>,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: CompletionUsage,
 }
@@ -115,31 +137,602 @@ pub enum StreamEvent {
     Error(String),
 }
 
+const SESSION_ROUTE_TTL: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_SESSION_ROUTE_MAX_ENTRIES: usize = 1024;
+
+fn positive_env_usize(name: &str, default_value: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_value)
+}
+
+fn positive_env_duration_secs(name: &str, default_value: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default_value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePolicy {
+    Auto,
+    Bypass,
+    Reset,
+}
+
+impl CachePolicy {
+    pub fn parse(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(Self::Auto),
+            Some(value) if value.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Some(value) if value.eq_ignore_ascii_case("bypass") => Ok(Self::Bypass),
+            Some(value) if value.eq_ignore_ascii_case("reset") => Ok(Self::Reset),
+            Some(value) => Err(anyhow!(
+                "invalid cache_policy '{value}', expected auto, bypass, or reset"
+            )),
+        }
+    }
+
+    fn records_route(self) -> bool {
+        !matches!(self, Self::Bypass)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Bypass => "bypass",
+            Self::Reset => "reset",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionCacheStatus {
+    Cold,
+    Hit,
+    Bypass,
+    Reset,
+    Evicted,
+}
+
+impl SessionCacheStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::Hit => "hit",
+            Self::Bypass => "bypass",
+            Self::Reset => "reset",
+            Self::Evicted => "evicted",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRouteOutcome {
+    pub session_id: Option<String>,
+    pub client_id: ClientId,
+    pub cache_status: Option<SessionCacheStatus>,
+}
+
+impl SessionRouteOutcome {
+    pub fn new(
+        session_id: Option<String>,
+        client_id: ClientId,
+        cache_status: Option<SessionCacheStatus>,
+    ) -> Self {
+        Self {
+            session_id,
+            client_id,
+            cache_status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SessionRouteMetricsSnapshot {
+    pub routes_current: usize,
+    pub routes_max: usize,
+    pub route_ttl_secs: u64,
+    pub sticky_route_hit_total: u64,
+    pub sticky_route_miss_total: u64,
+    pub sticky_route_bypass_total: u64,
+    pub sticky_route_reset_total: u64,
+    pub sticky_route_bind_total: u64,
+    pub sticky_route_eviction_total: u64,
+    pub sticky_route_stale_total: u64,
+    pub sticky_route_denied_total: u64,
+    pub session_owner_mismatch_total: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionRouteMetrics {
+    sticky_route_hit_total: u64,
+    sticky_route_miss_total: u64,
+    sticky_route_bypass_total: u64,
+    sticky_route_reset_total: u64,
+    sticky_route_bind_total: u64,
+    sticky_route_eviction_total: u64,
+    sticky_route_stale_total: u64,
+    sticky_route_denied_total: u64,
+    session_owner_mismatch_total: u64,
+}
+
+impl SessionRouteMetrics {
+    fn snapshot(
+        &self,
+        routes_current: usize,
+        routes_max: usize,
+        route_ttl: Duration,
+    ) -> SessionRouteMetricsSnapshot {
+        SessionRouteMetricsSnapshot {
+            routes_current,
+            routes_max,
+            route_ttl_secs: route_ttl.as_secs(),
+            sticky_route_hit_total: self.sticky_route_hit_total,
+            sticky_route_miss_total: self.sticky_route_miss_total,
+            sticky_route_bypass_total: self.sticky_route_bypass_total,
+            sticky_route_reset_total: self.sticky_route_reset_total,
+            sticky_route_bind_total: self.sticky_route_bind_total,
+            sticky_route_eviction_total: self.sticky_route_eviction_total,
+            sticky_route_stale_total: self.sticky_route_stale_total,
+            sticky_route_denied_total: self.sticky_route_denied_total,
+            session_owner_mismatch_total: self.session_owner_mismatch_total,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRouting {
+    pub session_id: String,
+    pub owner_scope: String,
+    pub cache_policy: CachePolicy,
+    pub model_id: Option<String>,
+    pub explicit_target: bool,
+}
+
+impl SessionRouting {
+    pub fn new(
+        session_id: String,
+        owner_scope: String,
+        cache_policy: CachePolicy,
+        model_id: Option<String>,
+        explicit_target: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            owner_scope,
+            cache_policy,
+            model_id,
+            explicit_target,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionRoute {
+    owner_scope: String,
+    client_id: ClientId,
+    model_id: Option<String>,
+    #[allow(dead_code)] // Retained for observability/Redis persistence in the P4 follow-up.
+    created_at: Instant,
+    last_used: Instant,
+    ttl: Duration,
+}
+
+struct SessionRouteTable {
+    routes: HashMap<String, SessionRoute>,
+    max_routes: usize,
+    route_ttl: Duration,
+    metrics: SessionRouteMetrics,
+}
+
+impl Default for SessionRouteTable {
+    fn default() -> Self {
+        Self::new(DEFAULT_SESSION_ROUTE_MAX_ENTRIES, SESSION_ROUTE_TTL)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionRouteDecision {
+    Use {
+        client_id: ClientId,
+        cache_status: SessionCacheStatus,
+    },
+    SelectCold(SessionCacheStatus),
+}
+
+impl SessionRouteTable {
+    fn new(max_routes: usize, route_ttl: Duration) -> Self {
+        Self {
+            routes: HashMap::new(),
+            max_routes,
+            route_ttl,
+            metrics: SessionRouteMetrics::default(),
+        }
+    }
+
+    fn snapshot(&self) -> SessionRouteMetricsSnapshot {
+        self.metrics
+            .snapshot(self.routes.len(), self.max_routes, self.route_ttl)
+    }
+
+    fn prune_expired(&mut self, now: Instant) {
+        let expired: Vec<String> = self
+            .routes
+            .iter()
+            .filter(|(_, route)| now.duration_since(route.last_used) > route.ttl)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        if !expired.is_empty() {
+            self.metrics.sticky_route_eviction_total += expired.len() as u64;
+        }
+        for session_id in expired {
+            self.routes.remove(&session_id);
+        }
+    }
+
+    fn evict_lru(&mut self) -> Option<String> {
+        let victim = self
+            .routes
+            .iter()
+            .min_by_key(|(_, route)| route.last_used)
+            .map(|(session_id, _)| session_id.clone());
+        if let Some(session_id) = &victim {
+            self.routes.remove(session_id);
+            self.metrics.sticky_route_eviction_total += 1;
+        }
+        victim
+    }
+
+    fn resolve(
+        &mut self,
+        routing: &SessionRouting,
+        allowed_client_ids: Option<&[ClientId]>,
+        now: Instant,
+    ) -> Result<SessionRouteDecision> {
+        if matches!(routing.cache_policy, CachePolicy::Bypass) {
+            self.metrics.sticky_route_bypass_total += 1;
+            return Ok(SessionRouteDecision::SelectCold(SessionCacheStatus::Bypass));
+        }
+
+        if matches!(routing.cache_policy, CachePolicy::Reset) {
+            self.metrics.sticky_route_reset_total += 1;
+            self.remove_owned_route(routing)?;
+            return Ok(SessionRouteDecision::SelectCold(SessionCacheStatus::Reset));
+        }
+
+        let Some(route) = self.routes.get_mut(&routing.session_id) else {
+            self.metrics.sticky_route_miss_total += 1;
+            return Ok(SessionRouteDecision::SelectCold(SessionCacheStatus::Cold));
+        };
+
+        if route.owner_scope != routing.owner_scope {
+            self.metrics.session_owner_mismatch_total += 1;
+            return Err(anyhow!("session owner mismatch"));
+        }
+
+        if now.duration_since(route.last_used) > route.ttl {
+            self.routes.remove(&routing.session_id);
+            self.metrics.sticky_route_stale_total += 1;
+            return Ok(SessionRouteDecision::SelectCold(
+                SessionCacheStatus::Evicted,
+            ));
+        }
+
+        if model_conflicts(route.model_id.as_deref(), routing.model_id.as_deref()) {
+            self.routes.remove(&routing.session_id);
+            self.metrics.sticky_route_stale_total += 1;
+            return Ok(SessionRouteDecision::SelectCold(
+                SessionCacheStatus::Evicted,
+            ));
+        }
+
+        if routing.explicit_target {
+            if let Some(allowed) = allowed_client_ids {
+                if !allowed.iter().any(|id| id == &route.client_id) {
+                    self.routes.remove(&routing.session_id);
+                    self.metrics.sticky_route_stale_total += 1;
+                    return Ok(SessionRouteDecision::SelectCold(
+                        SessionCacheStatus::Evicted,
+                    ));
+                }
+            }
+        } else if let Some(allowed) = allowed_client_ids {
+            if !allowed.iter().any(|id| id == &route.client_id) {
+                self.metrics.sticky_route_denied_total += 1;
+                return Err(anyhow!(
+                    "sticky session route is no longer allowed for this token"
+                ));
+            }
+        }
+
+        route.last_used = now;
+        self.metrics.sticky_route_hit_total += 1;
+        Ok(SessionRouteDecision::Use {
+            client_id: route.client_id,
+            cache_status: SessionCacheStatus::Hit,
+        })
+    }
+
+    fn bind(&mut self, routing: &SessionRouting, client_id: ClientId, now: Instant) {
+        if !routing.cache_policy.records_route() {
+            return;
+        }
+
+        self.prune_expired(now);
+
+        if !self.routes.contains_key(&routing.session_id) && self.routes.len() >= self.max_routes {
+            self.evict_lru();
+        }
+
+        self.routes.insert(
+            routing.session_id.clone(),
+            SessionRoute {
+                owner_scope: routing.owner_scope.clone(),
+                client_id,
+                model_id: routing.model_id.clone(),
+                created_at: now,
+                last_used: now,
+                ttl: self.route_ttl,
+            },
+        );
+        self.metrics.sticky_route_bind_total += 1;
+    }
+
+    fn remove_owned_route(&mut self, routing: &SessionRouting) -> Result<()> {
+        if let Some(route) = self.routes.get(&routing.session_id) {
+            if route.owner_scope != routing.owner_scope {
+                return Err(anyhow!("session owner mismatch"));
+            }
+        }
+        self.routes.remove(&routing.session_id);
+        Ok(())
+    }
+
+    fn remove_if_client_matches(&mut self, session_id: &str, client_id: ClientId) {
+        if self
+            .routes
+            .get(session_id)
+            .map(|route| route.client_id == client_id)
+            .unwrap_or(false)
+        {
+            self.routes.remove(session_id);
+            self.metrics.sticky_route_eviction_total += 1;
+        }
+    }
+}
+
+fn model_conflicts(route_model: Option<&str>, request_model: Option<&str>) -> bool {
+    matches!((route_model, request_model), (Some(a), Some(b)) if a != b)
+}
+
+fn session_command_fields(routing: Option<&SessionRouting>) -> (Option<String>, Option<String>) {
+    routing
+        .map(|routing| {
+            (
+                Some(worker_scoped_session_id(
+                    routing.owner_scope.as_str(),
+                    routing.session_id.as_str(),
+                )),
+                Some(routing.cache_policy.as_str().to_string()),
+            )
+        })
+        .unwrap_or((None, None))
+}
+
+fn worker_scoped_session_id(owner_scope: &str, session_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    for part in ["worker-session-v1", owner_scope, session_id] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+pub fn validate_session_id(raw: &str) -> Result<String> {
+    let session_id = raw.trim();
+    let len = session_id.len();
+    if !(16..=128).contains(&len) {
+        return Err(anyhow!(
+            "session_id must be between 16 and 128 ASCII characters"
+        ));
+    }
+
+    if !session_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err(anyhow!(
+            "session_id may only contain ASCII letters, digits, '-', '_', or '.'"
+        ));
+    }
+
+    Ok(session_id.to_string())
+}
+
 // Inference Scheduler
 pub struct InferenceScheduler {
     pending_tasks: Arc<Mutex<HashMap<String, PendingTask>>>,
     partial_results: Arc<Mutex<HashMap<String, String>>>,
     pending_streams: Arc<Mutex<HashMap<String, mpsc::Sender<StreamEvent>>>>,
     stream_usages: Arc<Mutex<HashMap<String, CompletionUsage>>>,
+    session_routes: Arc<Mutex<SessionRouteTable>>,
     active_clients: ActiveClients,
 }
 
 impl InferenceScheduler {
     pub fn new(active_clients: ActiveClients) -> Self {
+        let max_routes = positive_env_usize(
+            "GPUF_SESSION_ROUTE_MAX_ENTRIES",
+            DEFAULT_SESSION_ROUTE_MAX_ENTRIES,
+        );
+        let route_ttl =
+            positive_env_duration_secs("GPUF_SESSION_ROUTE_TTL_SECS", SESSION_ROUTE_TTL);
+
         Self {
             pending_tasks: Arc::new(Mutex::new(HashMap::new())),
             partial_results: Arc::new(Mutex::new(HashMap::new())),
             pending_streams: Arc::new(Mutex::new(HashMap::new())),
             stream_usages: Arc::new(Mutex::new(HashMap::new())),
+            session_routes: Arc::new(Mutex::new(SessionRouteTable::new(max_routes, route_ttl))),
             active_clients,
+        }
+    }
+
+    pub async fn session_route_metrics(&self) -> SessionRouteMetricsSnapshot {
+        let routes = self.session_routes.lock().await;
+        routes.snapshot()
+    }
+
+    async fn client_is_usable(
+        &self,
+        client_id: &ClientId,
+        allowed_client_ids: Option<&[ClientId]>,
+        model_name: Option<&str>,
+        require_model_compat: bool,
+    ) -> bool {
+        if let Some(allowed) = allowed_client_ids {
+            if !allowed.iter().any(|id| id == client_id) {
+                return false;
+            }
+        }
+
+        let clients = self.active_clients.lock().await;
+        let Some(client_info) = clients.get(client_id) else {
+            return false;
+        };
+
+        if !client_info.authed {
+            return false;
+        }
+
+        if require_model_compat {
+            let Some(model_name) = model_name else {
+                return true;
+            };
+            let Some(models) = &client_info.models else {
+                return false;
+            };
+            if !models.iter().any(|m| m.id == model_name) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    async fn select_device_for_request(
+        &self,
+        allowed_client_ids: Option<&[ClientId]>,
+        routing: Option<&SessionRouting>,
+        model_name: Option<&str>,
+        require_model_compat: bool,
+    ) -> Result<SessionRouteOutcome> {
+        if let Some(routing) = routing {
+            if matches!(routing.cache_policy, CachePolicy::Bypass) {
+                let selected = self
+                    .select_fresh_device(model_name, allowed_client_ids, require_model_compat)
+                    .await?;
+                return Ok(SessionRouteOutcome::new(
+                    Some(routing.session_id.clone()),
+                    selected,
+                    Some(SessionCacheStatus::Bypass),
+                ));
+            }
+
+            let now = Instant::now();
+            let sticky_device = {
+                let mut routes = self.session_routes.lock().await;
+                routes.resolve(routing, allowed_client_ids, now)?
+            };
+
+            let cold_status = match sticky_device {
+                SessionRouteDecision::Use {
+                    client_id,
+                    cache_status,
+                } => {
+                    if self
+                        .client_is_usable(
+                            &client_id,
+                            allowed_client_ids,
+                            model_name,
+                            require_model_compat,
+                        )
+                        .await
+                    {
+                        return Ok(SessionRouteOutcome::new(
+                            Some(routing.session_id.clone()),
+                            client_id,
+                            Some(cache_status),
+                        ));
+                    }
+
+                    let mut routes = self.session_routes.lock().await;
+                    routes.remove_if_client_matches(&routing.session_id, client_id);
+                    SessionCacheStatus::Evicted
+                }
+                SessionRouteDecision::SelectCold(status) => status,
+            };
+
+            let selected = self
+                .select_fresh_device(model_name, allowed_client_ids, require_model_compat)
+                .await?;
+            if routing.cache_policy.records_route() {
+                let mut routes = self.session_routes.lock().await;
+                routes.bind(routing, selected, Instant::now());
+            }
+            return Ok(SessionRouteOutcome::new(
+                Some(routing.session_id.clone()),
+                selected,
+                Some(cold_status),
+            ));
+        }
+
+        self.select_fresh_device(model_name, allowed_client_ids, require_model_compat)
+            .await
+            .map(|client_id| SessionRouteOutcome::new(None, client_id, None))
+    }
+
+    async fn select_fresh_device(
+        &self,
+        model_name: Option<&str>,
+        allowed_client_ids: Option<&[ClientId]>,
+        require_model_compat: bool,
+    ) -> Result<ClientId> {
+        if !require_model_compat {
+            return self.select_best_device(allowed_client_ids).await;
+        }
+
+        let Some(model_name) = model_name else {
+            return self.select_best_device(allowed_client_ids).await;
+        };
+
+        match self
+            .select_best_device_for_model(model_name, allowed_client_ids)
+            .await
+        {
+            Ok(device_id) => Ok(device_id),
+            Err(e) => {
+                warn!(
+                    "No model-compatible device found for model '{}': {}. Falling back to generic device selection.",
+                    model_name, e
+                );
+                self.select_best_device(allowed_client_ids).await
+            }
         }
     }
 
     pub async fn execute_inference_stream(
         &self,
         request: CompletionRequest,
+        routing: Option<SessionRouting>,
         allowed_client_ids: Option<&[ClientId]>,
-    ) -> Result<(String, ClientId, mpsc::Receiver<StreamEvent>)> {
+    ) -> Result<(String, SessionRouteOutcome, mpsc::Receiver<StreamEvent>)> {
         let task_id = Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::channel::<StreamEvent>(128);
 
@@ -148,11 +741,22 @@ impl InferenceScheduler {
             streams.insert(task_id.clone(), tx);
         }
 
-        let device_id = self.select_best_device(allowed_client_ids).await?;
+        let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+        let route_outcome = self
+            .select_device_for_request(
+                allowed_client_ids,
+                routing.as_ref(),
+                Some(model_name.as_str()),
+                false,
+            )
+            .await?;
+        let (session_id, cache_policy) = session_command_fields(routing.as_ref());
         if let Err(e) = self
             .send_task_to_device(
-                &device_id,
+                &route_outcome.client_id,
                 task_id.clone(),
+                session_id,
+                cache_policy,
                 request.prompt,
                 request.max_tokens.unwrap_or(4090),
                 request.temperature.unwrap_or(0.7),
@@ -169,7 +773,7 @@ impl InferenceScheduler {
             return Err(e);
         }
 
-        Ok((task_id, device_id, rx))
+        Ok((task_id, route_outcome, rx))
     }
 
     async fn select_best_device_for_model(
@@ -235,8 +839,9 @@ impl InferenceScheduler {
         repeat_penalty: f32,
         repeat_last_n: i32,
         min_keep: u32,
+        routing: Option<SessionRouting>,
         allowed_client_ids: Option<&[ClientId]>,
-    ) -> Result<(String, ClientId, mpsc::Receiver<StreamEvent>)> {
+    ) -> Result<(String, SessionRouteOutcome, mpsc::Receiver<StreamEvent>)> {
         let task_id = Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::channel::<StreamEvent>(128);
 
@@ -245,22 +850,18 @@ impl InferenceScheduler {
             streams.insert(task_id.clone(), tx);
         }
 
-        let device_id = match self
-            .select_best_device_for_model(&model, allowed_client_ids)
-            .await
-        {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "No model-compatible device found for model '{}': {}. Falling back to generic device selection.",
-                    model, e
-                );
-                self.select_best_device(allowed_client_ids).await?
-            }
-        };
+        let route_outcome = self
+            .select_device_for_request(
+                allowed_client_ids,
+                routing.as_ref(),
+                Some(model.as_str()),
+                true,
+            )
+            .await?;
+        let (session_id, cache_policy) = session_command_fields(routing.as_ref());
         debug!(
             "Selected device {} for model {}",
-            device_id.log_label(),
+            route_outcome.client_id.log_label(),
             model
         );
         let common_messages = messages
@@ -273,8 +874,10 @@ impl InferenceScheduler {
 
         if let Err(e) = self
             .send_chat_task_to_device(
-                &device_id,
+                &route_outcome.client_id,
                 task_id.clone(),
+                session_id,
+                cache_policy,
                 model,
                 common_messages,
                 max_tokens,
@@ -292,7 +895,7 @@ impl InferenceScheduler {
             return Err(e);
         }
 
-        Ok((task_id, device_id, rx))
+        Ok((task_id, route_outcome, rx))
     }
 
     pub async fn cancel_inference(&self, task_id: &str, device_id: &ClientId) -> Result<()> {
@@ -332,6 +935,8 @@ impl InferenceScheduler {
         &self,
         device_id: &ClientId,
         task_id: String,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
         model: String,
         messages: Vec<common::ChatMessage>,
         max_tokens: u32,
@@ -361,6 +966,8 @@ impl InferenceScheduler {
 
         let chat_task = CommandV1::ChatInferenceTask {
             task_id: task_id.clone(),
+            session_id,
+            cache_policy,
             model,
             messages,
             max_tokens,
@@ -516,6 +1123,9 @@ impl InferenceScheduler {
                         .unwrap()
                         .as_secs(),
                     model: "gpuf-android".to_string(),
+                    session_id: None,
+                    client_id: None,
+                    cache_status: None,
                     choices: vec![CompletionChoice {
                         text: result.unwrap_or_default(),
                         index: 0,
@@ -619,6 +1229,8 @@ impl InferenceScheduler {
         &self,
         device_id: &ClientId,
         task_id: String,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
         prompt: String,
         max_tokens: u32,
         temperature: f32,
@@ -651,6 +1263,8 @@ impl InferenceScheduler {
         // Create and send inference task command
         let inference_task = CommandV1::InferenceTask {
             task_id: task_id.clone(),
+            session_id,
+            cache_policy,
             prompt,
             max_tokens,
             temperature,
@@ -687,8 +1301,9 @@ impl InferenceScheduler {
     pub async fn execute_inference(
         &self,
         request: CompletionRequest,
+        routing: Option<SessionRouting>,
         allowed_client_ids: Option<&[ClientId]>,
-    ) -> Result<CompletionResponse> {
+    ) -> Result<(CompletionResponse, SessionRouteOutcome)> {
         let task_id = Uuid::new_v4().to_string();
 
         // Create response channel
@@ -709,19 +1324,29 @@ impl InferenceScheduler {
             debug!("All pending task count after insert: {}", tasks.len());
         }
 
-        // Select best available device
-        let device_id = self.select_best_device(allowed_client_ids).await?;
+        let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+        let route_outcome = self
+            .select_device_for_request(
+                allowed_client_ids,
+                routing.as_ref(),
+                Some(model_name.as_str()),
+                false,
+            )
+            .await?;
+        let (session_id, cache_policy) = session_command_fields(routing.as_ref());
 
         // Send task to device
         info!(
             "About to send task {} to device {}",
             task_id,
-            device_id.log_label()
+            route_outcome.client_id.log_label()
         );
         if let Err(e) = self
             .send_task_to_device(
-                &device_id,
+                &route_outcome.client_id,
                 task_id.clone(),
+                session_id,
+                cache_policy,
                 request.prompt,
                 request.max_tokens.unwrap_or(1024),
                 request.temperature.unwrap_or(0.7),
@@ -738,7 +1363,7 @@ impl InferenceScheduler {
             tasks.remove(&task_id);
             error!(
                 "Failed to send inference task to device {}: {}",
-                device_id.log_label(),
+                route_outcome.client_id.log_label(),
                 e
             );
             return Err(e);
@@ -776,7 +1401,7 @@ impl InferenceScheduler {
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), receiver).await {
             Ok(Ok(response)) => {
                 info!("Task {} completed successfully", task_id);
-                response
+                response.map(|response| (response, route_outcome))
             }
             Ok(Err(_)) => {
                 warn!("Task {} response channel closed", task_id);
@@ -856,4 +1481,233 @@ pub struct DeviceInfo {
     pub cpu_usage: u8,
     pub memory_usage: u8,
     pub device_count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(seed: u8) -> ClientId {
+        ClientId([seed; 16])
+    }
+
+    fn routing(owner: &str, policy: CachePolicy) -> SessionRouting {
+        SessionRouting::new(
+            "session-1234567890".to_string(),
+            owner.to_string(),
+            policy,
+            Some("model-a".to_string()),
+            false,
+        )
+    }
+
+    #[test]
+    fn validate_session_id_rejects_short_or_unsafe_values() {
+        assert!(validate_session_id("short").is_err());
+        assert!(validate_session_id("session-1234567890").is_ok());
+        assert!(validate_session_id("session-1234567890/../../x").is_err());
+    }
+
+    #[test]
+    fn cache_policy_parser_accepts_expected_values() {
+        assert_eq!(CachePolicy::parse(None).unwrap(), CachePolicy::Auto);
+        assert_eq!(
+            CachePolicy::parse(Some("bypass")).unwrap(),
+            CachePolicy::Bypass
+        );
+        assert_eq!(
+            CachePolicy::parse(Some("RESET")).unwrap(),
+            CachePolicy::Reset
+        );
+        assert!(CachePolicy::parse(Some("force")).is_err());
+    }
+
+    #[test]
+    fn worker_session_id_is_owner_scoped_and_redacted() {
+        let owner_a = "owner-a";
+        let owner_b = "owner-b";
+        let external_session = "session-1234567890";
+
+        let scoped_a = worker_scoped_session_id(owner_a, external_session);
+        let scoped_b = worker_scoped_session_id(owner_b, external_session);
+
+        assert_eq!(scoped_a.len(), 64);
+        assert_ne!(scoped_a, scoped_b);
+        assert!(!scoped_a.contains(external_session));
+        assert!(!scoped_a.contains(owner_a));
+
+        let route = routing(owner_a, CachePolicy::Auto);
+        let (session_id, cache_policy) = session_command_fields(Some(&route));
+        assert_eq!(session_id.as_deref(), Some(scoped_a.as_str()));
+        assert_eq!(cache_policy.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn same_session_reuses_bound_worker() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        let worker = client(7);
+        let route = routing("owner-a", CachePolicy::Auto);
+
+        table.bind(&route, worker, now);
+
+        assert_eq!(
+            table.resolve(&route, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::Use {
+                client_id: worker,
+                cache_status: SessionCacheStatus::Hit
+            }
+        );
+    }
+
+    #[test]
+    fn different_owner_cannot_reuse_session_route() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        table.bind(&routing("owner-a", CachePolicy::Auto), client(1), now);
+
+        let err = table
+            .resolve(
+                &routing("owner-b", CachePolicy::Auto),
+                Some(&[client(1)]),
+                now,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("session owner mismatch"));
+    }
+
+    #[test]
+    fn reset_removes_owned_route_and_bypass_does_not_bind() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        let worker = client(3);
+        let auto = routing("owner-a", CachePolicy::Auto);
+        table.bind(&auto, worker, now);
+
+        let reset = routing("owner-a", CachePolicy::Reset);
+        assert_eq!(
+            table.resolve(&reset, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Reset)
+        );
+        assert_eq!(
+            table.resolve(&auto, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Cold)
+        );
+
+        let bypass = routing("owner-a", CachePolicy::Bypass);
+        table.bind(&bypass, worker, now);
+        assert_eq!(
+            table.resolve(&auto, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Cold)
+        );
+    }
+
+    #[test]
+    fn stale_or_disallowed_routes_do_not_silently_cross_owner_boundary() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        let worker = client(4);
+        let route = routing("owner-a", CachePolicy::Auto);
+        table.bind(
+            &route,
+            worker,
+            now - SESSION_ROUTE_TTL - Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            table.resolve(&route, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Evicted)
+        );
+
+        table.bind(&route, worker, now);
+        let err = table.resolve(&route, Some(&[client(5)]), now).unwrap_err();
+        assert!(err.to_string().contains("no longer allowed"));
+    }
+
+    #[test]
+    fn model_change_invalidates_route() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        let worker = client(9);
+        table.bind(&routing("owner-a", CachePolicy::Auto), worker, now);
+
+        let mut next = routing("owner-a", CachePolicy::Auto);
+        next.model_id = Some("model-b".to_string());
+        assert_eq!(
+            table.resolve(&next, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Evicted)
+        );
+    }
+
+    #[test]
+    fn route_table_evicts_lru_when_capacity_is_reached() {
+        let mut table = SessionRouteTable::new(2, SESSION_ROUTE_TTL);
+        let now = Instant::now();
+
+        let route1 = routing("owner-a", CachePolicy::Auto);
+        let route2 = SessionRouting::new(
+            "session-2234567890".to_string(),
+            "owner-a".to_string(),
+            CachePolicy::Auto,
+            Some("model-a".to_string()),
+            false,
+        );
+        let route3 = SessionRouting::new(
+            "session-3234567890".to_string(),
+            "owner-a".to_string(),
+            CachePolicy::Auto,
+            Some("model-a".to_string()),
+            false,
+        );
+
+        table.bind(&route1, client(1), now - Duration::from_secs(10));
+        table.bind(&route2, client(2), now - Duration::from_secs(5));
+        table.bind(&route3, client(3), now);
+
+        let snapshot = table.snapshot();
+        assert_eq!(snapshot.routes_current, 2);
+        assert_eq!(snapshot.routes_max, 2);
+        assert_eq!(snapshot.sticky_route_bind_total, 3);
+        assert!(snapshot.sticky_route_eviction_total >= 1);
+
+        let err = table.resolve(&route1, Some(&[client(1)]), now).unwrap();
+        assert_eq!(
+            err,
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Cold)
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_hit_bypass_and_reset_counts() {
+        let mut table = SessionRouteTable::default();
+        let now = Instant::now();
+        let worker = client(8);
+        let route = routing("owner-a", CachePolicy::Auto);
+        table.bind(&route, worker, now);
+
+        assert_eq!(
+            table.resolve(&route, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::Use {
+                client_id: worker,
+                cache_status: SessionCacheStatus::Hit
+            }
+        );
+
+        let bypass = routing("owner-a", CachePolicy::Bypass);
+        assert_eq!(
+            table.resolve(&bypass, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Bypass)
+        );
+
+        let reset = routing("owner-a", CachePolicy::Reset);
+        assert_eq!(
+            table.resolve(&reset, Some(&[worker]), now).unwrap(),
+            SessionRouteDecision::SelectCold(SessionCacheStatus::Reset)
+        );
+
+        let snapshot = table.snapshot();
+        assert!(snapshot.sticky_route_hit_total >= 1);
+        assert!(snapshot.sticky_route_bypass_total >= 1);
+        assert!(snapshot.sticky_route_reset_total >= 1);
+    }
 }
