@@ -138,6 +138,23 @@ cargo run --release --bin gpuf-c -- \
   --local-port 11434
 ```
 
+#### Optional DLLM Plugin Probe
+
+`gpuf-c` can optionally probe a local DLLM shared library at startup. This is a
+control-plane smoke path for future distributed expert routing; if loading
+fails, `gpuf-c` logs a warning and continues without DLLM.
+
+```bash
+cargo run --release --bin gpuf-c -- \
+  --client-id <client-id-32-hex> \
+  --dllm-enable \
+  --dllm-lib-path /opt/dllm/lib/libdllm.so \
+  --dllm-server-key 0xA1FDFFFFFF01FAFAFAFA
+```
+
+The same settings are available through `GPUF_DLLM_ENABLE`,
+`GPUF_DLLM_LIB_PATH`, and `GPUF_DLLM_SERVER_KEY`.
+
 ### Docker Build
 
 #### Build gpuf-s Image

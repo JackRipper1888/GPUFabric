@@ -212,6 +212,22 @@ pub struct Args {
         help = "Max bytes per streamed delta chunk sent to server"
     )]
     pub stream_chunk_bytes: usize,
+
+    /// Enable optional DLLM plugin probing through dlopen.
+    #[arg(long, env = "GPUF_DLLM_ENABLE", default_value_t = false)]
+    pub dllm_enable: bool,
+
+    /// Path to libdllm.so used when --dllm-enable is set.
+    #[arg(long, env = "GPUF_DLLM_LIB_PATH", default_value = "libdllm.so")]
+    pub dllm_lib_path: String,
+
+    /// DLLM expert server-key used for startup plugin smoke.
+    #[arg(
+        long,
+        env = "GPUF_DLLM_SERVER_KEY",
+        default_value = "0xA1FDFFFFFF01FAFAFAFA"
+    )]
+    pub dllm_server_key: String,
 }
 
 impl Args {
@@ -301,6 +317,9 @@ impl Args {
                     .clone()
                     .or_else(|| self.llama_devices.clone()),
                 stream_chunk_bytes: self.stream_chunk_bytes,
+                dllm_enable: self.dllm_enable,
+                dllm_lib_path: self.dllm_lib_path.clone(),
+                dllm_server_key: self.dllm_server_key.clone(),
             })
         } else {
             // In standalone_llama mode, client_id is optional
@@ -380,5 +399,23 @@ mod tests {
             args.control_tls_server_name.as_deref(),
             Some("gpuf.example.internal")
         );
+    }
+
+    #[test]
+    fn parses_dllm_optional_loader_flags() {
+        let args = Args::try_parse_from([
+            "gpuf-c",
+            "--standalone-llama",
+            "--dllm-enable",
+            "--dllm-lib-path",
+            "/opt/dllm/lib/libdllm.so",
+            "--dllm-server-key",
+            "0xA1FDFFFFFF01FAFAFAFA",
+        ])
+        .unwrap();
+
+        assert!(args.dllm_enable);
+        assert_eq!(args.dllm_lib_path, "/opt/dllm/lib/libdllm.so");
+        assert_eq!(args.dllm_server_key, "0xA1FDFFFFFF01FAFAFAFA");
     }
 }
