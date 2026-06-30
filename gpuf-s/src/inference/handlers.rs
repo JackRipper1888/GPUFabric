@@ -13,11 +13,13 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
+use crate::db::token_usage::{insert_token_usage, TokenUsageInsert};
 use crate::inference::{
     gateway::{AuthContext, InferenceGateway},
     scheduler::{
         validate_session_id, CachePolicy, ChatCompletionRequest, ChatCompletionResponse,
-        CompletionRequest, DeviceInfo, ModelInfo, SessionRouteOutcome, SessionRouting, StreamEvent,
+        CompletionRequest, CompletionUsage, DeviceInfo, ModelInfo, SessionRouteOutcome,
+        SessionRouting, StreamEvent,
     },
 };
 use crate::util::protoc::ClientId;
@@ -365,6 +367,40 @@ fn apply_chat_route_metadata(response: &mut ChatCompletionResponse, outcome: &Se
     response.cache_status = outcome.cache_status;
 }
 
+async fn record_token_usage(
+    gateway: &InferenceGateway,
+    auth: &AuthContext,
+    request_id: Option<String>,
+    outcome: &SessionRouteOutcome,
+    model: String,
+    endpoint: &'static str,
+    usage: &CompletionUsage,
+    stream: bool,
+) {
+    if usage.total_tokens == 0 {
+        return;
+    }
+
+    if let Err(err) = insert_token_usage(
+        &gateway.db_pool,
+        TokenUsageInsert {
+            request_id,
+            token_hash: Some(auth.token_hash.clone()),
+            client_id: outcome.client_id,
+            model,
+            endpoint: endpoint.to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            success: true,
+            stream,
+        },
+    )
+    .await
+    {
+        error!("Failed to record token usage: {}", err);
+    }
+}
+
 /// Handle text completion requests
 pub async fn handle_completion(
     State(gateway): State<Arc<InferenceGateway>>,
@@ -487,6 +523,10 @@ pub async fn handle_completion(
                 });
                 let stop_state: Arc<Mutex<StopMarkerState>> =
                     Arc::new(Mutex::new(StopMarkerState::new(&[])));
+                let usage_gateway = gateway.clone();
+                let usage_auth = auth.clone();
+                let usage_request_id = request_id.clone();
+                let usage_outcome = route_outcome.clone();
                 let s = ReceiverStream::new(rx)
                     .then(move |ev| {
                         let guard = guard.clone();
@@ -494,6 +534,10 @@ pub async fn handle_completion(
                         let task_id = task_id.clone();
                         let model_name = model_name.clone();
                         let finished = finished.clone();
+                        let usage_gateway = usage_gateway.clone();
+                        let usage_auth = usage_auth.clone();
+                        let usage_request_id = usage_request_id.clone();
+                        let usage_outcome = usage_outcome.clone();
                         async move {
                             let _guard = guard;
                             let data = match ev {
@@ -521,6 +565,19 @@ pub async fn handle_completion(
                                     payload.to_string()
                                 }
                                 StreamEvent::Finish(usage) => {
+                                    if let Some(usage_value) = usage.as_ref() {
+                                        record_token_usage(
+                                            &usage_gateway,
+                                            &usage_auth,
+                                            usage_request_id.clone(),
+                                            &usage_outcome,
+                                            model_name.clone(),
+                                            "completion",
+                                            usage_value,
+                                            true,
+                                        )
+                                        .await;
+                                    }
                                     let tail = {
                                         let mut st = stop_state.lock().await;
                                         if st.stopped {
@@ -591,7 +648,11 @@ pub async fn handle_completion(
             // Send metrics to Kafka if needed
             if auth.access_level.is_metered() {
                 if let Err(e) = gateway
-                    .send_request_metrics(request_id, route_outcome.client_id, auth.access_level)
+                    .send_request_metrics(
+                        request_id.clone(),
+                        route_outcome.client_id,
+                        auth.access_level,
+                    )
                     .await
                 {
                     error!("Failed to send request metrics: {}", e);
@@ -600,6 +661,17 @@ pub async fn handle_completion(
             }
 
             let mut response = response;
+            record_token_usage(
+                &gateway,
+                &auth,
+                request_id.clone(),
+                &route_outcome,
+                response.model.clone(),
+                "completion",
+                &response.usage,
+                false,
+            )
+            .await;
             apply_completion_route_metadata(&mut response, &route_outcome);
             let finish_reason = if response.usage.completion_tokens >= max_tokens_effective {
                 "length"
@@ -755,6 +827,10 @@ pub async fn handle_chat_completion(
                 });
                 let stop_state: Arc<Mutex<StopMarkerState>> =
                     Arc::new(Mutex::new(StopMarkerState::new(&[])));
+                let usage_gateway = gateway.clone();
+                let usage_auth = auth.clone();
+                let usage_request_id = request_id.clone();
+                let usage_outcome = route_outcome.clone();
                 let s = ReceiverStream::new(rx)
                     .then(move |ev| {
                         let guard = guard.clone();
@@ -762,6 +838,10 @@ pub async fn handle_chat_completion(
                         let task_id = task_id.clone();
                         let model_name = model_name.clone();
                         let finished = finished.clone();
+                        let usage_gateway = usage_gateway.clone();
+                        let usage_auth = usage_auth.clone();
+                        let usage_request_id = usage_request_id.clone();
+                        let usage_outcome = usage_outcome.clone();
                         async move {
                             let _guard = guard;
                             let data = match ev {
@@ -796,6 +876,19 @@ pub async fn handle_chat_completion(
                                     payload.to_string()
                                 }
                                 StreamEvent::Finish(usage) => {
+                                    if let Some(usage_value) = usage.as_ref() {
+                                        record_token_usage(
+                                            &usage_gateway,
+                                            &usage_auth,
+                                            usage_request_id.clone(),
+                                            &usage_outcome,
+                                            model_name.clone(),
+                                            "chat.completion",
+                                            usage_value,
+                                            true,
+                                        )
+                                        .await;
+                                    }
                                     let tail = {
                                         let mut st = stop_state.lock().await;
                                         if st.stopped {
@@ -957,6 +1050,17 @@ pub async fn handle_chat_completion(
                 usage,
             };
             let mut chat_response = chat_response;
+            record_token_usage(
+                &gateway,
+                &auth,
+                request_id.clone(),
+                &route_outcome,
+                chat_response.model.clone(),
+                "chat.completion",
+                &chat_response.usage,
+                false,
+            )
+            .await;
             apply_chat_route_metadata(&mut chat_response, &route_outcome);
 
             response_with_route_headers(Json(chat_response).into_response(), &route_outcome)

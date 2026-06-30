@@ -44,9 +44,27 @@ CREATE TABLE  IF NOT EXISTS  "public"."gpu_assets" (
     "model" VARCHAR,
     "model_version" VARCHAR,
     "model_version_code" BIGINT,
+    "public_ip" INET,
+    "geo_country" VARCHAR,
+    "geo_region" VARCHAR,
+    "geo_city" VARCHAR,
+    "geo_latitude" DOUBLE PRECISION,
+    "geo_longitude" DOUBLE PRECISION,
+    "geo_source" VARCHAR,
+    "geo_updated_at" TIMESTAMP WITH TIME ZONE,
     "created_at" TIMESTAMP DEFAULT NOW(),
     "updated_at" TIMESTAMP DEFAULT NOW()
 );
+
+ALTER TABLE "public"."gpu_assets"
+ADD COLUMN IF NOT EXISTS "public_ip" INET,
+ADD COLUMN IF NOT EXISTS "geo_country" VARCHAR,
+ADD COLUMN IF NOT EXISTS "geo_region" VARCHAR,
+ADD COLUMN IF NOT EXISTS "geo_city" VARCHAR,
+ADD COLUMN IF NOT EXISTS "geo_latitude" DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS "geo_longitude" DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS "geo_source" VARCHAR,
+ADD COLUMN IF NOT EXISTS "geo_updated_at" TIMESTAMP WITH TIME ZONE;
 
  CREATE INDEX IF NOT EXISTS idx_gpu_assets_user_id_client_name
  ON "public"."gpu_assets" ("user_id", "client_name");
@@ -136,6 +154,31 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 
 CREATE INDEX IF NOT EXISTS idx_heartbeat_client_id_timestamp 
 ON heartbeat (client_id, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS inference_token_usage (
+    id BIGSERIAL PRIMARY KEY,
+    request_id VARCHAR,
+    token_hash VARCHAR,
+    client_id BYTEA NOT NULL,
+    model VARCHAR NOT NULL,
+    endpoint VARCHAR NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    success BOOLEAN NOT NULL DEFAULT TRUE,
+    stream BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inference_token_usage_created_at
+ON inference_token_usage (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_inference_token_usage_client_created
+ON inference_token_usage (client_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_inference_token_usage_request_endpoint
+ON inference_token_usage (request_id, token_hash, endpoint)
+WHERE request_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS client_daily_stats (
     id BIGSERIAL PRIMARY KEY,

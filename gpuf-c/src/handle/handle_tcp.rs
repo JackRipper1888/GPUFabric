@@ -1014,6 +1014,47 @@ impl ClientWorker {
         Ok(Self::detect_outbound_ip().await?.to_string())
     }
 
+    async fn get_public_ipv4_for_report(args: &Args) -> Option<u32> {
+        if let Some(ip) = args.p2p_advertise_ip.as_deref() {
+            let ip = ip.trim();
+            if let Ok(std::net::IpAddr::V4(ip)) = ip.parse::<std::net::IpAddr>() {
+                return Some(u32::from(ip));
+            }
+        }
+
+        if let Some(endpoint) = args.public_ip_endpoint.as_deref() {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                match reqwest::get(endpoint).await {
+                    Ok(resp) => match resp.error_for_status() {
+                        Ok(resp) => match resp.text().await {
+                            Ok(text) => {
+                                let ip = text.trim();
+                                if let Ok(std::net::IpAddr::V4(ip)) = ip.parse::<std::net::IpAddr>()
+                                {
+                                    return Some(u32::from(ip));
+                                }
+                                warn!("Public IP endpoint returned a non-IPv4 response");
+                            }
+                            Err(e) => warn!("Failed to read public IP endpoint response: {}", e),
+                        },
+                        Err(e) => warn!("Public IP endpoint returned an error: {}", e),
+                    },
+                    Err(e) => warn!("Failed to call public IP endpoint: {}", e),
+                }
+            }
+        }
+
+        match Self::detect_outbound_ip().await {
+            Ok(std::net::IpAddr::V4(ip)) => Some(u32::from(ip)),
+            Ok(std::net::IpAddr::V6(_)) => None,
+            Err(e) => {
+                warn!("Failed to detect outbound IP for reporting: {}", e);
+                None
+            }
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     async fn execute_inference_task_with_engine(
         engine: Arc<Mutex<Option<AnyEngine>>>,
@@ -1699,6 +1740,11 @@ impl ClientWorker {
         ));
         //system info
         let (cpu_useage, mem_useage, disk_useage, _computer_name) = collect_system_info().await?;
+        let public_ipv4 = Self::get_public_ipv4_for_report(&args).await;
+        let mut device_info = device_info;
+        if let Some(ip) = public_ipv4 {
+            device_info.ip = ip;
+        }
 
         let stats = network_monitor.lock().await.refresh().unwrap_or((0, 0));
         let worker = ClientWorker {
@@ -1718,6 +1764,7 @@ impl ClientWorker {
                 network_rx: stats.0,
                 network_tx: stats.1,
             }),
+            public_ipv4,
             client_id: args.client_id.expect("client_id is required"),
             device_memtotal_gb,
             device_total_tflops,
@@ -2347,6 +2394,7 @@ impl WorkerHandle for ClientWorker {
             let writer_clone = Arc::clone(&self.writer);
             let client_id = Arc::new(self.client_id.clone());
             let network_monitor = Arc::clone(&self.network_monitor);
+            let public_ipv4 = self.public_ipv4;
             let engine_type = self.engine_type; // Clone engine_type for use in spawn
                                                 // network_monitor.lock().await.update();
             tokio::spawn(async move {
@@ -2365,7 +2413,7 @@ impl WorkerHandle for ClientWorker {
                         };
 
                     // device_info should be real-time for monitoring
-                    let (device_info, device_memtotal_mb) =
+                    let (mut device_info, device_memtotal_mb) =
                         match collect_device_info(engine_type).await {
                             Ok(info) => info,
                             Err(e) => {
@@ -2373,6 +2421,9 @@ impl WorkerHandle for ClientWorker {
                                 (DevicesInfo::default(), 0)
                             }
                         };
+                    if let Some(ip) = public_ipv4 {
+                        device_info.ip = ip;
+                    }
 
                     // TODO: device_info is remote device info
                     info!("heartbeat: cpu_usage {}% memory_usage {}% disk_usage {}% device_memtotal {}mb", cpu_usage, memory_usage, disk_usage, device_memtotal_mb);

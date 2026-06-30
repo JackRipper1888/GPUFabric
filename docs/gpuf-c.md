@@ -65,6 +65,7 @@ control_tls_server_name = "gpuf.example.internal"
 | `--control-tls` | Connect to the gpuf-s control port over TLS | false |
 | `--control-tls-server-name` | Optional SNI/server-name override for control TLS validation | None |
 | `--client-id` | Unique ID for this client instance | Auto-generated |
+| `--public-ip-endpoint` | Optional endpoint returning this client's public egress IP as plain text | None |
 
 ### Worker Types
 - `tcp`: Standard TCP connection

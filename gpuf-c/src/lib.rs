@@ -4230,6 +4230,7 @@ pub extern "C" fn start_remote_worker(
         local_addr: "127.0.0.1".to_string(),
         local_port: 0,
         p2p_advertise_ip: None,
+        public_ip_endpoint: None,
         p2p_udp_port: 40000,
         p2p_bind_addr: "127.0.0.1".to_string(),
         p2p_public_listen: false,

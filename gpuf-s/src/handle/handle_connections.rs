@@ -4,6 +4,7 @@ use crate::db::{
     client,
     models::{self, HotModelClass},
 };
+use crate::util::geo;
 use crate::util::protoc::{ClientId, HeartbeatMessage};
 use bytes::BytesMut;
 use std::collections::HashMap;
@@ -192,7 +193,11 @@ async fn handle_single_client(
                     &hot_models,
                     &ClientId(id),
                     os_type,
-                    devices_info,
+                    devices_info.clone(),
+                    geo::normalize_public_ip_from_device(
+                        devices_info.first().map(|device| device.ip),
+                        addr.ip(),
+                    ),
                     SystemInfo {
                         cpu_usage: system_info.cpu_usage,
                         memory_usage: system_info.memory_usage,
@@ -235,8 +240,13 @@ async fn handle_single_client(
                     ClientId(id).log_label()
                 );
                 handle_heartbeat(
+                    &db_pool,
                     &producer,
                     &ClientId(id),
+                    geo::normalize_public_ip_from_device(
+                        devices_info.first().map(|device| device.ip),
+                        addr.ip(),
+                    ),
                     system_info,
                     devices_info,
                     device_memtotal_gb,
@@ -574,6 +584,7 @@ async fn handle_login(
     client_id: &ClientId,
     os_type: OsType,
     devices_info: Vec<DevicesInfo>,
+    public_ip: String,
     system_info: SystemInfo,
     writer: &Arc<Mutex<ControlWriter>>,
     authed: &mut bool,
@@ -597,6 +608,13 @@ async fn handle_login(
     let validate_result = if is_valid {
         info!("Client {} registered successfully", client_id.log_label());
         *authed = true;
+
+        let geo_location = geo::lookup_geo(&public_ip).await;
+        if let Err(e) =
+            client::update_client_network_geo(db_pool, client_id, &public_ip, &geo_location).await
+        {
+            warn!("Failed to update client network geo: {}", e);
+        }
 
         // Only recommend models if auto_models is enabled
         let pods_model = if auto_models {
@@ -727,8 +745,10 @@ async fn upsert_client_models_in_redis(
 }
 
 async fn handle_heartbeat(
+    db_pool: &Pool<Postgres>,
     producer: &Arc<FutureProducer>,
     client_id: &ClientId,
+    public_ip: String,
     system_info: common::SystemInfo,
     devices_info: Vec<common::DevicesInfo>,
     device_memtotal_gb: u32,
@@ -736,6 +756,13 @@ async fn handle_heartbeat(
     total_tflops: u32,
 ) {
     debug!("Sending heartbeat to consumer client {} cpu_usage {}% memory_usage {}% disk_usage {}% device_memtotal_gb {} GB device_count {} total_tflops {} tflops", client_id.log_label(), system_info.cpu_usage, system_info.memory_usage, system_info.disk_usage, device_memtotal_gb, device_count, total_tflops);
+
+    let geo_location = geo::lookup_geo(&public_ip).await;
+    if let Err(e) =
+        client::update_client_network_geo(db_pool, client_id, &public_ip, &geo_location).await
+    {
+        warn!("Failed to update client heartbeat network geo: {}", e);
+    }
 
     let heartbeat_message = HeartbeatMessage {
         client_id: client_id.clone(),

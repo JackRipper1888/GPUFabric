@@ -106,6 +106,11 @@ pub struct Args {
     #[arg(long, default_value = None)]
     pub p2p_advertise_ip: Option<String>,
 
+    /// Optional HTTP endpoint that returns the client's public egress IP as plain text.
+    /// If unset, gpuf-c reports --p2p-advertise-ip or the locally selected outbound IP.
+    #[arg(long, env = "GPUF_PUBLIC_IP_ENDPOINT", default_value = None)]
+    pub public_ip_endpoint: Option<String>,
+
     /// UDP port used for P2P data-plane when running in UDP mode.
     #[arg(long, default_value_t = 40000)]
     pub p2p_udp_port: u16,
@@ -285,6 +290,7 @@ impl Args {
                 local_addr: config_data.client.local_addr,
                 local_port: config_data.client.local_port,
                 p2p_advertise_ip: self.p2p_advertise_ip.clone(),
+                public_ip_endpoint: self.public_ip_endpoint.clone(),
                 p2p_udp_port: self.p2p_udp_port,
                 p2p_bind_addr: self.p2p_bind_addr.clone(),
                 p2p_public_listen: self.p2p_public_listen,

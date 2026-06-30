@@ -53,6 +53,7 @@ pub struct ClientWorker {
     reader: Arc<Mutex<ControlReader>>,
     writer: Arc<Mutex<ControlWriter>>,
     system_info: Arc<SystemInfo>,
+    public_ipv4: Option<u32>,
     devices_info: Arc<Vec<DevicesInfo>>,
     device_memtotal_gb: u32,
     device_total_tflops: u32,
