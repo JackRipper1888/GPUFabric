@@ -4129,6 +4129,70 @@ pub extern "C" fn gpuf_validate_mobile_tls_policy(
     }
 }
 
+/// Configure TLS trust material for the mobile proxy/data connection.
+///
+/// `start_remote_worker_with_tls` configures the control connection. The
+/// legacy public gateway uses a separate proxy port that is TLS even when the
+/// control port is plaintext, so apps can call this before
+/// `start_remote_worker_tasks` to supply the proxy CA/SNI/pin.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[no_mangle]
+pub extern "C" fn gpuf_configure_remote_worker_proxy_tls(
+    ca_cert_path: *const c_char,
+    proxy_tls_server_name: *const c_char,
+    cert_sha256_pin: *const c_char,
+) -> c_int {
+    use crate::util::mobile_control_stream::MobileControlTlsConfig;
+
+    let ca_cert_path = match optional_c_string(ca_cert_path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let proxy_tls_server_name = match optional_c_string(proxy_tls_server_name) {
+        Ok(Some(s)) => s,
+        Ok(None) => "localhost".to_string(),
+        Err(code) => return code,
+    };
+    let cert_sha256_pin = match optional_c_string(cert_sha256_pin) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+
+    let tls_config = match MobileControlTlsConfig::from_inputs(
+        true,
+        ca_cert_path.as_deref(),
+        Some(proxy_tls_server_name.as_str()),
+        cert_sha256_pin.as_deref(),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("❌ Error: Invalid mobile proxy TLS policy: {}", e);
+            return -2;
+        }
+    };
+
+    #[cfg(target_os = "ios")]
+    {
+        crate::worker_sdk::configure_remote_worker_proxy_tls(tls_config)
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = tls_config;
+        0
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[no_mangle]
+pub extern "C" fn gpuf_configure_remote_worker_proxy_tls(
+    _ca_cert_path: *const c_char,
+    _proxy_tls_server_name: *const c_char,
+    _cert_sha256_pin: *const c_char,
+) -> c_int {
+    -1
+}
+
 // ============================================================================
 // C FFI - Remote Worker Management and Monitoring
 // ============================================================================
@@ -4250,6 +4314,9 @@ pub extern "C" fn start_remote_worker(
         llama_main_gpu: 0,
         llama_devices: None,
         stream_chunk_bytes: 256,
+        dllm_enable: false,
+        dllm_lib_path: "libdllm.so".to_string(),
+        dllm_server_key: "0xA1FDFFFFFF01FAFAFAFA".to_string(),
     };
 
     #[cfg(target_os = "android")]
@@ -4289,9 +4356,10 @@ pub extern "C" fn start_remote_worker(
             .expect("Failed to create local tokio runtime");
 
         match local_runtime.block_on(async {
-            crate::worker_sdk::perform_login(
+            crate::worker_sdk::perform_login_with_proxy(
                 server_addr_str,
                 control_port as u16,
+                proxy_port as u16,
                 client_id_str,
                 args.auto_models,
             )
@@ -4418,9 +4486,10 @@ pub extern "C" fn start_remote_worker_with_tls(
             .expect("Failed to create local tokio runtime");
 
         match local_runtime.block_on(async {
-            crate::worker_sdk::perform_login_with_tls(
+            crate::worker_sdk::perform_login_with_tls_and_proxy(
                 server_addr_str.as_str(),
                 control_port as u16,
+                proxy_port as u16,
                 client_id_str.as_str(),
                 false,
                 tls_config,

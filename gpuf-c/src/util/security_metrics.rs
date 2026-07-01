@@ -1,9 +1,44 @@
+#[cfg(not(target_os = "ios"))]
 use crate::handle::session_cache::{
     worker_session_cache_metrics_snapshot, WorkerSessionCacheMetricsSnapshot,
 };
 use once_cell::sync::Lazy;
+#[cfg(target_os = "ios")]
+use serde::Serialize;
+#[cfg(not(target_os = "ios"))]
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(target_os = "ios")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct WorkerSessionCacheMetricsSnapshot {
+    pub decisions_total: u64,
+    pub session_task_total: u64,
+    pub cold_total: u64,
+    pub bypass_total: u64,
+    pub reset_total: u64,
+    pub unsupported_policy_total: u64,
+    pub disabled_total: u64,
+    pub kv_hit_total: u64,
+    pub state_checkpoint_hit_total: u64,
+    pub state_checkpoint_miss_total: u64,
+    pub state_checkpoint_save_total: u64,
+    pub state_checkpoint_reset_total: u64,
+    pub state_checkpoint_error_total: u64,
+    pub state_checkpoint_quota_eviction_total: u64,
+    pub state_checkpoint_bytes_current: u64,
+    pub state_checkpoint_max_bytes: u64,
+    pub active_sessions_current: usize,
+    pub max_sessions: usize,
+    pub session_ttl_secs: u64,
+    pub metadata_eviction_total: u64,
+    pub metadata_stale_total: u64,
+}
+
+#[cfg(target_os = "ios")]
+fn worker_session_cache_metrics_snapshot() -> WorkerSessionCacheMetricsSnapshot {
+    WorkerSessionCacheMetricsSnapshot::default()
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SecurityMetricsSnapshot {

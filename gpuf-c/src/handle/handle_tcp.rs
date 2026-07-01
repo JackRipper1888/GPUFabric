@@ -49,6 +49,52 @@ use std::sync::OnceLock;
 static GLOBAL_ENGINE: OnceLock<Arc<Mutex<Option<AnyEngine>>>> = OnceLock::new();
 
 #[cfg(not(target_os = "android"))]
+fn start_llama_http_server_once(
+    engine: &AnyEngine,
+    local_addr: String,
+    local_port: u16,
+) -> Result<()> {
+    info!(
+        "Starting LLAMA HTTP API server on {}:{}",
+        local_addr, local_port
+    );
+
+    if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
+        let server_engine = match engine {
+            AnyEngine::Llama(e) => e.clone(),
+            _ => anyhow::bail!("LLAMA HTTP server requires a LLAMA engine"),
+        };
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(server_engine));
+        let local_addr_clone = local_addr.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = crate::llm_engine::llama_server::start_server(
+                engine_arc,
+                &local_addr_clone,
+                local_port,
+            )
+            .await
+            {
+                error!("LLAMA HTTP server error: {}", e);
+                HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+            }
+        });
+
+        info!(
+            "LLAMA HTTP API server started successfully on {}:{}",
+            local_addr, local_port
+        );
+    } else {
+        info!(
+            "LLAMA HTTP API server already running on {}:{}",
+            local_addr, local_port
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
 use tokio_rustls::{
     rustls::{
         pki_types::{CertificateDer, ServerName},
@@ -1576,52 +1622,11 @@ impl ClientWorker {
                 // Drop the lock before starting HTTP server
                 drop(cached_engine);
 
-                // Start local HTTP API server for LLAMA (for proxy forwarding)
-                // Use the SAME engine instance for both worker and HTTP server
-                let local_addr = args.local_addr.clone();
-                let local_port = args.local_port;
-                let local_addr_clone = local_addr.clone();
-                info!(
-                    "Starting LLAMA HTTP API server on {}:{}",
-                    local_addr, local_port
-                );
-
-                use crate::llm_engine::llama_server::start_server;
-                use std::sync::Arc;
-                use tokio::sync::RwLock;
-
-                // Only start HTTP server if not already running (prevent port conflicts on reconnection)
-                if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
-                    // Extract LlamaEngine from AnyEngine for HTTP server
-                    let server_engine = match engine.as_ref().unwrap() {
-                        AnyEngine::Llama(e) => e.clone(),
-                        _ => unreachable!(),
-                    };
-
-                    // Wrap the shared engine in Arc<RwLock> for HTTP server
-                    let engine_arc = Arc::new(RwLock::new(server_engine));
-
-                    // Spawn server in background
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            start_server(engine_arc, &local_addr_clone, local_port).await
-                        {
-                            error!("LLAMA HTTP server error: {}", e);
-                            // Reset flag on error so it can be retried
-                            HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
-                        }
-                    });
-
-                    info!(
-                        "LLAMA HTTP API server started successfully on {}:{}",
-                        local_addr, local_port
-                    );
-                } else {
-                    info!(
-                        "LLAMA HTTP API server already running on {}:{}",
-                        local_addr, local_port
-                    );
-                }
+                start_llama_http_server_once(
+                    engine.as_ref().unwrap(),
+                    args.local_addr.clone(),
+                    args.local_port,
+                )?;
             }
         }
         #[cfg(target_os = "macos")]
@@ -1717,6 +1722,11 @@ impl ClientWorker {
                     *cached_engine = Some(llama_worker.clone());
                     engine = Some(llama_worker);
                 }
+                start_llama_http_server_once(
+                    engine.as_ref().unwrap(),
+                    args.local_addr.clone(),
+                    args.local_port,
+                )?;
             }
         }
         let device_memtotal_gb = device_memtotal_mb as u32;
