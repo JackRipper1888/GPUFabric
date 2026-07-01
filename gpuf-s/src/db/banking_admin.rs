@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use serde_json::json;
 use sqlx::{postgres::Postgres, FromRow, Pool};
 use std::{collections::HashMap, fmt::Write};
 
@@ -7,7 +8,8 @@ use crate::api_server::banking_admin::{
     ClusterStackItem, ComputeNodeItem, ComputeNodeStats, ComputeNodesData, ComputeNodesQuery,
     HighlightProvince, NetworkCity, NetworkLink, NetworkMapData, NetworkRegion, OverviewData,
     OverviewQuery, Pagination, ResourceUsage, SummaryCard, TokenThroughputData,
-    TokenThroughputPeaks, TokenThroughputPoint, TokenThroughputQuery, TopCity,
+    TokenThroughputPeaks, TokenThroughputPoint, TokenThroughputQuery, TokenThroughputTotals,
+    TopCity,
 };
 use crate::db::token_usage;
 
@@ -33,7 +35,7 @@ struct BankingAssetRow {
     gpu_count: i64,
     device_names: Option<Vec<String>>,
     avg_device_gpuusage: Option<f64>,
-    token_tps: Option<i64>,
+    token_tps: Option<f64>,
     last_seen_at: DateTime<Utc>,
 }
 
@@ -166,7 +168,7 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
         query.region.as_deref(),
     )
     .await?;
-    let token_tps = token_usage::average_tokens_per_second(
+    let token_tps = token_usage::tokens_per_second(
         token_latest.total_tokens,
         token_usage::REALTIME_TPS_WINDOW_SECONDS,
     );
@@ -178,7 +180,7 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
             SummaryCard {
                 key: "onlineNodes".to_string(),
                 label: "在线节点".to_string(),
-                value: online_nodes as u64,
+                value: json!(online_nodes),
                 display_value: format_number(online_nodes as u64),
                 unit: "个".to_string(),
                 caption: None,
@@ -186,7 +188,7 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
             SummaryCard {
                 key: "totalCompute".to_string(),
                 label: "总算力".to_string(),
-                value: total_tflops,
+                value: json!(total_tflops),
                 display_value: format_pf(total_tflops),
                 unit: "PF".to_string(),
                 caption: None,
@@ -194,15 +196,15 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
             SummaryCard {
                 key: "realtimeTokenThroughput".to_string(),
                 label: "实时Token吞吐".to_string(),
-                value: token_tps,
-                display_value: format_number(token_tps),
+                value: json!(token_tps),
+                display_value: format_rate(token_tps),
                 unit: "/s".to_string(),
                 caption: Some("当前TPS".to_string()),
             },
             SummaryCard {
                 key: "todayTokenTotal".to_string(),
                 label: "今日Token总量".to_string(),
-                value: total_token_value,
+                value: json!(total_token_value),
                 display_value: token_display.0,
                 unit: token_display.1,
                 caption: Some(if time_range.is_some() {
@@ -326,14 +328,27 @@ pub async fn get_token_throughput(
     pool: &Pool<Postgres>,
     query: &TokenThroughputQuery,
 ) -> Result<TokenThroughputData> {
-    let window_seconds = query.window_seconds.unwrap_or(180).clamp(1, 3600);
-    let interval_seconds = query.interval_seconds.unwrap_or(3).clamp(1, 300);
-    let point_count = (window_seconds / interval_seconds).clamp(1, 600);
+    const MAX_THROUGHPUT_POINTS: u32 = 600;
+
+    let window_seconds = query.window_seconds.unwrap_or(180).clamp(1, 86_400);
+    let requested_interval_seconds = query.interval_seconds.unwrap_or(3).clamp(1, 300);
+    let min_interval_seconds =
+        window_seconds.saturating_add(MAX_THROUGHPUT_POINTS - 2) / (MAX_THROUGHPUT_POINTS - 1);
+    let interval_seconds = requested_interval_seconds.max(min_interval_seconds.max(1));
+    let point_count = (window_seconds / interval_seconds)
+        .saturating_add(1)
+        .clamp(1, MAX_THROUGHPUT_POINTS);
     let now = Utc::now();
     let rows = token_usage::get_token_usage_points(
         pool,
         window_seconds,
         interval_seconds,
+        query.region.as_deref(),
+    )
+    .await?;
+    let total_row = token_usage::get_token_usage_io_latest_window(
+        pool,
+        window_seconds,
         query.region.as_deref(),
     )
     .await?;
@@ -343,46 +358,66 @@ pub async fn get_token_throughput(
         for index in (0..point_count).rev() {
             points.push(TokenThroughputPoint {
                 timestamp: now - Duration::seconds((index * interval_seconds) as i64),
-                input: 0,
-                output: 0,
+                input: 0.0,
+                output: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
             });
         }
     } else {
-        for row in rows.into_iter().take(600) {
+        let skip_count = rows.len().saturating_sub(point_count as usize);
+        for row in rows.into_iter().skip(skip_count) {
+            let input_tokens = row.input_tokens.max(0) as u64;
+            let output_tokens = row.output_tokens.max(0) as u64;
             points.push(TokenThroughputPoint {
                 timestamp: row.bucket,
-                input: token_usage::average_tokens_per_second(row.input_tokens, interval_seconds),
-                output: token_usage::average_tokens_per_second(row.output_tokens, interval_seconds),
+                input: token_usage::tokens_per_second(row.input_tokens, interval_seconds),
+                output: token_usage::tokens_per_second(row.output_tokens, interval_seconds),
+                input_tokens,
+                output_tokens,
+                total_tokens: input_tokens.saturating_add(output_tokens),
             });
         }
     }
+
+    let totals = TokenThroughputTotals {
+        input_tokens: total_row.input_tokens.max(0) as u64,
+        output_tokens: total_row.output_tokens.max(0) as u64,
+        total_tokens: total_row.total_tokens.max(0) as u64,
+    };
 
     if points.is_empty() {
         points.push(TokenThroughputPoint {
             timestamp: now,
-            input: 0,
-            output: 0,
+            input: 0.0,
+            output: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
         });
     }
 
-    let latest = points
-        .iter()
-        .rev()
-        .find(|point| point.input > 0 || point.output > 0)
-        .cloned()
-        .or_else(|| points.last().cloned())
-        .unwrap_or(TokenThroughputPoint {
-            timestamp: now,
-            input: 0,
-            output: 0,
-        });
+    let latest = points.last().cloned().unwrap_or(TokenThroughputPoint {
+        timestamp: now,
+        input: 0.0,
+        output: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+    });
 
     Ok(TokenThroughputData {
+        window_seconds,
+        interval_seconds,
         latest,
         peaks: TokenThroughputPeaks {
-            input: points.iter().map(|point| point.input).max().unwrap_or(0),
-            output: points.iter().map(|point| point.output).max().unwrap_or(0),
+            input: points.iter().fold(0.0, |peak, point| peak.max(point.input)),
+            output: points
+                .iter()
+                .fold(0.0, |peak, point| peak.max(point.output)),
         },
+        totals,
         points,
     })
 }
@@ -411,7 +446,7 @@ async fn fetch_asset_rows(pool: &Pool<Postgres>) -> Result<Vec<BankingAssetRow>>
             COALESCE(di.gpu_count, 0)::BIGINT AS gpu_count,
             COALESCE(di.device_names, ARRAY[]::TEXT[]) AS device_names,
             di.avg_device_gpuusage,
-            COALESCE(tu.token_tps, 0)::BIGINT AS token_tps,
+            COALESCE(tu.token_tps, 0)::FLOAT8 AS token_tps,
             GREATEST(
                 COALESCE(ga.updated_at, NOW())::TIMESTAMPTZ,
                 COALESCE(si.updated_at, ga.updated_at, NOW())::TIMESTAMPTZ,
@@ -430,7 +465,7 @@ async fn fetch_asset_rows(pool: &Pool<Postgres>) -> Result<Vec<BankingAssetRow>>
             GROUP BY client_id
         ) di ON di.client_id = ga.client_id
         LEFT JOIN (
-            SELECT client_id, CEIL(SUM(total_tokens)::FLOAT8 / 10)::BIGINT AS token_tps
+            SELECT client_id, SUM(total_tokens)::FLOAT8 / 10.0 AS token_tps
             FROM inference_token_usage
             WHERE success = TRUE
               AND created_at >= NOW() - INTERVAL '10 seconds'
@@ -488,7 +523,7 @@ fn asset_row_to_compute_node(row: &BankingAssetRow) -> Option<ComputeNodeItem> {
         gpu_model,
         gpu_count,
         load: current_load(row),
-        tokens_per_second: row.token_tps.unwrap_or_default().max(0) as u64,
+        tokens_per_second: row.token_tps.unwrap_or_default().max(0.0),
         last_seen_at: row.last_seen_at,
         last_seen_text: Some(last_seen_text(row.last_seen_at)),
     })
@@ -1207,6 +1242,11 @@ fn format_number(value: u64) -> String {
     out.chars().rev().collect()
 }
 
+fn format_rate(value: f64) -> String {
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 fn format_pf(total_tflops: u64) -> String {
     let value = total_tflops as f64 / 1_000.0;
     let text = format!("{value:.1}");
@@ -1223,7 +1263,7 @@ fn format_token_total(total_tokens: u64) -> (String, String) {
     let (unit, divisor) = units
         .into_iter()
         .find(|(_, divisor)| total_tokens as f64 >= *divisor)
-        .unwrap_or(("", 1.0));
+        .unwrap_or(("tokens", 1.0));
     let value = total_tokens as f64 / divisor;
     let text = format!("{value:.2}");
     (

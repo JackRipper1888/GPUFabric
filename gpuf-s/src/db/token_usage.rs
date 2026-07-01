@@ -31,6 +31,13 @@ pub struct TokenUsageSummaryRow {
     pub total_tokens: i64,
 }
 
+#[derive(Debug, FromRow)]
+pub struct TokenUsageIoSummaryRow {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+}
+
 pub async fn ensure_token_usage_schema(pool: &Pool<Postgres>) -> Result<()> {
     sqlx::query(
         r#"
@@ -135,9 +142,9 @@ pub async fn insert_token_usage(pool: &Pool<Postgres>, usage: TokenUsageInsert) 
     Ok(())
 }
 
-pub fn average_tokens_per_second(total_tokens: i64, window_seconds: u32) -> u64 {
-    let total_tokens = total_tokens.max(0) as u64;
-    let window_seconds = u64::from(window_seconds.max(1));
+pub fn tokens_per_second(total_tokens: i64, window_seconds: u32) -> f64 {
+    let total_tokens = total_tokens.max(0) as f64;
+    let window_seconds = f64::from(window_seconds.max(1));
     total_tokens / window_seconds
 }
 
@@ -206,6 +213,36 @@ pub async fn get_token_usage_latest_window(
     let row = sqlx::query_as::<_, TokenUsageSummaryRow>(
         r#"
         SELECT
+            COALESCE(SUM(itu.total_tokens), 0)::BIGINT AS total_tokens
+        FROM inference_token_usage itu
+        LEFT JOIN gpu_assets ga ON ga.client_id = itu.client_id
+        WHERE itu.success = TRUE
+          AND itu.created_at >= NOW() - ($1::INTEGER * INTERVAL '1 second')
+          AND (
+            $2::TEXT IS NULL
+            OR LOWER(COALESCE(ga.geo_city, '')) = LOWER($2)
+            OR LOWER(COALESCE(ga.geo_region, '')) = LOWER($2)
+          )
+        "#,
+    )
+    .bind(window_seconds as i32)
+    .bind(region.filter(|value| !value.trim().is_empty()))
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn get_token_usage_io_latest_window(
+    pool: &Pool<Postgres>,
+    window_seconds: u32,
+    region: Option<&str>,
+) -> Result<TokenUsageIoSummaryRow> {
+    let row = sqlx::query_as::<_, TokenUsageIoSummaryRow>(
+        r#"
+        SELECT
+            COALESCE(SUM(itu.prompt_tokens), 0)::BIGINT AS input_tokens,
+            COALESCE(SUM(itu.completion_tokens), 0)::BIGINT AS output_tokens,
             COALESCE(SUM(itu.total_tokens), 0)::BIGINT AS total_tokens
         FROM inference_token_usage itu
         LEFT JOIN gpu_assets ga ON ga.client_id = itu.client_id

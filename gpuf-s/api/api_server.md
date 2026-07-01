@@ -60,9 +60,9 @@ Get nationwide city-level compute map data. This endpoint returns raw JSON, not
 |---|---|---|
 | onlineNodes | number | Strict online mapped node count, normalized from `client_status` |
 | totalTflops | number | Real aggregated TFLOPS from `system_info.total_tflops` |
-| tokenTps | number | Real average token TPS from the latest 10-second window |
-| todayTokenTotal | number | Real total tokens today, expressed in `todayTokenUnit` |
-| todayTokenUnit | string | Auto-scaled unit: `K`, `M`, `B`, or `T` |
+| tokenTps | number | Exact average token TPS from the latest 10-second window; may contain decimals |
+| todayTokenTotal | number | Exact raw token count today, not display-scaled |
+| todayTokenUnit | string | `tokens` |
 | usedNodes | number | Best-effort used node count from real model assignment and telemetry load |
 
 `ComputeMapNode`:
@@ -101,7 +101,7 @@ Get nationwide city-level compute map data. This endpoint returns raw JSON, not
 | Real status-derived data | `nodes[].status`, `summary.onlineNodes` | Calculated from persisted `client_status` and `valid_status` |
 | Best-effort usage data | `summary.usedNodes` | Count of online nodes with assigned model metadata or current telemetry load >= 5% |
 | Geo-derived/static data | `nodes[].id`, `name`, `lng`, `lat`, `region` | Derived from persisted geo fields; known Chinese cities use built-in city coordinates/regions for stable frontend display |
-| Token usage data | `summary.tokenTps`, `summary.todayTokenTotal` | Aggregated from `inference_token_usage`; starts accumulating after this version is deployed |
+| Token usage data | `summary.tokenTps`, `summary.todayTokenTotal` | Aggregated from `inference_token_usage`; `todayTokenTotal` is exact raw token count |
 | Placeholder data | `links` | Returned as `[]` in v1 because there is no persisted route source yet |
 
 ### Missing API Logic In V1
@@ -128,8 +128,8 @@ curl "http://<host>:18081/api/compute-map"
     "onlineNodes": 1,
     "totalTflops": 80,
     "tokenTps": 0,
-    "todayTokenTotal": 0.0,
-    "todayTokenUnit": "T",
+    "todayTokenTotal": 62,
+    "todayTokenUnit": "tokens",
     "usedNodes": 0
   },
   "nodes": [
@@ -182,10 +182,11 @@ Current real persisted sources are:
 | Used nodes/devices | Best-effort supported | Counts online nodes with assigned model metadata or current telemetry load >= 5% |
 | OS/device filter | Supported | Normalizes `gpu_assets.os_type` to `linux/windows/mac/unknown` |
 | Region/city filter | Supported | Supports city id/name, province, region id, and region name where applicable |
-| `from` / `to` on overview | Not supported in v1 | Accepted but ignored; no historical dashboard metric source yet |
+| `from` / `to` on overview | Partially supported | Applies to the token total card when both values are valid; other overview cards remain current-state values |
 | Token TPS / token totals | Supported | Aggregated from `inference_token_usage` |
 | Network links | Not supported in v1 | Returned as `[]`; no route/traffic source yet |
 | Token `region` filter | Supported | Matches `gpu_assets.geo_city` or `geo_region` for the serving node |
+| Token reconciliation | Supported | Use exact raw token fields; do not reconcile against scaled display fields |
 | Compute node `owner` | Best-effort supported | Uses `gpu_assets.user_id` when present; falls back to `<算力区>节点池` |
 | Compute node `load` | Derived fallback | Max of current CPU/memory/disk/GPU usage, not model-serving load |
 
@@ -196,13 +197,30 @@ Current real persisted sources are:
 | `/overview` | `summaryCards[onlineNodes].value`, `summaryCards[totalCompute].value`, token summary cards, `resourceUsage.totalDevices` | `resourceUsage.usedDevices`, `resourceUsage.usageRate`, `summaryCards[].displayValue`, `clusterStack[].percent` | none for current summary surface |
 | `/network-map` | `cities[].nodes`, `cities[].tflops`, `cities[].gpuModel`, `cities[].onlineNodes`, `topCities[]` | `cities[].id/name/province/coord/tier`, `cities[].usedNodes`, `regions[]`, `highlightProvinces[]` | `links` |
 | `/compute-nodes` | `id`, `owner` when `user_id` exists, `name` when `client_name` exists, `gpuModel`, `gpuCount`, `tokensPerSecond`, `lastSeenAt` | fallback `name`, fallback `owner`, `region`, `regionId`, `device`, `status`, `gpu`, `load`, `lastSeenText` | none for current node table surface |
-| `/token-throughput` | `input`, `output`, peak values, timestamps from `inference_token_usage` buckets | empty buckets are generated as zero points for chart continuity | none for current throughput surface |
+| `/token-throughput` | `input`, `output`, `inputTokens`, `outputTokens`, `totalTokens`, peak values, timestamps from `inference_token_usage` buckets | empty buckets are generated as zero points for chart continuity | none for current throughput surface |
+
+## Token Reconciliation Rules
+
+- Use raw token fields for accounting: `summary.todayTokenTotal`,
+  `summaryCards[].value`, `points[].inputTokens`, `points[].outputTokens`,
+  `points[].totalTokens`, and `totals.totalTokens`.
+- Use `displayValue` and units such as `K`, `M`, `B`, `T`, or `tokens` only for
+  UI display. They are not the source of truth for reconciliation.
+- `input` and `output` in throughput payloads are exact tokens-per-second rates
+  for the selected interval, so they can be decimal values. They are rates, not
+  raw token counts.
+- `/overview` and `/api/compute-map` daily totals use the database server's
+  current calendar day via `date_trunc('day', NOW())`.
+- `/token-throughput` uses a rolling window (`NOW() - windowSeconds`). A
+  24-hour rolling window is not the same thing as today's calendar-day total.
+  For strict reconciliation, query matching time scopes or compare against
+  `totals.totalTokens` from the same throughput request.
 
 ## Missing API Logic In V1
 
 | Endpoint | Missing logic | Current behavior | Needed source/implementation |
 |---|---|---|---|
-| `/overview` | Historical filtering by `from`/`to` | Params are accepted but ignored | Add time-series dashboard tables or aggregate snapshots |
+| `/overview` | Full historical filtering by `from`/`to` | The token total card honors valid `from`/`to`; inventory, compute, and usage cards remain current-state values | Add time-series dashboard tables or aggregate snapshots for full historical dashboard views |
 | `/overview` | Exact used device/resource usage | `usedDevices` and `usageRate` are best-effort values from model metadata and telemetry load | Persist currently assigned/serving workload state if exact scheduler occupancy is required |
 | `/overview` | Historical token backfill | Token TPS and daily token total start from newly recorded `inference_token_usage` rows | Backfill from logs only if pre-deployment history is required |
 | `/overview` | Real serving load | `clusterStack` only classifies inventory by GPU model family | Add actual serving/resource allocation metrics if frontend needs utilization composition |
@@ -228,7 +246,7 @@ Get summary cards, resource usage, and coarse resource composition.
 ### Response `data`
 | Field | Type | v1 Notes |
 |---|---|---|
-| summaryCards | SummaryCard[] | `onlineNodes`, `totalCompute`, and token cards are real after token usage rows are recorded |
+| summaryCards | SummaryCard[] | `value` is the exact raw value; `displayValue`/`unit` are presentation fields |
 | resourceUsage.totalDevices | number | Real filtered node count |
 | resourceUsage.usedDevices | number | Best-effort count of online nodes with assigned model metadata or telemetry load >= 5% |
 | resourceUsage.usageRate | number | `usedDevices / totalDevices`, rounded percentage |
@@ -262,17 +280,17 @@ curl "http://<host>:18081/api/banking/admin/overview?region=beijing"
       {
         "key": "realtimeTokenThroughput",
         "label": "实时Token吞吐",
-        "value": 0,
-        "displayValue": "0",
+        "value": 3.1,
+        "displayValue": "3.1",
         "unit": "/s",
         "caption": "当前TPS"
       },
       {
         "key": "todayTokenTotal",
         "label": "今日Token总量",
-        "value": 0,
-        "displayValue": "0",
-        "unit": "T",
+        "value": 62,
+        "displayValue": "62",
+        "unit": "tokens",
         "caption": "今日已调用"
       }
     ],
@@ -368,7 +386,7 @@ Get paged compute node rows for the access-compute table.
 | gpuModel | string\|null | Top GPU models |
 | gpuCount | number\|null | Count of `device_info` rows |
 | load | number | Derived fallback load, 0-100 |
-| tokensPerSecond | number | Latest 10-second average token TPS for this node from `inference_token_usage` |
+| tokensPerSecond | number | Exact latest 10-second average token TPS for this node from `inference_token_usage`; may contain decimals |
 | lastSeenAt | RFC3339 string | Max of asset/system/device update timestamps |
 | lastSeenText | string\|null | Backend formatted relative text |
 
@@ -383,35 +401,51 @@ Get the time-series payload shape for the token throughput chart.
 ### Query Parameters
 | Param | Type | Optional | v1 Notes |
 |---|---:|:---:|---|
-| windowSeconds | number | Yes | Default `180`, max `3600`; controls returned point count |
-| intervalSeconds | number | Yes | Default `3`, max `300` |
+| windowSeconds | number | Yes | Default `180`, max `86400`; controls aggregation window |
+| intervalSeconds | number | Yes | Default `3`, max `300`; backend may raise it to keep at most 600 returned points while covering the whole window |
 | region | string | Yes | Filters by city or region name when matched |
 
 ### Response `data`
 Throughput values are aggregated from `inference_token_usage`. Empty buckets are
-returned as `0` so charts remain continuous. Each point is normalized to TPS
-for the selected interval. `region` filters by the serving node's `geo_city` or
-`geo_region`.
+returned as `0` so charts remain continuous. `input`/`output` are exact
+tokens-per-second rates for the selected interval and may contain decimals.
+`inputTokens`/`outputTokens`/`totalTokens` are exact raw token counts in that
+bucket. `totals` is the exact sum of all returned buckets and is the field to
+use for strict reconciliation. `latest` is always the latest bucket, even when
+it is zero. `region` filters by the serving node's `geo_city` or `geo_region`.
 
 ```json
 {
   "code": 0,
   "message": "ok",
   "data": {
+    "windowSeconds": 180,
+    "intervalSeconds": 3,
     "latest": {
       "timestamp": "2026-06-30T10:30:00Z",
-      "input": 0,
-      "output": 0
+      "input": 6.666666666666667,
+      "output": 3.6666666666666665,
+      "inputTokens": 20,
+      "outputTokens": 11,
+      "totalTokens": 31
     },
     "peaks": {
-      "input": 0,
-      "output": 0
+      "input": 6.666666666666667,
+      "output": 3.6666666666666665
+    },
+    "totals": {
+      "inputTokens": 20,
+      "outputTokens": 11,
+      "totalTokens": 31
     },
     "points": [
       {
         "timestamp": "2026-06-30T10:27:03Z",
         "input": 0,
-        "output": 0
+        "output": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0
       }
     ]
   }
