@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define DLLM_ABI_VERSION 1
+
 #define DEFAULT_OUTPUT_LIMIT (256 * 1024)
 
 typedef enum ProjectorType {

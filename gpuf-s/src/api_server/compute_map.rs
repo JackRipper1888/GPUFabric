@@ -10,8 +10,8 @@ use crate::db::compute_map;
 pub struct ComputeMapSummary {
     pub online_nodes: u32,
     pub total_tflops: u32,
-    pub token_tps: u64,
-    pub today_token_total: f64,
+    pub token_tps: f64,
+    pub today_token_total: u64,
     pub today_token_unit: String,
     pub used_nodes: u32,
 }

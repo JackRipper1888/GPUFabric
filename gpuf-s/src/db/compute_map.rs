@@ -242,12 +242,12 @@ pub async fn get_compute_map(pool: &Pool<Postgres>) -> Result<ComputeMapResponse
     let summary = ComputeMapSummary {
         online_nodes,
         total_tflops: nodes.iter().map(|node| node.tflops).sum(),
-        token_tps: token_usage::average_tokens_per_second(
+        token_tps: token_usage::tokens_per_second(
             token_latest.total_tokens,
             token_usage::REALTIME_TPS_WINDOW_SECONDS,
         ),
-        today_token_total: round2(token_today.total_tokens.max(0) as f64 / 1_000_000_000_000_f64),
-        today_token_unit: "T".to_string(),
+        today_token_total: token_today.total_tokens.max(0) as u64,
+        today_token_unit: "tokens".to_string(),
         used_nodes,
     };
 
@@ -594,8 +594,4 @@ fn top_gpu_models(counts: HashMap<String, u32>) -> Option<String> {
 
 fn round4(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
-}
-
-fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
 }

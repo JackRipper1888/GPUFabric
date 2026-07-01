@@ -5,6 +5,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::api_server::ApiServer;
@@ -48,7 +49,7 @@ pub struct OverviewData {
 pub struct SummaryCard {
     pub key: String,
     pub label: String,
-    pub value: u64,
+    pub value: Value,
     pub display_value: String,
     pub unit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,7 +162,7 @@ pub struct ComputeNodeItem {
     pub gpu_model: Option<String>,
     pub gpu_count: Option<u32>,
     pub load: u8,
-    pub tokens_per_second: u64,
+    pub tokens_per_second: f64,
     pub last_seen_at: DateTime<Utc>,
     pub last_seen_text: Option<String>,
 }
@@ -190,23 +191,39 @@ pub struct TokenThroughputQuery {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenThroughputData {
+    pub window_seconds: u32,
+    pub interval_seconds: u32,
     pub latest: TokenThroughputPoint,
     pub peaks: TokenThroughputPeaks,
+    pub totals: TokenThroughputTotals,
     pub points: Vec<TokenThroughputPoint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenThroughputPoint {
     pub timestamp: DateTime<Utc>,
-    pub input: u64,
-    pub output: u64,
+    pub input: f64,
+    pub output: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TokenThroughputPeaks {
-    pub input: u64,
-    pub output: u64,
+    pub input: f64,
+    pub output: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenThroughputTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 pub async fn get_overview(

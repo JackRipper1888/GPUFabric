@@ -113,32 +113,59 @@ pub async fn update_client_network_geo(
     public_ip: &str,
     geo: &GeoLocation,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE "public"."gpu_assets"
-        SET public_ip = $1::inet,
-            geo_country = $2,
-            geo_region = $3,
-            geo_city = $4,
-            geo_latitude = $5,
-            geo_longitude = $6,
-            geo_source = $7,
-            geo_updated_at = NOW(),
-            updated_at = NOW()
-        WHERE client_id = $8 AND valid_status = 'valid'
-        "#,
-    )
-    .bind(public_ip)
-    .bind(&geo.country)
-    .bind(&geo.region)
-    .bind(&geo.city)
-    .bind(geo.latitude)
-    .bind(geo.longitude)
-    .bind(&geo.source)
-    .bind(client_id)
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow!("Database query failed: {}", e))?;
+    let has_resolved_geo = geo
+        .city
+        .as_deref()
+        .map(|city| !city.trim().is_empty())
+        .unwrap_or(false)
+        && geo.latitude.is_some()
+        && geo.longitude.is_some();
+
+    if has_resolved_geo {
+        sqlx::query(
+            r#"
+            UPDATE "public"."gpu_assets"
+            SET public_ip = $1::inet,
+                geo_country = $2,
+                geo_region = $3,
+                geo_city = $4,
+                geo_latitude = $5,
+                geo_longitude = $6,
+                geo_source = $7,
+                geo_updated_at = NOW(),
+                updated_at = NOW()
+            WHERE client_id = $8 AND valid_status = 'valid'
+            "#,
+        )
+        .bind(public_ip)
+        .bind(&geo.country)
+        .bind(&geo.region)
+        .bind(&geo.city)
+        .bind(geo.latitude)
+        .bind(geo.longitude)
+        .bind(&geo.source)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow!("Database query failed: {}", e))?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE "public"."gpu_assets"
+            SET public_ip = $1::inet,
+                geo_source = $2,
+                geo_updated_at = NOW(),
+                updated_at = NOW()
+            WHERE client_id = $3 AND valid_status = 'valid'
+            "#,
+        )
+        .bind(public_ip)
+        .bind(&geo.source)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow!("Database query failed: {}", e))?;
+    }
     Ok(())
 }
 
