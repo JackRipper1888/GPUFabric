@@ -4250,6 +4250,9 @@ pub extern "C" fn start_remote_worker(
         llama_main_gpu: 0,
         llama_devices: None,
         stream_chunk_bytes: 256,
+        dllm_enable: false,
+        dllm_lib_path: "libdllm.so".to_string(),
+        dllm_server_key: "0xA1FDFFFFFF01FAFAFAFA".to_string(),
     };
 
     #[cfg(target_os = "android")]
