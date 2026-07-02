@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
@@ -995,8 +996,33 @@ pub async fn handle_chat_completion(
 
             let mut text = String::new();
             let mut usage_final = None;
+            let mut done_received = false;
+            let timeout_secs = std::env::var("GPUF_CHAT_COMPLETION_TIMEOUT_SECS")
+                .ok()
+                .or_else(|| std::env::var("GPUF_INFERENCE_TIMEOUT_SECS").ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(120);
+            let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
+            tokio::pin!(timeout);
 
-            while let Some(ev) = rx.recv().await {
+            while let Some(ev) = tokio::select! {
+                ev = rx.recv() => ev,
+                _ = &mut timeout => {
+                    let _ = gateway
+                        .scheduler
+                        .cancel_inference(&task_id, &route_outcome.client_id)
+                        .await;
+                    let error_response = json!({
+                        "error": {
+                            "message": format!("Chat completion timed out after {} seconds", timeout_secs),
+                            "type": "timeout_error",
+                            "code": 504
+                        }
+                    });
+                    return (StatusCode::GATEWAY_TIMEOUT, Json(error_response)).into_response();
+                }
+            } {
                 match ev {
                     StreamEvent::Delta(d, _phase) => {
                         text.push_str(&d);
@@ -1012,9 +1038,21 @@ pub async fn handle_chat_completion(
                             .into_response();
                     }
                     StreamEvent::Done => {
+                        done_received = true;
                         break;
                     }
                 }
+            }
+
+            if !done_received {
+                let error_response = json!({
+                    "error": {
+                        "message": "Chat completion stream closed before completion",
+                        "type": "api_error",
+                        "code": 502
+                    }
+                });
+                return (StatusCode::BAD_GATEWAY, Json(error_response)).into_response();
             }
 
             let usage = usage_final.unwrap_or(crate::inference::scheduler::CompletionUsage {

@@ -947,6 +947,10 @@ impl LlamaEngine {
             let sampling = sampling.clone();
 
             let (tx, rx) = mpsc::channel::<Result<String>>(64);
+            info!(
+                prompt_bytes = prompt.len(),
+                max_tokens, "Starting llama cached-model stream"
+            );
 
             tokio::task::spawn_blocking(move || {
                 let result = (|| {
@@ -968,6 +972,10 @@ impl LlamaEngine {
                     let tokens = model_guard
                         .str_to_token(&prompt, AddBos::Always)
                         .map_err(|e| anyhow!("Failed to tokenize prompt: {:?}", e))?;
+                    info!(
+                        prompt_tokens = tokens.len(),
+                        "Llama prompt tokenized for cached-model stream"
+                    );
 
                     let mut batch = LlamaBatch::new(tokens.len(), 1);
                     for (i, token) in tokens.iter().enumerate() {
@@ -1005,7 +1013,9 @@ impl LlamaEngine {
 
                     let mut sampler = LlamaSampler::chain_simple(samplers);
                     sampler.accept_many(tokens.iter());
+                    info!(max_tokens, "Llama generation loop starting");
 
+                    let mut emitted_tokens: usize = 0;
                     let mut n_cur = tokens.len();
                     for _i in 0..max_tokens {
                         let new_token = sampler.sample(&context, -1);
@@ -1027,8 +1037,13 @@ impl LlamaEngine {
                             }
 
                             if tx.blocking_send(Ok(piece)).is_err() {
+                                warn!(
+                                    emitted_tokens,
+                                    "Llama stream receiver dropped while sending token"
+                                );
                                 break;
                             }
+                            emitted_tokens += 1;
                         }
 
                         let mut next_batch = LlamaBatch::new(1, 1);
@@ -1041,6 +1056,7 @@ impl LlamaEngine {
                         n_cur += 1;
                     }
 
+                    info!(emitted_tokens, "Llama generation loop finished");
                     Ok::<(), anyhow::Error>(())
                 })();
                 if let Err(error) = result {
@@ -1106,6 +1122,13 @@ impl LlamaEngine {
             let sampling = sampling.clone();
 
             let (tx, rx) = mpsc::channel::<Result<String>>(64);
+            info!(
+                session_id = session_id.unwrap_or("none"),
+                cache_policy = cache_policy.unwrap_or("none"),
+                prompt_bytes = prompt.len(),
+                max_tokens,
+                "Starting llama session-state stream"
+            );
 
             tokio::task::spawn_blocking(move || {
                 let result = (|| {
@@ -1171,6 +1194,10 @@ impl LlamaEngine {
                     let tokens = model_guard
                         .str_to_token(&prompt, AddBos::Always)
                         .map_err(|e| anyhow!("Failed to tokenize prompt: {:?}", e))?;
+                    info!(
+                        prompt_tokens = tokens.len(),
+                        "Llama prompt tokenized for session-state stream"
+                    );
 
                     let mut restored_prefix_len = 0usize;
                     if let Some(cache_plan) = cache_plan.as_ref() {
@@ -1367,7 +1394,9 @@ impl LlamaEngine {
 
                     let mut sampler = LlamaSampler::chain_simple(samplers);
                     sampler.accept_many(tokens.iter());
+                    info!(max_tokens, "Llama session-state generation loop starting");
 
+                    let mut emitted_tokens: usize = 0;
                     let mut n_cur = tokens.len();
                     for _i in 0..max_tokens {
                         let new_token = sampler.sample(&context, -1);
@@ -1389,8 +1418,13 @@ impl LlamaEngine {
                             }
 
                             if tx.blocking_send(Ok(piece)).is_err() {
+                                warn!(
+                                    emitted_tokens,
+                                    "Llama session-state stream receiver dropped while sending token"
+                                );
                                 break;
                             }
+                            emitted_tokens += 1;
                         }
 
                         let mut next_batch = LlamaBatch::new(1, 1);
@@ -1403,9 +1437,14 @@ impl LlamaEngine {
                         n_cur += 1;
                     }
 
+                    info!(
+                        emitted_tokens,
+                        "Llama session-state generation loop finished"
+                    );
                     Ok::<(), anyhow::Error>(())
                 })();
                 if let Err(error) = result {
+                    warn!("Llama session-state stream failed: {}", error);
                     forward_blocking_stream_error(&tx, error);
                 }
             });

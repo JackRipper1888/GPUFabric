@@ -19,6 +19,7 @@ use redis::Client as RedisClient;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
@@ -31,6 +32,14 @@ pub type TokenDb = Arc<Mutex<HashMap<String, String>>>;
 pub type ActiveClients = Arc<Mutex<HashMap<ClientId, ClientInfo>>>;
 pub type PendingConnections = Arc<Mutex<HashMap<ProxyConnId, (TcpStream, BytesMut)>>>;
 pub type ControlWriter = Box<dyn AsyncWrite + Send + Unpin>;
+
+pub type ConnectionId = u64;
+
+static NEXT_CONTROL_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_control_connection_id() -> ConnectionId {
+    NEXT_CONTROL_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub fn install_rustls_crypto_provider_once() {
     static INIT: Once = Once::new();
@@ -47,6 +56,7 @@ pub fn install_rustls_crypto_provider_once() {
 }
 
 pub struct ClientInfo {
+    pub connection_id: ConnectionId,
     pub writer: Arc<Mutex<ControlWriter>>,
     pub authed: bool,
     #[allow(dead_code)] // Client protocol version

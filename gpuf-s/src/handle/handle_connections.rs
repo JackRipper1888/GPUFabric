@@ -158,6 +158,7 @@ async fn handle_single_client(
     server_state: Arc<crate::handle::ServerState>,
 ) -> Result<()> {
     let writer = Arc::new(Mutex::new(writer));
+    let connection_id = crate::handle::next_control_connection_id();
 
     let mut authed = false;
     let mut session_client_id = ClientId([0; 16]);
@@ -208,6 +209,7 @@ async fn handle_single_client(
                         last_heartbeat: Utc::now().into(),
                     },
                     &writer,
+                    connection_id,
                     &mut authed,
                 )
                 .await
@@ -295,15 +297,37 @@ async fn handle_single_client(
             Err(e) => {
                 info!("addr {} disconnected: {}", addr, e);
                 if authed {
-                    active_clients.lock().await.remove(&session_client_id);
-                    if let Err(status_err) =
-                        client::upsert_client_status(&db_pool, &session_client_id, "offline").await
-                    {
-                        warn!(
-                            "Failed to mark client {} offline: {}",
-                            session_client_id.log_label(),
-                            status_err
-                        );
+                    let should_mark_offline = {
+                        let mut clients = active_clients.lock().await;
+                        match clients.get(&session_client_id) {
+                            Some(info) if info.connection_id == connection_id => {
+                                clients.remove(&session_client_id);
+                                true
+                            }
+                            Some(info) => {
+                                debug!(
+                                    "Ignoring stale disconnect for client {} connection {}; current connection is {}",
+                                    session_client_id.log_label(),
+                                    connection_id,
+                                    info.connection_id
+                                );
+                                false
+                            }
+                            None => false,
+                        }
+                    };
+
+                    if should_mark_offline {
+                        if let Err(status_err) =
+                            client::upsert_client_status(&db_pool, &session_client_id, "offline")
+                                .await
+                        {
+                            warn!(
+                                "Failed to mark client {} offline: {}",
+                                session_client_id.log_label(),
+                                status_err
+                            );
+                        }
                     }
                 } else {
                     debug!("Unauthenticated control connection {} disconnected", addr);
@@ -599,13 +623,18 @@ async fn handle_login(
     public_ip: String,
     system_info: SystemInfo,
     writer: &Arc<Mutex<ControlWriter>>,
+    connection_id: crate::handle::ConnectionId,
     authed: &mut bool,
 ) -> Result<CommandV1> {
     info!("Registration attempt for client {}", client_id.log_label());
     let mut clients = active_clients.lock().await;
-    if clients.contains_key(&client_id) {
-        warn!("Client {} already registered.", client_id.log_label());
-        return Err(anyhow!("Client ID already registered"));
+    if let Some(existing) = clients.get(client_id) {
+        warn!(
+            "Client {} already registered on connection {}, replacing with new connection {}.",
+            client_id.log_label(),
+            existing.connection_id,
+            connection_id
+        );
     }
     debug!("Login os_type: {:?}", &os_type_str(&os_type).unwrap());
 
@@ -669,26 +698,29 @@ async fn handle_login(
         }
     );
 
-    clients.insert(
-        *client_id,
-        ClientInfo {
-            writer: writer.clone(),
-            authed: *authed,
-            version,
-            system_info: Some(SystemInfo {
-                cpu_usage: system_info.cpu_usage,
-                memory_usage: system_info.memory_usage,
-                disk_usage: system_info.disk_usage,
-                device_memsize: system_info.device_memsize,
-                total_tflops: system_info.total_tflops,
-                memsize_gb: system_info.memsize_gb,
-                last_heartbeat: Utc::now().into(),
-            }),
-            connected_at: Utc::now(),
-            models: None,
-            devices_info,
-        },
-    );
+    if *authed {
+        clients.insert(
+            *client_id,
+            ClientInfo {
+                connection_id,
+                writer: writer.clone(),
+                authed: true,
+                version,
+                system_info: Some(SystemInfo {
+                    cpu_usage: system_info.cpu_usage,
+                    memory_usage: system_info.memory_usage,
+                    disk_usage: system_info.disk_usage,
+                    device_memsize: system_info.device_memsize,
+                    total_tflops: system_info.total_tflops,
+                    memsize_gb: system_info.memsize_gb,
+                    last_heartbeat: Utc::now().into(),
+                }),
+                connected_at: Utc::now(),
+                models: None,
+                devices_info,
+            },
+        );
+    }
     Ok(validate_result)
 }
 
