@@ -635,6 +635,15 @@ int main() {
 EOF
     fi
 
+    # Copy integration docs into the distributable SDK package.
+    mkdir -p "$SDK_RELEASE_DIR/docs"
+    if [ -f "$WORKSPACE_ROOT/docs/mobile-sdk/ANDROID_TLS_SDK_INTEGRATION_CN.md" ]; then
+        cp "$WORKSPACE_ROOT/docs/mobile-sdk/ANDROID_TLS_SDK_INTEGRATION_CN.md" "$SDK_RELEASE_DIR/docs/"
+    fi
+    if [ -f "$WORKSPACE_ROOT/docs/mobile-sdk/INTEGRATION_GUIDE_EN.md" ]; then
+        cp "$WORKSPACE_ROOT/docs/mobile-sdk/INTEGRATION_GUIDE_EN.md" "$SDK_RELEASE_DIR/docs/"
+    fi
+
     TEST_CLANG="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/$TARGET_ARCH$ANDROID_API-clang"
     if [ -x "$TEST_CLANG" ]; then
         "$TEST_CLANG" "$SDK_RELEASE_DIR/examples/test_jni_symbols.c" \
