@@ -232,6 +232,9 @@ build_rust_library() {
     export CC_aarch64_linux_android="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
     export CXX_aarch64_linux_android="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang++"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+    # The Android package copies the checked-in public header. Avoid rewriting it
+    # from the Linux build host and producing duplicate cfg-gated declarations.
+    export GPUF_SKIP_CBINDGEN="${GPUF_SKIP_CBINDGEN:-1}"
 
     echo "🔧 Building static library with multimodal support..."
     cargo rustc --target $TARGET_ARCH --release --lib --crate-type=staticlib \
@@ -590,22 +593,56 @@ EOF
     
     if [ ! -f "$SDK_RELEASE_DIR/examples/test_jni_symbols.c" ]; then
         cat > "$SDK_RELEASE_DIR/examples/test_jni_symbols.c" << 'EOF'
-// Placeholder C JNI Test
 #include <stdio.h>
 #include <dlfcn.h>
 
-int main() {
-    void *handle = dlopen("libgpuf_c_sdk_v9.so", RTLD_LAZY);
-    if (!handle) {
-        fprintf(stderr, "Failed to load library: %s\n", dlerror());
+static int require_symbol(void *handle, const char *name) {
+    dlerror();
+    void *sym = dlsym(handle, name);
+    const char *err = dlerror();
+    if (err != NULL || sym == NULL) {
+        fprintf(stderr, "missing symbol: %s (%s)\n", name, err ? err : "null");
         return 1;
     }
-    
-    printf("✅ Library loaded successfully\n");
+    printf("symbol ok: %s\n", name);
+    return 0;
+}
+
+int main() {
+    void *handle = dlopen("/data/local/tmp/gpuf-sdk/libgpuf_c_sdk_v9.so", RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        fprintf(stderr, "dlopen failed: %s\n", dlerror());
+        return 1;
+    }
+
+    int failed = 0;
+    failed |= require_symbol(handle, "start_remote_worker");
+    failed |= require_symbol(handle, "start_remote_worker_tasks");
+    failed |= require_symbol(handle, "start_remote_worker_with_tls");
+    failed |= require_symbol(handle, "gpuf_validate_mobile_tls_policy");
+    failed |= require_symbol(handle, "gpuf_configure_remote_worker_proxy_tls");
+    failed |= require_symbol(handle, "Java_com_gpuf_c_RemoteWorker_startRemoteWorker");
+    failed |= require_symbol(handle, "Java_com_gpuf_c_RemoteWorker_startRemoteWorkerWithTls");
+
     dlclose(handle);
+    if (failed) {
+        fprintf(stderr, "GPUFabric Android SDK smoke test FAILED\n");
+        return 1;
+    }
+    printf("GPUFabric Android SDK smoke test OK\n");
     return 0;
 }
 EOF
+    fi
+
+    TEST_CLANG="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/$TARGET_ARCH$ANDROID_API-clang"
+    if [ -x "$TEST_CLANG" ]; then
+        "$TEST_CLANG" "$SDK_RELEASE_DIR/examples/test_jni_symbols.c" \
+            -o "$SDK_RELEASE_DIR/examples/test_jni_symbols" \
+            -ldl
+        chmod +x "$SDK_RELEASE_DIR/examples/test_jni_symbols"
+    else
+        echo "⚠️ Android test compiler not found: $TEST_CLANG"
     fi
     
     # Create README
@@ -658,18 +695,26 @@ if ! adb devices | grep -q "device$"; then
     exit 1
 fi
 
+REMOTE_DIR=/data/local/tmp/gpuf-sdk
+adb shell "rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR"
+
 # Push library files
 echo "📤 Pushing library files to device..."
-adb push libs/libgpuf_c_sdk_v9.so /data/local/tmp/libgpuf_c.so
-adb push libs/libc++_shared.so /data/local/tmp/ndk_shared_libcpp.so
+adb push libs/libgpuf_c_sdk_v9.so "$REMOTE_DIR/"
+adb push libs/libc++_shared.so "$REMOTE_DIR/"
 
 # Push examples
 echo "📤 Pushing example programs..."
-adb push examples/test_jni_symbols /data/local/tmp/
+if [ -f examples/test_jni_symbols ]; then
+    adb push examples/test_jni_symbols "$REMOTE_DIR/"
+else
+    echo "⚠️ examples/test_jni_symbols not found; skipping native smoke test"
+    exit 0
+fi
 
 # Run tests
 echo "🧪 Running functionality tests..."
-adb shell "LD_PRELOAD=/data/local/tmp/ndk_shared_libcpp.so /data/local/tmp/test_jni_symbols"
+adb shell "chmod 755 $REMOTE_DIR/test_jni_symbols && LD_LIBRARY_PATH=$REMOTE_DIR $REMOTE_DIR/test_jni_symbols"
 
 echo "✅ Deployment completed!"
 EOF
