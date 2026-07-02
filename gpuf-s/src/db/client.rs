@@ -661,6 +661,10 @@ pub async fn upsert_client_status(
     Ok(())
 }
 
+pub async fn mark_client_online_seen(pool: &Pool<Postgres>, client_id: &ClientId) -> Result<()> {
+    upsert_client_status(pool, client_id, "online").await
+}
+
 // redis
 #[allow(dead_code)] // Redis utility function for heartbeat info
 pub async fn upsert_heartbeat_info_in_redis<F, Fut>(

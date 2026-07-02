@@ -294,8 +294,20 @@ async fn handle_single_client(
             }
             Err(e) => {
                 info!("addr {} disconnected: {}", addr, e);
-                active_clients.lock().await.remove(&session_client_id);
-                client::upsert_client_status(&db_pool, &session_client_id, "offline").await?;
+                if authed {
+                    active_clients.lock().await.remove(&session_client_id);
+                    if let Err(status_err) =
+                        client::upsert_client_status(&db_pool, &session_client_id, "offline").await
+                    {
+                        warn!(
+                            "Failed to mark client {} offline: {}",
+                            session_client_id.log_label(),
+                            status_err
+                        );
+                    }
+                } else {
+                    debug!("Unauthenticated control connection {} disconnected", addr);
+                }
                 return Ok(());
             }
             Ok(Command::V1(CommandV1::InferenceResult {
@@ -609,6 +621,14 @@ async fn handle_login(
         info!("Client {} registered successfully", client_id.log_label());
         *authed = true;
 
+        if let Err(e) = client::mark_client_online_seen(db_pool, client_id).await {
+            warn!(
+                "Failed to mark client {} online on login: {}",
+                client_id.log_label(),
+                e
+            );
+        }
+
         let geo_location = geo::lookup_geo(&public_ip).await;
         if let Err(e) =
             client::update_client_network_geo(db_pool, client_id, &public_ip, &geo_location).await
@@ -756,6 +776,14 @@ async fn handle_heartbeat(
     total_tflops: u32,
 ) {
     debug!("Sending heartbeat to consumer client {} cpu_usage {}% memory_usage {}% disk_usage {}% device_memtotal_gb {} GB device_count {} total_tflops {} tflops", client_id.log_label(), system_info.cpu_usage, system_info.memory_usage, system_info.disk_usage, device_memtotal_gb, device_count, total_tflops);
+
+    if let Err(e) = client::mark_client_online_seen(db_pool, client_id).await {
+        warn!(
+            "Failed to refresh client {} online status on heartbeat: {}",
+            client_id.log_label(),
+            e
+        );
+    }
 
     let geo_location = geo::lookup_geo(&public_ip).await;
     if let Err(e) =
