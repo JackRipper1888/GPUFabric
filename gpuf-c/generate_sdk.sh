@@ -549,12 +549,9 @@ create_sdk_package() {
     # Copy main files
     cp libgpuf_c_sdk_v9.so "$SDK_RELEASE_DIR/libs/"
     
-    # Copy dependency libraries
-    LIBCXX_SHARED="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$TARGET_ARCH/libc++_shared.so"
-    if [ ! -f "$LIBCXX_SHARED" ]; then
-        handle_error "Android libc++_shared.so not found: $LIBCXX_SHARED"
-    fi
-    cp "$LIBCXX_SHARED" "$SDK_RELEASE_DIR/libs/"
+    # Do not package libc++_shared.so. libgpuf_c_sdk_v9.so does not declare a
+    # libc++ dependency, and bundling our NDK's C++ runtime can override the
+    # host app/React Native/fbjni runtime during APK merge.
     
     # Copy header files (if any)
     if [ -f "gpuf_c.h" ]; then
@@ -663,12 +660,17 @@ GPUFabric Android SDK is a high-performance LLM inference library integrated wit
 
 ## File Description
 - `libs/libgpuf_c_sdk_v9.so` - Main dynamic library
-- `libs/libc++_shared.so` - C++ runtime library
 - `examples/` - Example code
+
+## Android C++ Runtime
+This package intentionally does not include `libc++_shared.so`.
+`libgpuf_c_sdk_v9.so` does not declare a `libc++_shared.so` dependency; host
+apps that use React Native/fbjni should keep the libc++ runtime from their own
+Android/React Native dependency set to avoid duplicate-runtime symbol conflicts.
 
 ## Quick Start
 1. Push library files from `libs/` directory to Android device
-2. Set LD_PRELOAD environment variable
+2. Load `gpuf_c_sdk_v9` from the Android app
 3. Call JNI API or C API
 
 ## JNI API
@@ -710,7 +712,6 @@ adb shell "rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR"
 # Push library files
 echo "📤 Pushing library files to device..."
 adb push libs/libgpuf_c_sdk_v9.so "$REMOTE_DIR/"
-adb push libs/libc++_shared.so "$REMOTE_DIR/"
 
 # Push examples
 echo "📤 Pushing example programs..."

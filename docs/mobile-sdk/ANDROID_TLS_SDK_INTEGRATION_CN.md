@@ -12,7 +12,6 @@ Android SDK 包建议包含:
 gpufabric-android-sdk-v<version>/
   libs/
     libgpuf_c_sdk_v9.so
-    libc++_shared.so
   include/
     gpuf_c.h
   docs/
@@ -38,17 +37,37 @@ certs/
 ## Android 工程集成
 
 1. 将 `libs/libgpuf_c_sdk_v9.so` 放到 App 的 `src/main/jniLibs/arm64-v8a/`。
-2. 如果 App 没有统一管理 C++ runtime，将 `libs/libc++_shared.so` 也放到同一目录。
-3. 将 CA bundle 放入 `assets/` 或通过后端下发到 App 私有目录。
-4. App 启动时加载动态库:
+2. 将 CA bundle 放入 `assets/` 或通过后端下发到 App 私有目录。
+3. App 启动时加载动态库:
 
 ```kotlin
 object GPUFabricNative {
     init {
-        System.loadLibrary("c++_shared")
         System.loadLibrary("gpuf_c_sdk_v9")
     }
 }
+```
+
+### C++ Runtime / React Native / fbjni 注意事项
+
+GPUFabric Android SDK 不交付 `libc++_shared.so`，也不要从 GPUFabric SDK 目录向 App 的 `jniLibs` 复制 `libc++_shared.so`。
+
+原因是 `libgpuf_c_sdk_v9.so` 当前没有声明 `libc++_shared.so` 依赖；如果 App 同时使用 React Native/fbjni，APK 合包阶段只能保留某一个 ABI 下的 `libc++_shared.so`。错误版本的 C++ runtime 可能覆盖 React Native/fbjni 需要的版本，导致 `dlopen libfbjni.so` 时出现 `basic_stringstream` 等 C++ 符号缺失。
+
+建议:
+
+1. 只从 GPUFabric SDK 拷贝 `libs/libgpuf_c_sdk_v9.so`。
+2. 由宿主 App / React Native / fbjni 依赖链提供它们自己的 `libc++_shared.so`。
+3. 如果工程里有 `packagingOptions { pickFirst "**/libc++_shared.so" }`，确认最终 APK 选中的不是旧 NDK 或 GPUFabric SDK 目录中的 runtime。
+4. 修改后执行一次 clean build，避免 Gradle 复用旧的 merged native libs。
+
+排查最终 APK 中的 C++ runtime:
+
+```bash
+unzip -l app-release.apk | grep 'lib/arm64-v8a/libc++_shared.so'
+unzip -p app-release.apk lib/arm64-v8a/libc++_shared.so > /tmp/apk-libc++_shared.so
+llvm-nm -D /tmp/apk-libc++_shared.so | grep basic_stringstream
+readelf -d libfbjni.so | grep NEEDED
 ```
 
 ## JNI 接口
