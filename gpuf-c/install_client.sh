@@ -11,6 +11,14 @@ NC='\033[0m' # No Color
 LOG_FILE="/tmp/gpuf_c_llamacpp_install_$(date +%Y%m%d_%H%M%S).log"
 echo "Installation started at $(date)" > "$LOG_FILE"
 
+DEFAULT_BGE_M3_MODEL_URL="https://modelscope.cn/models/OllmOne/bge-m3-GGUF/resolve/master/bge-m3-q8_0.gguf"
+DEFAULT_BGE_M3_MODEL_FILE="bge-m3-q8_0.gguf"
+DEFAULT_ONLINE_SERVER_ADDR="agent.gpunexus.com"
+DEFAULT_ONLINE_TLS_SERVER_NAME="agent.gpunexus.com"
+DEFAULT_ONLINE_CLIENT_ID="00112233445566778899aabbccddeeff"
+DEFAULT_CONTROL_PORT="17000"
+DEFAULT_PROXY_PORT="17001"
+
 # log function
 log() {
     echo -e "$1"
@@ -408,6 +416,90 @@ install_from_extracted_dir() {
     fi
 }
 
+install_bge_m3_model() {
+    if [ "${GPUF_C_SKIP_BGE_M3_DOWNLOAD:-false}" = "true" ]; then
+        log "${YELLOW}skip bge-m3 model download: GPUF_C_SKIP_BGE_M3_DOWNLOAD=true${NC}"
+        return 0
+    fi
+
+    local share_dir
+    share_dir=$(get_share_dir)
+
+    local model_dir="${GPUF_C_MODEL_DIR:-$share_dir/models}"
+    local model_file="${GPUF_C_MODEL_FILE:-$DEFAULT_BGE_M3_MODEL_FILE}"
+    local model_url="${GPUF_C_MODEL_URL:-$DEFAULT_BGE_M3_MODEL_URL}"
+    local model_path="$model_dir/$model_file"
+
+    sudo mkdir -p "$model_dir" >> "$LOG_FILE" 2>&1
+
+    if [ -s "$model_path" ]; then
+        log "${GREEN}model already exists: $model_path${NC}"
+        return 0
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local tmp_model="$tmp_dir/$model_file"
+
+    if ! download_file "$model_url" "$tmp_model"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    sudo install -m 0644 "$tmp_model" "$model_path" >> "$LOG_FILE" 2>&1
+    rm -rf "$tmp_dir"
+    log "${GREEN}installed bge-m3 model: $model_path${NC}"
+}
+
+install_online_bge_m3_start_script() {
+    local share_dir
+    share_dir=$(get_share_dir)
+    sudo mkdir -p "$share_dir" >> "$LOG_FILE" 2>&1
+
+    local model_dir="${GPUF_C_MODEL_DIR:-$share_dir/models}"
+    local model_file="${GPUF_C_MODEL_FILE:-$DEFAULT_BGE_M3_MODEL_FILE}"
+    local model_path="$model_dir/$model_file"
+
+    local script_path="$share_dir/start-gpuf-c-bge-m3-online.sh"
+    local tmp_script
+    tmp_script=$(mktemp)
+
+    cat > "$tmp_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+GPUF_C_BIN="\${GPUF_C_BIN:-$INSTALL_DIR/gpuf-c}"
+GPUF_C_CLIENT_ID="\${GPUF_C_CLIENT_ID:-$DEFAULT_ONLINE_CLIENT_ID}"
+GPUF_C_SERVER_ADDR="\${GPUF_C_SERVER_ADDR:-$DEFAULT_ONLINE_SERVER_ADDR}"
+GPUF_C_CONTROL_PORT="\${GPUF_C_CONTROL_PORT:-$DEFAULT_CONTROL_PORT}"
+GPUF_C_PROXY_PORT="\${GPUF_C_PROXY_PORT:-$DEFAULT_PROXY_PORT}"
+GPUF_C_CONTROL_TLS_SERVER_NAME="\${GPUF_C_CONTROL_TLS_SERVER_NAME:-$DEFAULT_ONLINE_TLS_SERVER_NAME}"
+GPUF_C_CERT_CHAIN_PATH="\${GPUF_C_CERT_CHAIN_PATH:-$INSTALL_DIR/ca-cert.pem}"
+GPUF_C_MODEL_PATH="\${GPUF_C_MODEL_PATH:-$model_path}"
+GPUF_C_N_GPU_LAYERS="\${GPUF_C_N_GPU_LAYERS:-99}"
+GPUF_C_N_CTX="\${GPUF_C_N_CTX:-2048}"
+GPUF_C_N_BATCH="\${GPUF_C_N_BATCH:-512}"
+
+exec env RUST_LOG="\${RUST_LOG:-gpuf_c=debug,common=info}" "\$GPUF_C_BIN" \\
+  --client-id "\$GPUF_C_CLIENT_ID" \\
+  --server-addr "\$GPUF_C_SERVER_ADDR" \\
+  --control-port "\$GPUF_C_CONTROL_PORT" \\
+  --proxy-port "\$GPUF_C_PROXY_PORT" \\
+  --engine-type llama \\
+  --llama-model-path "\$GPUF_C_MODEL_PATH" \\
+  --n-gpu-layers "\$GPUF_C_N_GPU_LAYERS" \\
+  --n-ctx "\$GPUF_C_N_CTX" \\
+  --n-batch "\$GPUF_C_N_BATCH" \\
+  --control-tls \\
+  --control-tls-server-name "\$GPUF_C_CONTROL_TLS_SERVER_NAME" \\
+  --cert-chain-path "\$GPUF_C_CERT_CHAIN_PATH"
+EOF
+
+    sudo install -m 0755 "$tmp_script" "$script_path" >> "$LOG_FILE" 2>&1
+    rm -f "$tmp_script"
+    log "${GREEN}installed online bge-m3 startup script: $script_path${NC}"
+}
+
 verify_installation() {
     log "${GREEN}=== installation completed ===${NC}"
     log "${YELLOW}verify installation:${NC}"
@@ -424,6 +516,11 @@ verify_installation() {
         gpuf-c --version 2>/dev/null || true
     else
         log "${RED}✗ gpuf-c installation failed${NC}"
+    fi
+
+    if [ -x "$share_dir/start-gpuf-c-bge-m3-online.sh" ]; then
+        log "${YELLOW}online bge-m3 startup:${NC}"
+        log "  ${GREEN}$share_dir/start-gpuf-c-bge-m3-online.sh${NC}"
     fi
 }
 
@@ -510,6 +607,8 @@ main() {
             fi
 
             install_from_extracted_dir "$payload"
+            install_bge_m3_model
+            install_online_bge_m3_start_script
 
             rm -rf "$tmp_dir"
             ;;
