@@ -149,6 +149,27 @@ calc_sha256() {
     return 1
 }
 
+calc_md5() {
+    local file="$1"
+
+    if command -v md5sum &> /dev/null; then
+        md5sum "$file" | awk '{print $1}'
+        return 0
+    fi
+
+    if command -v md5 &> /dev/null; then
+        md5 -q "$file"
+        return 0
+    fi
+
+    if command -v openssl &> /dev/null; then
+        openssl md5 "$file" | awk '{print $NF}'
+        return 0
+    fi
+
+    return 1
+}
+
 read_sha256_file() {
     local sha_file="$1"
     local archive_name="$2"
@@ -200,6 +221,76 @@ verify_sha256_required() {
     fi
 
     log "${GREEN}sha256 match ok: $actual${NC}"
+}
+
+read_md5_prefix_from_filename() {
+    local file_path="$1"
+    local base
+    base=$(basename "$file_path")
+
+    if [[ "$base" =~ ^([0-9a-fA-F]{6})- ]]; then
+        echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]'
+        return 0
+    fi
+
+    echo ""
+}
+
+verify_md5_prefix_from_filename_if_possible() {
+    local file="$1"
+
+    if [ ! -f "$file" ]; then
+        log "${RED}md5 check failed: file not found: $file${NC}"
+        return 1
+    fi
+
+    local prefix
+    prefix=$(read_md5_prefix_from_filename "$file")
+    if [ -z "$prefix" ]; then
+        log "${YELLOW}warning: md5 prefix not found in filename (skip md5 prefix check): $(basename "$file")${NC}"
+        return 0
+    fi
+
+    local md5
+    if ! md5=$(calc_md5 "$file"); then
+        log "${RED}md5 check failed: md5 tool not available (need md5sum/md5/openssl)${NC}"
+        return 1
+    fi
+
+    md5=$(echo "$md5" | tr '[:upper:]' '[:lower:]')
+    if [ "${md5:0:6}" != "$prefix" ]; then
+        log "${RED}md5 prefix mismatch for $file${NC}"
+        log "${YELLOW}expected prefix: $prefix${NC}"
+        log "${YELLOW}actual md5:      $md5${NC}"
+        return 1
+    fi
+
+    log "${GREEN}md5 prefix match ok: $md5${NC}"
+}
+
+verify_binary_name_checksums() {
+    local extracted_dir="$1"
+
+    if [ "$OS" = "linux" ]; then
+        local linux_cuda
+        linux_cuda=$(find "$extracted_dir" -maxdepth 1 -type f -name "*-cuda-gpuf-c" | head -n 1)
+        local linux_vulkan
+        linux_vulkan=$(find "$extracted_dir" -maxdepth 1 -type f -name "*-vulkan-gpuf-c" | head -n 1)
+
+        if [ -n "$linux_vulkan" ] && [ -f "$linux_vulkan" ]; then
+            verify_md5_prefix_from_filename_if_possible "$linux_vulkan"
+        fi
+
+        if [ -n "$linux_cuda" ] && [ -f "$linux_cuda" ]; then
+            verify_md5_prefix_from_filename_if_possible "$linux_cuda"
+        fi
+    else
+        local mac_bin
+        mac_bin=$(find "$extracted_dir" -maxdepth 1 -type f -name "*-metal-gpuf-c" | head -n 1)
+        if [ -n "$mac_bin" ] && [ -f "$mac_bin" ]; then
+            verify_md5_prefix_from_filename_if_possible "$mac_bin"
+        fi
+    fi
 }
 
 ensure_dir() {
@@ -363,7 +454,7 @@ main() {
             fi
 
             local archive_name
-            archive_name="v1.0.2-${pkg_os}-gpuf-c.tar.gz"
+            archive_name="v1.0.3-${pkg_os}-gpuf-c.tar.gz"
 
             ARCHIVE_NAME="${GPUF_C_CLIENT_ARCHIVE_NAME:-$archive_name}"
 
@@ -404,6 +495,8 @@ main() {
             if [ -n "$top" ] && [ -f "$top/read.txt" ]; then
                 payload="$top"
             fi
+
+            verify_binary_name_checksums "$payload"
 
             if [ "$OS" = "linux" ]; then
                 if command -v nvidia-smi &> /dev/null; then

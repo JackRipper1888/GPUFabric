@@ -1,6 +1,6 @@
 # GPUFabric OpenAI-Compatible API Current Status
 
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 This document describes the current external inference API surface for
 GPUFabric compute sharing. It is based on the current `gpuf-s` inference
@@ -12,7 +12,7 @@ There are two related API surfaces:
 
 | Surface | Purpose | Current compatibility |
 |---|---|---|
-| `gpuf-s` inference gateway | Public compute-sharing entrypoint. It authenticates API tokens, selects an online `gpuf-c`, forwards inference tasks, and records token usage. | OpenAI-compatible Chat Completions, legacy Completions, and Models only |
+| `gpuf-s` inference gateway | Public compute-sharing entrypoint. It authenticates API tokens, selects an online `gpuf-c`, forwards inference tasks, and records token usage. | OpenAI-compatible Chat Completions, legacy Completions, Embeddings, Models, and a Sophnet-compatible embeddings route |
 | `gpuf-c` standalone llama server | Local standalone inference server, not the shared gateway path. | OpenAI-compatible endpoints plus a local Anthropic-compatible `/v1/messages` route |
 
 For external compute-sharing integrations, use the `gpuf-s` inference gateway.
@@ -49,11 +49,12 @@ If the header is missing or invalid, the gateway returns `401`.
 |---|---|---|
 | `POST /v1/chat/completions` | Supported | Main recommended endpoint |
 | `POST /v1/completions` | Supported | Legacy text completion endpoint |
+| `POST /v1/embeddings` | Supported | Text embeddings through non-mobile `gpuf-c` workers with a compatible loaded embedding model |
+| `POST /api/open-apis/projects/:project_id/easyllms/embeddings` | Supported | Sophnet-compatible text embeddings adapter |
 | `GET /v1/models` | Supported, simplified | Returns a simple model list, not the full OpenAI list envelope |
 | `POST /v1/messages` | Not supported on `gpuf-s` | Anthropic-compatible route exists only in `gpuf-c` standalone llama server |
-| `POST /v1/embeddings` | Not supported | No gateway route |
 | `POST /v1/responses` | Not supported | No gateway route |
-| image/audio/vector/file APIs | Not supported | No gateway route |
+| image/audio/file APIs | Not supported | No gateway route |
 
 ## POST `/v1/chat/completions`
 
@@ -294,6 +295,144 @@ curl -sS http://<gpuf-s-host>:<inference_gateway_port>/v1/completions \
   }'
 ```
 
+## POST `/v1/embeddings`
+
+OpenAI-compatible text embeddings endpoint.
+
+### Request
+
+```json
+{
+  "model": "bge-m3-q8_0",
+  "input": ["hello", "world"],
+  "encoding_format": "float",
+  "normalize": true
+}
+```
+
+### Supported Fields
+
+| Field | Type | Required | Default | Notes |
+|---|---:|---:|---:|---|
+| `model` | string | Yes | none | Must match an embedding model reported by an online non-mobile worker |
+| `input` | string or string[] | Yes | none | Text input. Empty strings are rejected |
+| `encoding_format` | string | No | `float` | Only `float` is supported |
+| `normalize` | boolean | No | `true` | Whether the worker should normalize output vectors |
+
+### Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [0.0123, -0.0456],
+      "index": 0
+    }
+  ],
+  "model": "bge-m3-q8_0",
+  "usage": {
+    "prompt_tokens": 8,
+    "total_tokens": 8
+  }
+}
+```
+
+For `bge-m3` GGUF models, the expected embedding dimension is `1024`.
+
+### Routing Rules
+
+- The gateway routes embedding requests only to authenticated non-mobile
+  Linux, macOS, or Windows `gpuf-c` workers that advertise the embedding-capable
+  CommandV1 protocol version and a Llama engine.
+- Android/iOS SDK workers are skipped for embedding tasks.
+- The requested `model` must be present in the worker's reported loaded models.
+- If no eligible worker is available, the gateway returns `503`.
+
+### Example
+
+```bash
+curl -sS http://<gpuf-s-host>:<inference_gateway_port>/v1/embeddings \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3-q8_0",
+    "input": ["GPUFabric text embedding"],
+    "encoding_format": "float",
+    "normalize": true
+  }'
+```
+
+## POST `/api/open-apis/projects/:project_id/easyllms/embeddings`
+
+Sophnet-compatible text embeddings adapter. It uses the same GPUFabric
+embedding scheduler as `/v1/embeddings`.
+
+### Request
+
+```json
+{
+  "model": "bge-m3",
+  "input_texts": ["hello", "world"],
+  "dimensions": 1024,
+  "easyllm_id": "easyllm-001",
+  "normalized": true,
+  "encoding_type": "float"
+}
+```
+
+### Supported Fields
+
+| Field | Type | Required | Default | Notes |
+|---|---:|---:|---:|---|
+| `model` | string | No | `GPUF_DEFAULT_EMBEDDING_MODEL` or `bge-m3-q8_0` | `bge-m3` and `text-embeddings` map to the configured default embedding model |
+| `input_texts` | string[] | Yes | none | Text input list. Empty strings are rejected |
+| `dimensions` | integer | Yes | none | Only `1024` is supported for `bge-m3` |
+| `easyllm_id` | string | Yes | none | Must not be empty |
+| `normalized` | boolean | No | `true` | Maps to GPUFabric `normalize` |
+| `encoding_type` | string | No | `float` | Only `float` is supported |
+| `input_images` | string[] | No | none | Not supported; non-empty values are rejected |
+
+### Response
+
+```json
+{
+  "id": "embd-<generated-id>",
+  "object": "list",
+  "usage": {
+    "prompt_tokens": 8,
+    "completion_tokens": null,
+    "total_tokens": 8,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [0.0123, -0.0456],
+      "index": 0
+    }
+  ]
+}
+```
+
+### Example
+
+```bash
+curl -sS http://<gpuf-s-host>:<inference_gateway_port>/api/open-apis/projects/<project-id>/easyllms/embeddings \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input_texts": ["GPUFabric text embedding"],
+    "dimensions": 1024,
+    "easyllm_id": "easyllm-001",
+    "normalized": true,
+    "encoding_type": "float"
+  }'
+```
+
 ## GET `/v1/models`
 
 Returns the currently hard-coded simplified gateway model list:
@@ -365,6 +504,8 @@ Selection behavior:
 - If `model` is provided and devices have reported loaded models, the gateway
   can select a compatible device for that model.
 - Otherwise, the gateway picks a low-load authenticated online device.
+- Embedding requests are stricter: they require a model-compatible non-mobile
+  worker and do not fall back to a generic device.
 - If no eligible device is available, the gateway returns `503`.
 
 ## Token Usage Statistics
@@ -378,7 +519,8 @@ Recorded fields include:
 - bearer token hash
 - selected `client_id`
 - `model`
-- endpoint name: `completion` or `chat.completion`
+- endpoint name: `completion`, `chat.completion`, `embeddings`, or
+  `sophnet_embeddings`
 - `prompt_tokens`
 - `completion_tokens`
 - `total_tokens`
@@ -409,7 +551,7 @@ Common statuses:
 | `400` | Invalid request headers, invalid `x-target-client-id`, invalid session/cache fields |
 | `401` | Missing or invalid bearer token |
 | `403` | Target client forbidden or session route no longer allowed |
-| `503` | No eligible online device |
+| `503` | No eligible online device, no compatible model worker, or no non-mobile embedding worker |
 | `500` | Internal gateway or device execution error |
 
 ## Unsupported OpenAI Features
@@ -417,10 +559,10 @@ Common statuses:
 The current gateway does not implement:
 
 - `/v1/responses`
-- `/v1/embeddings`
 - `/v1/audio/*`
 - `/v1/images/*`
 - `/v1/files/*`
+- image or multimodal embeddings
 - tools/function calling
 - JSON mode / `response_format`
 - `n` multiple completions
@@ -478,6 +620,8 @@ back to Anthropic format.
 For external callers today:
 
 - Prefer `POST /v1/chat/completions`.
+- Use `POST /v1/embeddings` for text vector generation when a compatible
+  non-mobile worker is online.
 - Use plain text `messages[].content`.
 - Use `stream: true` only if the client can parse SSE.
 - Do not depend on unsupported OpenAI fields.

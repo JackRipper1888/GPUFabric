@@ -12,7 +12,9 @@ use crate::util::{
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use chrono::{DateTime, Utc};
-use common::{join_streams, read_command, write_command, Command, CommandV1, DevicesInfo, Model};
+use common::{
+    join_streams, read_command, write_command, Command, CommandV1, DevicesInfo, Model, OsType,
+};
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::Producer;
 use redis::Client as RedisClient;
@@ -61,6 +63,7 @@ pub struct ClientInfo {
     pub authed: bool,
     #[allow(dead_code)] // Client protocol version
     pub version: u32,
+    pub os_type: OsType,
     pub system_info: Option<SystemInfo>,
     #[allow(dead_code)] // Connected devices information
     pub devices_info: Vec<DevicesInfo>,

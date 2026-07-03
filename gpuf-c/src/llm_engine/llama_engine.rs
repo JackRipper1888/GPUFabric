@@ -35,7 +35,10 @@ use crate::util::cmd::LlamaSplitModeArg;
 
 // llama-cpp-2 imports (only for non-Android platforms)
 #[cfg(not(target_os = "android"))]
-use llama_cpp_2::{context::params::LlamaContextParams, model::params::LlamaModelParams};
+use llama_cpp_2::{
+    context::params::{LlamaAttentionType, LlamaContextParams, LlamaPoolingType},
+    model::params::LlamaModelParams,
+};
 #[cfg(not(target_os = "android"))]
 use llama_cpp_2::{context::LlamaContext, llama_backend::LlamaBackend, model::LlamaModel};
 #[cfg(not(target_os = "android"))]
@@ -902,6 +905,145 @@ impl LlamaEngine {
                 Ok((output_text, prompt_token_count, completion_token_count))
             })
             .await?
+        }
+    }
+
+    pub async fn generate_embeddings(
+        &self,
+        inputs: Vec<String>,
+        normalize: bool,
+    ) -> Result<(Vec<Vec<f32>>, u32)> {
+        if !self.is_initialized {
+            return Err(anyhow!("Engine not initialized - call load_model() first"));
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let _ = (inputs, normalize);
+            Err(anyhow!(
+                "Embedding inference is not supported on Android yet"
+            ))
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            if inputs.is_empty() {
+                return Err(anyhow!("embedding input must not be empty"));
+            }
+
+            let backend = self
+                .cached_backend
+                .as_ref()
+                .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+                .clone();
+            let model = self
+                .cached_model
+                .as_ref()
+                .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+                .clone();
+
+            let n_ctx = self.n_ctx;
+            let n_batch = self.n_batch;
+
+            let (embeddings, prompt_tokens) =
+                tokio::task::spawn_blocking(move || -> Result<(Vec<Vec<f32>>, usize)> {
+                    use llama_cpp_2::llama_batch::LlamaBatch;
+                    use llama_cpp_2::model::AddBos;
+
+                    let model_guard = model
+                        .lock()
+                        .map_err(|e| anyhow!("Failed to lock model: {:?}", e))?;
+                    let mut output = Vec::with_capacity(inputs.len());
+                    let mut total_tokens = 0usize;
+
+                    for input in inputs {
+                        let tokens = model_guard
+                            .str_to_token(&input, AddBos::Always)
+                            .map_err(|e| anyhow!("Failed to tokenize embedding input: {:?}", e))?;
+                        if tokens.is_empty() {
+                            return Err(anyhow!("embedding input produced no tokens"));
+                        }
+                        if tokens.len() > n_ctx as usize {
+                            return Err(anyhow!(
+                                "embedding input has {} tokens, exceeding n_ctx {}",
+                                tokens.len(),
+                                n_ctx
+                            ));
+                        }
+
+                        let context_params = || {
+                            LlamaContextParams::default()
+                                .with_n_ctx(NonZeroU32::new(n_ctx))
+                                .with_n_batch(n_batch.max(tokens.len() as u32))
+                                .with_embeddings(true)
+                                .with_pooling_type(LlamaPoolingType::Mean)
+                                .with_attention_type(LlamaAttentionType::NonCausal)
+                        };
+
+                        let mut context = model_guard
+                            .new_context(&*backend, context_params())
+                            .map_err(|e| anyhow!("Failed to create embedding context: {:?}", e))?;
+
+                        let mut batch = LlamaBatch::new(tokens.len(), 1);
+                        for (pos, token) in tokens.iter().enumerate() {
+                            batch
+                                .add(*token, pos as i32, &[0], false)
+                                .map_err(|e| anyhow!("Failed to add embedding token: {:?}", e))?;
+                        }
+
+                        if let Err(encode_err) = context.encode(&mut batch) {
+                            let mut decode_context = model_guard
+                                .new_context(&*backend, context_params())
+                                .map_err(|e| {
+                                    anyhow!("Failed to create fallback embedding context: {:?}", e)
+                                })?;
+                            let mut decode_batch = LlamaBatch::new(tokens.len(), 1);
+                            for (pos, token) in tokens.iter().enumerate() {
+                                decode_batch
+                                    .add(*token, pos as i32, &[0], false)
+                                    .map_err(|e| {
+                                        anyhow!("Failed to add fallback embedding token: {:?}", e)
+                                    })?;
+                            }
+                            decode_context
+                                .decode(&mut decode_batch)
+                                .map_err(|decode_err| {
+                                    anyhow!(
+                                        "Failed to run embedding batch: encode={:?}, decode={:?}",
+                                        encode_err,
+                                        decode_err
+                                    )
+                                })?;
+                            context = decode_context;
+                        }
+
+                        let mut embedding = context
+                            .embeddings_seq_ith(0)
+                            .map_err(|e| anyhow!("Failed to read embedding: {:?}", e))?
+                            .to_vec();
+
+                        if normalize {
+                            let norm = embedding
+                                .iter()
+                                .map(|value| value * value)
+                                .sum::<f32>()
+                                .sqrt();
+                            if norm > 0.0 {
+                                for value in &mut embedding {
+                                    *value /= norm;
+                                }
+                            }
+                        }
+
+                        total_tokens = total_tokens.saturating_add(tokens.len());
+                        output.push(embedding);
+                    }
+
+                    Ok((output, total_tokens))
+                })
+                .await??;
+
+            Ok((embeddings, u32::try_from(prompt_tokens).unwrap_or(u32::MAX)))
         }
     }
 

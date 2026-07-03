@@ -19,8 +19,9 @@ use crate::inference::{
     gateway::{AuthContext, InferenceGateway},
     scheduler::{
         validate_session_id, CachePolicy, ChatCompletionRequest, ChatCompletionResponse,
-        CompletionRequest, CompletionUsage, DeviceInfo, ModelInfo, SessionRouteOutcome,
-        SessionRouting, StreamEvent,
+        CompletionRequest, CompletionUsage, DeviceInfo, EmbeddingInput, EmbeddingRequest,
+        ModelInfo, SessionRouteOutcome, SessionRouting, SophnetEmbeddingRequest,
+        SophnetEmbeddingResponse, SophnetEmbeddingUsage, StreamEvent,
     },
 };
 use crate::util::protoc::ClientId;
@@ -318,14 +319,21 @@ fn session_routing_for_request(
 
 fn scheduler_error_response(error: &anyhow::Error) -> Response {
     let message = error.to_string();
-    let status =
-        if message.contains("session owner mismatch") || message.contains("no longer allowed") {
-            StatusCode::FORBIDDEN
-        } else if message.contains("No available Android devices found") {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
+    let status = if message.contains("session owner mismatch")
+        || message.contains("no longer allowed")
+    {
+        StatusCode::FORBIDDEN
+    } else if message.contains("unsupported encoding_format") || message.contains("embedding input")
+    {
+        StatusCode::BAD_REQUEST
+    } else if message.contains("No available Android devices found")
+        || message.contains("No compatible client found")
+        || message.contains("No non-mobile embedding-capable client found")
+    {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
 
     json_error(status, message, "api_error")
 }
@@ -351,6 +359,136 @@ fn apply_route_headers(response: &mut Response, outcome: &SessionRouteOutcome) {
 fn response_with_route_headers(mut response: Response, outcome: &SessionRouteOutcome) -> Response {
     apply_route_headers(&mut response, outcome);
     response
+}
+
+fn target_client_id_for_request(
+    headers: &HeaderMap,
+    auth: &AuthContext,
+) -> Result<Option<ClientId>, Response> {
+    let target_client_id = match headers
+        .get("x-target-client-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(raw) => match crate::util::protoc::ClientId::from_str(raw) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid x-target-client-id: {}", e),
+                    "invalid_request_error",
+                ));
+            }
+        },
+    };
+
+    if let Some(target) = target_client_id {
+        if auth.access_level.is_metered() {
+            return Err(json_error(
+                StatusCode::FORBIDDEN,
+                "x-target-client-id is not allowed for metered tokens",
+                "forbidden",
+            ));
+        }
+
+        if !auth.client_ids.contains(&target) {
+            return Err(json_error(
+                StatusCode::FORBIDDEN,
+                "x-target-client-id is not in the allowed client_ids for this token",
+                "forbidden",
+            ));
+        }
+    }
+
+    Ok(target_client_id)
+}
+
+fn allowed_client_ids_for_request<'a>(
+    target_client_id: &'a Option<ClientId>,
+    auth: &'a AuthContext,
+) -> &'a [ClientId] {
+    target_client_id
+        .as_ref()
+        .map(std::slice::from_ref)
+        .unwrap_or(auth.client_ids.as_slice())
+}
+
+fn gpuf_model_for_sophnet_embedding(model: Option<&str>) -> Result<String, Response> {
+    let default_model = std::env::var("GPUF_DEFAULT_EMBEDDING_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bge-m3-Q8_0".to_string());
+
+    let Some(model) = model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(default_model);
+    };
+
+    if model.eq_ignore_ascii_case("clip-embeddings") {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "clip-embeddings is not supported by this GPUFabric embedding gateway yet",
+            "invalid_request_error",
+        ));
+    }
+
+    if model.eq_ignore_ascii_case("text-embeddings") || model.eq_ignore_ascii_case("bge-m3") {
+        return Ok(default_model);
+    }
+
+    Ok(model.to_string())
+}
+
+fn sophnet_embedding_to_gpuf_request(
+    request: SophnetEmbeddingRequest,
+) -> Result<EmbeddingRequest, Response> {
+    if request.easyllm_id.trim().is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "easyllm_id must not be empty",
+            "invalid_request_error",
+        ));
+    }
+
+    if request.input_images.as_ref().map_or(false, |images| {
+        images.iter().any(|image| !image.trim().is_empty())
+    }) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "input_images is not supported by this GPUFabric embedding gateway yet",
+            "invalid_request_error",
+        ));
+    }
+
+    if request.dimensions != 1024 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "only dimensions=1024 is supported for bge-m3 embeddings",
+            "invalid_request_error",
+        ));
+    }
+
+    if let Some(encoding_type) = request.encoding_type.as_deref() {
+        if !encoding_type.eq_ignore_ascii_case("float") {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unsupported encoding_type '{}', only 'float' is supported",
+                    encoding_type
+                ),
+                "invalid_request_error",
+            ));
+        }
+    }
+
+    Ok(EmbeddingRequest {
+        model: gpuf_model_for_sophnet_embedding(request.model.as_deref())?,
+        input: EmbeddingInput::Batch(request.input_texts),
+        encoding_format: Some("float".to_string()),
+        normalize: request.normalized.unwrap_or(true),
+    })
 }
 
 fn apply_completion_route_metadata(
@@ -1105,6 +1243,169 @@ pub async fn handle_chat_completion(
         }
         Err(e) => {
             error!("Chat completion request failed: {}", e);
+            scheduler_error_response(&e)
+        }
+    }
+}
+
+/// Handle embedding requests
+pub async fn handle_embeddings(
+    State(gateway): State<Arc<InferenceGateway>>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Json(request): Json<EmbeddingRequest>,
+) -> Response {
+    info!("Received embedding request for model {}", request.model);
+
+    let request_id = headers
+        .get("request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let target_client_id = match target_client_id_for_request(&headers, &auth) {
+        Ok(target_client_id) => target_client_id,
+        Err(response) => return response,
+    };
+    let allowed_ids = allowed_client_ids_for_request(&target_client_id, &auth);
+
+    match gateway
+        .scheduler
+        .execute_embedding(request, Some(allowed_ids))
+        .await
+    {
+        Ok((response, route_outcome)) => {
+            if auth.access_level.is_metered() {
+                if let Err(e) = gateway
+                    .send_request_metrics(
+                        request_id.clone(),
+                        route_outcome.client_id,
+                        auth.access_level,
+                    )
+                    .await
+                {
+                    error!("Failed to send request metrics: {}", e);
+                }
+            }
+
+            let usage = CompletionUsage {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: 0,
+                total_tokens: response.usage.total_tokens,
+                analysis_tokens: None,
+                final_tokens: None,
+            };
+            record_token_usage(
+                &gateway,
+                &auth,
+                request_id,
+                &route_outcome,
+                response.model.clone(),
+                "embeddings",
+                &usage,
+                false,
+            )
+            .await;
+
+            response_with_route_headers(Json(response).into_response(), &route_outcome)
+        }
+        Err(e) => {
+            error!("Embedding request failed: {}", e);
+            scheduler_error_response(&e)
+        }
+    }
+}
+
+pub async fn handle_sophnet_embeddings(
+    Path(project_id): Path<String>,
+    State(gateway): State<Arc<InferenceGateway>>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Json(request): Json<SophnetEmbeddingRequest>,
+) -> Response {
+    if project_id.trim().is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "project_id must not be empty",
+            "invalid_request_error",
+        );
+    }
+
+    info!(
+        "Received Sophnet embedding request for project {} easyllm {}",
+        project_id, request.easyllm_id
+    );
+
+    let request_id = headers
+        .get("request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let request = match sophnet_embedding_to_gpuf_request(request) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    let target_client_id = match target_client_id_for_request(&headers, &auth) {
+        Ok(target_client_id) => target_client_id,
+        Err(response) => return response,
+    };
+    let allowed_ids = allowed_client_ids_for_request(&target_client_id, &auth);
+
+    match gateway
+        .scheduler
+        .execute_embedding(request, Some(allowed_ids))
+        .await
+    {
+        Ok((response, route_outcome)) => {
+            if auth.access_level.is_metered() {
+                if let Err(e) = gateway
+                    .send_request_metrics(
+                        request_id.clone(),
+                        route_outcome.client_id,
+                        auth.access_level,
+                    )
+                    .await
+                {
+                    error!("Failed to send request metrics: {}", e);
+                }
+            }
+
+            let usage = CompletionUsage {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: 0,
+                total_tokens: response.usage.total_tokens,
+                analysis_tokens: None,
+                final_tokens: None,
+            };
+            record_token_usage(
+                &gateway,
+                &auth,
+                request_id,
+                &route_outcome,
+                response.model.clone(),
+                "sophnet_embeddings",
+                &usage,
+                false,
+            )
+            .await;
+
+            let sophnet_response = SophnetEmbeddingResponse {
+                id: format!("embd-{}", uuid::Uuid::new_v4()),
+                object: response.object,
+                usage: SophnetEmbeddingUsage {
+                    prompt_tokens: response.usage.prompt_tokens,
+                    completion_tokens: None,
+                    total_tokens: response.usage.total_tokens,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                },
+                data: response.data,
+            };
+
+            response_with_route_headers(Json(sophnet_response).into_response(), &route_outcome)
+        }
+        Err(e) => {
+            error!("Sophnet embedding request failed: {}", e);
             scheduler_error_response(&e)
         }
     }

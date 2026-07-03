@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::handle::ActiveClients;
 use crate::util::protoc::ClientId;
-use common::{Command, CommandV1, OutputPhase};
+use common::{
+    Command, CommandV1, EngineType, OsType, OutputPhase, COMMAND_V1_EMBEDDING_TASKS_VERSION,
+};
 
 // Type aliases for easier function signatures
 // Note: Can't create type alias for enum variants in Rust
@@ -54,6 +56,51 @@ pub struct ChatCompletionRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub cache_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+impl EmbeddingInput {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Single(input) => vec![input],
+            Self::Batch(inputs) => inputs,
+        }
+    }
+}
+
+fn default_embedding_normalize() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+    #[serde(default)]
+    pub encoding_format: Option<String>,
+    #[serde(default = "default_embedding_normalize")]
+    pub normalize: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SophnetEmbeddingRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub input_texts: Vec<String>,
+    #[serde(default)]
+    pub input_images: Option<Vec<String>>,
+    pub dimensions: u32,
+    pub easyllm_id: String,
+    #[serde(default)]
+    pub normalized: Option<bool>,
+    #[serde(default)]
+    pub encoding_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -126,8 +173,53 @@ pub struct ModelInfo {
     pub owned_by: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmbeddingTaskResult {
+    pub embeddings: Vec<Vec<f32>>,
+    pub prompt_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingData {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SophnetEmbeddingResponse {
+    pub id: String,
+    pub object: String,
+    pub usage: SophnetEmbeddingUsage,
+    pub data: Vec<EmbeddingData>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SophnetEmbeddingUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: u32,
+    pub prompt_tokens_details: Option<serde_json::Value>,
+    pub completion_tokens_details: Option<serde_json::Value>,
+}
+
 // Task result tracking
 type PendingTask = oneshot::Sender<Result<CompletionResponse>>;
+type PendingEmbeddingTask = oneshot::Sender<Result<EmbeddingTaskResult>>;
 
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -558,6 +650,7 @@ pub fn validate_session_id(raw: &str) -> Result<String> {
 // Inference Scheduler
 pub struct InferenceScheduler {
     pending_tasks: Arc<Mutex<HashMap<String, PendingTask>>>,
+    pending_embedding_tasks: Arc<Mutex<HashMap<String, PendingEmbeddingTask>>>,
     partial_results: Arc<Mutex<HashMap<String, String>>>,
     pending_streams: Arc<Mutex<HashMap<String, mpsc::Sender<StreamEvent>>>>,
     stream_usages: Arc<Mutex<HashMap<String, CompletionUsage>>>,
@@ -576,6 +669,7 @@ impl InferenceScheduler {
 
         Self {
             pending_tasks: Arc::new(Mutex::new(HashMap::new())),
+            pending_embedding_tasks: Arc::new(Mutex::new(HashMap::new())),
             partial_results: Arc::new(Mutex::new(HashMap::new())),
             pending_streams: Arc::new(Mutex::new(HashMap::new())),
             stream_usages: Arc::new(Mutex::new(HashMap::new())),
@@ -828,6 +922,85 @@ impl InferenceScheduler {
             .ok_or_else(|| anyhow!("No compatible client found for model '{model_name}'"))
     }
 
+    fn client_supports_embedding_tasks(client_info: &crate::handle::ClientInfo) -> bool {
+        if client_info.version < COMMAND_V1_EMBEDDING_TASKS_VERSION {
+            return false;
+        }
+
+        if client_info.os_type == OsType::ANDROID || client_info.os_type == OsType::IOS {
+            return false;
+        }
+
+        if client_info
+            .devices_info
+            .iter()
+            .any(|device| device.os_type == OsType::ANDROID || device.os_type == OsType::IOS)
+        {
+            return false;
+        }
+
+        client_info
+            .devices_info
+            .iter()
+            .any(|device| device.engine_type == EngineType::Llama)
+    }
+
+    async fn select_best_embedding_device_for_model(
+        &self,
+        model_name: &str,
+        allowed_client_ids: Option<&[ClientId]>,
+    ) -> Result<ClientId> {
+        let clients = self.active_clients.lock().await;
+
+        let mut best_device: Option<(ClientId, u16)> = None;
+
+        debug!("online Clients for embedding: {}", clients.len());
+        for (client_id, client_info) in clients.iter() {
+            if let Some(allowed) = allowed_client_ids {
+                if !allowed.iter().any(|id| id == client_id) {
+                    debug!("Client {} is not allowed", client_id.log_label());
+                    continue;
+                }
+            }
+
+            if !client_info.authed {
+                continue;
+            }
+            if !Self::client_supports_embedding_tasks(client_info) {
+                debug!(
+                    "Skipping client {} for embedding because os_type={:?}",
+                    client_id.log_label(),
+                    client_info.os_type
+                );
+                continue;
+            }
+
+            let Some(models) = &client_info.models else {
+                continue;
+            };
+            if !models.iter().any(|m| m.id == model_name) {
+                continue;
+            }
+
+            let Some(system_info) = &client_info.system_info else {
+                continue;
+            };
+            let total_load: u16 = (system_info.cpu_usage + system_info.memory_usage) as u16;
+
+            match best_device {
+                None => best_device = Some((*client_id, total_load)),
+                Some((_best_id, best_load)) if total_load < best_load => {
+                    best_device = Some((*client_id, total_load))
+                }
+                _ => {}
+            }
+        }
+
+        best_device.map(|(id, _)| id).ok_or_else(|| {
+            anyhow!("No non-mobile embedding-capable client found for model '{model_name}'")
+        })
+    }
+
     pub async fn execute_chat_inference_stream(
         &self,
         model: String,
@@ -896,6 +1069,118 @@ impl InferenceScheduler {
         }
 
         Ok((task_id, route_outcome, rx))
+    }
+
+    pub async fn execute_embedding(
+        &self,
+        request: EmbeddingRequest,
+        allowed_client_ids: Option<&[ClientId]>,
+    ) -> Result<(EmbeddingResponse, SessionRouteOutcome)> {
+        if let Some(format) = request.encoding_format.as_deref() {
+            if !format.eq_ignore_ascii_case("float") {
+                return Err(anyhow!(
+                    "unsupported encoding_format '{}', only 'float' is supported",
+                    format
+                ));
+            }
+        }
+
+        let input = request.input.into_vec();
+        if input.is_empty() {
+            return Err(anyhow!("embedding input must not be empty"));
+        }
+        if input.iter().any(|item| item.trim().is_empty()) {
+            return Err(anyhow!("embedding input items must not be empty"));
+        }
+        let input_count = input.len();
+
+        let task_id = Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut tasks = self.pending_embedding_tasks.lock().await;
+            tasks.insert(task_id.clone(), sender);
+        }
+
+        let client_id = match self
+            .select_best_embedding_device_for_model(&request.model, allowed_client_ids)
+            .await
+        {
+            Ok(client_id) => client_id,
+            Err(e) => {
+                let mut tasks = self.pending_embedding_tasks.lock().await;
+                tasks.remove(&task_id);
+                return Err(e);
+            }
+        };
+        let route_outcome = SessionRouteOutcome::new(None, client_id, None);
+
+        if let Err(e) = self
+            .send_embedding_task_to_device(
+                &route_outcome.client_id,
+                task_id.clone(),
+                request.model.clone(),
+                input,
+                request.normalize,
+            )
+            .await
+        {
+            let mut tasks = self.pending_embedding_tasks.lock().await;
+            tasks.remove(&task_id);
+            return Err(e);
+        }
+
+        let timeout_secs: u64 = std::env::var("GPUF_EMBEDDING_TIMEOUT_SECS")
+            .ok()
+            .or_else(|| std::env::var("GPUF_INFERENCE_TIMEOUT_SECS").ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(120);
+
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), receiver).await {
+            Ok(Ok(Ok(result))) => {
+                if result.embeddings.len() != input_count {
+                    return Err(anyhow!(
+                        "embedding result count mismatch: expected {}, got {}",
+                        input_count,
+                        result.embeddings.len()
+                    ));
+                }
+
+                let data = result
+                    .embeddings
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, embedding)| EmbeddingData {
+                        object: "embedding".to_string(),
+                        embedding,
+                        index,
+                    })
+                    .collect();
+                let usage = EmbeddingUsage {
+                    prompt_tokens: result.prompt_tokens,
+                    total_tokens: result.prompt_tokens,
+                };
+                Ok((
+                    EmbeddingResponse {
+                        object: "list".to_string(),
+                        data,
+                        model: request.model,
+                        usage,
+                    },
+                    route_outcome,
+                ))
+            }
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(anyhow!("Embedding response channel closed")),
+            Err(_) => {
+                let mut tasks = self.pending_embedding_tasks.lock().await;
+                tasks.remove(&task_id);
+                Err(anyhow!(
+                    "Embedding task timed out after {} seconds",
+                    timeout_secs
+                ))
+            }
+        }
     }
 
     pub async fn cancel_inference(&self, task_id: &str, device_id: &ClientId) -> Result<()> {
@@ -995,6 +1280,49 @@ impl InferenceScheduler {
         Ok(())
     }
 
+    async fn send_embedding_task_to_device(
+        &self,
+        device_id: &ClientId,
+        task_id: String,
+        model: String,
+        input: Vec<String>,
+        normalize: bool,
+    ) -> Result<()> {
+        use common::write_command;
+
+        let mut clients = self.active_clients.lock().await;
+        let client_info = clients
+            .get_mut(device_id)
+            .ok_or_else(|| anyhow!("Device not found or not connected"))?;
+
+        if !client_info.authed {
+            error!("Device {} not authenticated", device_id.log_label());
+            return Err(anyhow!("Device not authenticated"));
+        }
+
+        let mut writer = client_info
+            .writer
+            .try_lock()
+            .map_err(|_| anyhow!("Device is busy, please try again"))?;
+
+        let input_count = input.len();
+        let command = Command::V1(CommandV1::EmbeddingTask {
+            task_id: task_id.clone(),
+            model,
+            input,
+            normalize,
+        });
+        info!(
+            "sent embedding task {} to device {} (inputs={})",
+            task_id,
+            device_id.log_label(),
+            input_count
+        );
+        write_command(&mut *writer, &command).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
     pub async fn handle_inference_result_chunk(
         &self,
         task_id: String,
@@ -1083,6 +1411,41 @@ impl InferenceScheduler {
                 completion_tokens,
             )
             .await;
+        }
+    }
+
+    pub async fn handle_embedding_result(
+        &self,
+        task_id: String,
+        success: bool,
+        embeddings: Vec<Vec<f32>>,
+        error: Option<String>,
+        prompt_tokens: u32,
+    ) {
+        let sender = {
+            let mut tasks = self.pending_embedding_tasks.lock().await;
+            tasks.remove(&task_id)
+        };
+
+        let Some(sender) = sender else {
+            debug!(
+                "Dropping embedding result for task {} because it is no longer pending",
+                task_id
+            );
+            return;
+        };
+
+        let response = if success {
+            Ok(EmbeddingTaskResult {
+                embeddings,
+                prompt_tokens,
+            })
+        } else {
+            Err(anyhow!("Embedding failed: {}", error.unwrap_or_default()))
+        };
+
+        if sender.send(response).is_err() {
+            warn!("Failed to send embedding result for task {}", task_id);
         }
     }
 
@@ -1486,9 +1849,44 @@ pub struct DeviceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handle::ClientInfo;
+    use common::{DevicesInfo, Model, COMMAND_V1_BASE_VERSION};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn client(seed: u8) -> ClientId {
         ClientId([seed; 16])
+    }
+
+    fn test_client_info(version: u32, os_type: OsType, engine_type: EngineType) -> ClientInfo {
+        let mut device = DevicesInfo::default();
+        device.os_type = os_type.clone();
+        device.engine_type = engine_type;
+
+        ClientInfo {
+            connection_id: 1,
+            writer: Arc::new(Mutex::new(Box::new(tokio::io::sink()))),
+            authed: true,
+            version,
+            os_type,
+            system_info: Some(crate::handle::SystemInfo {
+                cpu_usage: 10,
+                memory_usage: 20,
+                disk_usage: 30,
+                device_memsize: 16,
+                total_tflops: 1,
+                last_heartbeat: std::time::SystemTime::now(),
+                memsize_gb: 16,
+            }),
+            devices_info: vec![device],
+            connected_at: chrono::Utc::now(),
+            models: Some(vec![Model {
+                id: "bge-m3-q8_0".to_string(),
+                object: "model".to_string(),
+                created: 0,
+                owned_by: "gpuf".to_string(),
+            }]),
+        }
     }
 
     fn routing(owner: &str, policy: CachePolicy) -> SessionRouting {
@@ -1520,6 +1918,95 @@ mod tests {
             CachePolicy::Reset
         );
         assert!(CachePolicy::parse(Some("force")).is_err());
+    }
+
+    #[test]
+    fn embedding_support_requires_new_non_mobile_llama_worker() {
+        let supported = test_client_info(
+            COMMAND_V1_EMBEDDING_TASKS_VERSION,
+            OsType::LINUX,
+            EngineType::Llama,
+        );
+        assert!(InferenceScheduler::client_supports_embedding_tasks(
+            &supported
+        ));
+
+        let old_worker =
+            test_client_info(COMMAND_V1_BASE_VERSION, OsType::LINUX, EngineType::Llama);
+        assert!(!InferenceScheduler::client_supports_embedding_tasks(
+            &old_worker
+        ));
+
+        let mobile = test_client_info(
+            COMMAND_V1_EMBEDDING_TASKS_VERSION,
+            OsType::ANDROID,
+            EngineType::Llama,
+        );
+        assert!(!InferenceScheduler::client_supports_embedding_tasks(
+            &mobile
+        ));
+
+        let non_llama = test_client_info(
+            COMMAND_V1_EMBEDDING_TASKS_VERSION,
+            OsType::LINUX,
+            EngineType::Ollama,
+        );
+        assert!(!InferenceScheduler::client_supports_embedding_tasks(
+            &non_llama
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_embedding_rejects_result_count_mismatch() {
+        let active_clients = Arc::new(Mutex::new(HashMap::new()));
+        active_clients.lock().await.insert(
+            client(1),
+            test_client_info(
+                COMMAND_V1_EMBEDDING_TASKS_VERSION,
+                OsType::LINUX,
+                EngineType::Llama,
+            ),
+        );
+
+        let scheduler = Arc::new(InferenceScheduler::new(active_clients));
+        let scheduler_for_task = scheduler.clone();
+        let request_task = tokio::spawn(async move {
+            scheduler_for_task
+                .execute_embedding(
+                    EmbeddingRequest {
+                        model: "bge-m3-q8_0".to_string(),
+                        input: EmbeddingInput::Batch(vec![
+                            "hello".to_string(),
+                            "world".to_string(),
+                        ]),
+                        encoding_format: Some("float".to_string()),
+                        normalize: true,
+                    },
+                    None,
+                )
+                .await
+        });
+
+        let task_id = loop {
+            let maybe_task_id = {
+                let tasks = scheduler.pending_embedding_tasks.lock().await;
+                tasks.keys().next().cloned()
+            };
+            if let Some(task_id) = maybe_task_id {
+                break task_id;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        scheduler
+            .handle_embedding_result(task_id, true, vec![vec![1.0, 2.0]], None, 2)
+            .await;
+
+        let err = request_task
+            .await
+            .expect("embedding task should not panic")
+            .expect_err("mismatched embedding count must fail");
+        assert!(err.to_string().contains("result count mismatch"));
     }
 
     #[test]

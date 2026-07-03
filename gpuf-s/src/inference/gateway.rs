@@ -161,6 +161,11 @@ impl InferenceGateway {
                 "/v1/chat/completions",
                 post(handlers::handle_chat_completion),
             )
+            .route("/v1/embeddings", post(handlers::handle_embeddings))
+            .route(
+                "/api/open-apis/projects/:project_id/easyllms/embeddings",
+                post(handlers::handle_sophnet_embeddings),
+            )
             .route("/v1/models", get(handlers::list_models))
             // Device Management APIs
             .route("/api/v1/devices", get(handlers::list_devices))

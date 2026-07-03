@@ -80,9 +80,11 @@ fn command_label(command: &Command) -> &'static str {
             CommandV1::ModelStatus { .. } => "v1.model_status",
             CommandV1::InferenceTask { .. } => "v1.inference_task",
             CommandV1::ChatInferenceTask { .. } => "v1.chat_inference_task",
+            CommandV1::EmbeddingTask { .. } => "v1.embedding_task",
             CommandV1::CancelInference { .. } => "v1.cancel_inference",
             CommandV1::InferenceResult { .. } => "v1.inference_result",
             CommandV1::InferenceResultChunk { .. } => "v1.inference_result_chunk",
+            CommandV1::EmbeddingResult { .. } => "v1.embedding_result",
             CommandV1::ModelDownloadProgress { .. } => "v1.model_download_progress",
         },
         Command::V2(_) => "v2.command",
@@ -818,7 +820,7 @@ pub async fn perform_android_login_with_tls(
         network_tx: 0,
     };
     // Create Login command (same structure as TCPWorker::login())
-    const CURRENT_VERSION: u32 = 1;
+    const CURRENT_VERSION: u32 = common::COMMAND_V1_BASE_VERSION;
 
     // Calculate device metrics from actual device info
     let device_memtotal_gb = devices_info.memsize_gb.try_into().unwrap_or(0);
@@ -1751,6 +1753,21 @@ pub async fn start_worker_tasks() -> Result<()> {
                                         }
                                     }
                                 });
+                            }
+                            CommandV1::EmbeddingTask { task_id, .. } => {
+                                let result_command = CommandV1::EmbeddingResult {
+                                    task_id,
+                                    success: false,
+                                    embeddings: Vec::new(),
+                                    error: Some(
+                                        "EmbeddingTask is not supported on Android yet".to_string(),
+                                    ),
+                                    prompt_tokens: 0,
+                                };
+                                let _ = common::write_command_sync(
+                                    &mut *stream,
+                                    &Command::V1(result_command),
+                                );
                             }
                             CommandV1::CancelInference { task_id } => {
                                 let should_cancel = {
@@ -2912,6 +2929,27 @@ pub async fn start_worker_tasks_with_callback_ptr(callback: Option<StatusCallbac
                                             ),
                                         );
                                     });
+                                }
+
+                                CommandV1::EmbeddingTask { task_id, .. } => {
+                                    let result_command = CommandV1::EmbeddingResult {
+                                        task_id: task_id.clone(),
+                                        success: false,
+                                        embeddings: Vec::new(),
+                                        error: Some(
+                                            "EmbeddingTask is not supported on Android yet"
+                                                .to_string(),
+                                        ),
+                                        prompt_tokens: 0,
+                                    };
+                                    let _ = common::write_command_sync(
+                                        &mut *stream,
+                                        &Command::V1(result_command),
+                                    );
+                                    invoke_callback(
+                                        "EMBEDDING_FAILED",
+                                        &format!("Task: {} Android unsupported", task_id),
+                                    );
                                 }
 
                                 CommandV1::CancelInference { task_id } => {

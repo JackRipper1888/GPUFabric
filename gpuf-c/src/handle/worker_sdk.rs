@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = common::COMMAND_V1_BASE_VERSION;
 const DEFAULT_PROXY_SERVER_NAME: &str = "localhost";
 
 #[cfg(target_os = "ios")]

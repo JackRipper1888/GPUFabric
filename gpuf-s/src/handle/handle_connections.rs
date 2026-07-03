@@ -390,6 +390,18 @@ async fn handle_single_client(
                     )
                     .await;
             }
+            Ok(Command::V1(CommandV1::EmbeddingResult {
+                task_id,
+                success,
+                embeddings,
+                error,
+                prompt_tokens,
+            })) => {
+                server_state
+                    .inference_scheduler
+                    .handle_embedding_result(task_id, success, embeddings, error, prompt_tokens)
+                    .await;
+            }
 
             Ok(Command::V1(CommandV1::ModelDownloadProgress {
                 client_id: id,
@@ -706,6 +718,7 @@ async fn handle_login(
                 writer: writer.clone(),
                 authed: true,
                 version,
+                os_type,
                 system_info: Some(SystemInfo {
                     cpu_usage: system_info.cpu_usage,
                     memory_usage: system_info.memory_usage,

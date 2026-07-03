@@ -9,6 +9,10 @@ use config::GpuModelConfig;
 use std::fmt;
 use zeroize::Zeroize;
 
+pub const COMMAND_V1_BASE_VERSION: u32 = 1;
+pub const COMMAND_V1_EMBEDDING_TASKS_VERSION: u32 = 2;
+pub const CURRENT_COMMAND_V1_VERSION: u32 = COMMAND_V1_EMBEDDING_TASKS_VERSION;
+
 #[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
 pub struct Model {
     pub id: String,
@@ -279,6 +283,23 @@ pub enum CommandV1 {
         speed_bps: u64,
         status: DownloadStatus,
         error: Option<String>,
+    },
+
+    // Embedding task from server to client. Keep new variants at the end so
+    // older CommandV1 discriminants stay compatible.
+    EmbeddingTask {
+        task_id: String,
+        model: String,
+        input: Vec<String>,
+        normalize: bool,
+    },
+
+    EmbeddingResult {
+        task_id: String,
+        success: bool,
+        embeddings: Vec<Vec<f32>>,
+        error: Option<String>,
+        prompt_tokens: u32,
     },
 }
 
@@ -979,5 +1000,67 @@ async fn test_inference_task_preserves_session_fields() {
             assert_eq!(cache_policy.as_deref(), Some("bypass"));
         }
         _ => panic!("unexpected chat variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_embedding_task_result_roundtrip() {
+    let task = Command::V1(CommandV1::EmbeddingTask {
+        task_id: "embed-task-1".to_string(),
+        model: "bge-m3-q8_0".to_string(),
+        input: vec!["hello".to_string(), "world".to_string()],
+        normalize: true,
+    });
+
+    let result = Command::V1(CommandV1::EmbeddingResult {
+        task_id: "embed-task-1".to_string(),
+        success: true,
+        embeddings: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+        error: None,
+        prompt_tokens: 4,
+    });
+
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+
+    let encoded_task = bincode::encode_to_vec(&task, config).unwrap();
+    let (decoded_task, _) =
+        bincode::decode_from_slice::<Command, _>(&encoded_task, config).unwrap();
+
+    let encoded_result = bincode::encode_to_vec(&result, config).unwrap();
+    let (decoded_result, _) =
+        bincode::decode_from_slice::<Command, _>(&encoded_result, config).unwrap();
+
+    match decoded_task {
+        Command::V1(CommandV1::EmbeddingTask {
+            task_id,
+            model,
+            input,
+            normalize,
+        }) => {
+            assert_eq!(task_id, "embed-task-1");
+            assert_eq!(model, "bge-m3-q8_0");
+            assert_eq!(input.len(), 2);
+            assert!(normalize);
+        }
+        _ => panic!("unexpected embedding task variant"),
+    }
+
+    match decoded_result {
+        Command::V1(CommandV1::EmbeddingResult {
+            task_id,
+            success,
+            embeddings,
+            error,
+            prompt_tokens,
+        }) => {
+            assert_eq!(task_id, "embed-task-1");
+            assert!(success);
+            assert_eq!(embeddings.len(), 2);
+            assert!(error.is_none());
+            assert_eq!(prompt_tokens, 4);
+        }
+        _ => panic!("unexpected embedding result variant"),
     }
 }

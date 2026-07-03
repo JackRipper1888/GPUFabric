@@ -435,7 +435,7 @@ fn derive_model_id_from_path(model_path: &str) -> String {
     base.to_string()
 }
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = common::CURRENT_COMMAND_V1_VERSION;
 
 impl ClientWorker {
     /// Execute inference task using local LLM engine (Android specific)
@@ -2774,6 +2774,64 @@ impl WorkerHandle for ClientWorker {
                                     };
                                     self.send_command(chunk).await?;
                                 }
+                            }
+                            CommandV1::EmbeddingTask {
+                                task_id,
+                                model,
+                                input,
+                                normalize,
+                            } => {
+                                info!(
+                                    "Received embedding task: {} model: {} inputs: {}",
+                                    task_id,
+                                    model,
+                                    input.len()
+                                );
+
+                                #[cfg(not(target_os = "android"))]
+                                let result = {
+                                    let llama_engine = {
+                                        let engine_guard = self.engine.lock().await;
+                                        match engine_guard.as_ref() {
+                                            Some(AnyEngine::Llama(llama)) => Ok(llama.clone()),
+                                            Some(_) => Err(anyhow!(
+                                                "EmbeddingTask is only supported for LLAMA engine"
+                                            )),
+                                            None => Err(anyhow!("Engine not initialized")),
+                                        }
+                                    };
+
+                                    match llama_engine {
+                                        Ok(llama) => {
+                                            llama.generate_embeddings(input, normalize).await
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                };
+
+                                #[cfg(target_os = "android")]
+                                let result: Result<(
+                                    Vec<Vec<f32>>,
+                                    u32,
+                                )> = Err(anyhow!("EmbeddingTask is not supported on Android yet"));
+
+                                let response = match result {
+                                    Ok((embeddings, prompt_tokens)) => CommandV1::EmbeddingResult {
+                                        task_id,
+                                        success: true,
+                                        embeddings,
+                                        error: None,
+                                        prompt_tokens,
+                                    },
+                                    Err(e) => CommandV1::EmbeddingResult {
+                                        task_id,
+                                        success: false,
+                                        embeddings: Vec::new(),
+                                        error: Some(e.to_string()),
+                                        prompt_tokens: 0,
+                                    },
+                                };
+                                self.send_command(response).await?;
                             }
                             CommandV1::InferenceTask {
                                 task_id,
