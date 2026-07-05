@@ -194,7 +194,7 @@ Current real persisted sources are:
 
 | Endpoint | Real fields | Derived fields | Placeholder / not real in v1 |
 |---|---|---|---|
-| `/overview` | `summaryCards[onlineNodes].value`, `summaryCards[totalCompute].value`, token summary cards, `resourceUsage.totalDevices` | `resourceUsage.usedDevices`, `resourceUsage.usageRate`, `summaryCards[].displayValue`, `clusterStack[].percent` | none for current summary surface |
+| `/overview` | node/compute summary card values, token summary cards, `resourceUsage.totalDevices`, `statusBreakdown.*.nodes`, `statusBreakdown.*.compute` | `resourceUsage.usedDevices`, `resourceUsage.usageRate`, `summaryCards[].displayValue`, `clusterStack[].percent`, `statusBreakdown.*.resourceUsage`, `statusBreakdown.*.clusterStack` | none for current summary surface |
 | `/network-map` | `cities[].nodes`, `cities[].tflops`, `cities[].gpuModel`, `cities[].onlineNodes`, `topCities[]` | `cities[].id/name/province/coord/tier`, `cities[].usedNodes`, `regions[]`, `highlightProvinces[]` | `links` |
 | `/compute-nodes` | `id`, `owner` when `user_id` exists, `name` when `client_name` exists, `gpuModel`, `gpuCount`, `tokensPerSecond`, `lastSeenAt` | fallback `name`, fallback `owner`, `region`, `regionId`, `device`, `status`, `gpu`, `load`, `lastSeenText` | none for current node table surface |
 | `/token-throughput` | `input`, `output`, `inputTokens`, `outputTokens`, `totalTokens`, peak values, timestamps from `inference_token_usage` buckets | empty buckets are generated as zero points for chart continuity | none for current throughput surface |
@@ -233,6 +233,40 @@ Current real persisted sources are:
 | `/compute-nodes` | Geo data provenance | API does not mark whether geo is real-time reported or test-backfilled | Store/report geo source and update timestamp |
 | `/token-throughput` | Historical token backfill | Series starts from newly recorded rows; old requests are not reconstructed | Backfill from logs only if pre-deployment history is required |
 
+### Shared Node Status Filter
+
+`/network-map` supports `nodeStatus` to switch the inventory basis used by city,
+province, and top-city aggregations.
+`status` is accepted as a backward-compatible alias when `nodeStatus` is absent.
+
+| Value | Meaning |
+|---|---|
+| `all` | Default. All currently API-visible inventory rows (`valid`/`warning`) |
+| `online` | Nodes whose normalized status is `active` or `online` |
+| `offline` | API-visible nodes that are not currently `active`/`online`, including `offline`, `warning`, `maintenance`, and `error` |
+
+Chinese values `全部`, `在线`, and `离线` are also accepted.
+
+Detailed status rules:
+
+- If neither `nodeStatus` nor `status` is provided, the filter is `all`.
+- `nodeStatus` has priority over the `status` alias when both are provided.
+- Empty strings are treated as absent and therefore default to `all`.
+- Invalid values return HTTP `400 Bad Request` with an empty response body in
+  the current implementation.
+- `all` means all API-visible inventory rows after base filtering. The base
+  visibility rule is `COALESCE(gpu_assets.valid_status, 'valid') IN
+  ('valid', 'warning')`.
+- `online` means the normalized node status is `active` or `online`.
+- `offline` means API-visible rows that are not currently `active`/`online`.
+  This includes normalized `offline`, `warning`, `maintenance`, and `error`.
+- For any fixed region/data snapshot, `online + offline = all` for node count
+  and compute.
+
+`/overview` does not accept `nodeStatus`. It always returns all-scope legacy
+fields plus a three-way `statusBreakdown` so the frontend can render
+all/online/offline metrics without issuing multiple requests.
+
 ## GET `/api/banking/admin/overview`
 Get summary cards, resource usage, and coarse resource composition.
 
@@ -246,11 +280,58 @@ Get summary cards, resource usage, and coarse resource composition.
 ### Response `data`
 | Field | Type | v1 Notes |
 |---|---|---|
-| summaryCards | SummaryCard[] | `value` is the exact raw value; `displayValue`/`unit` are presentation fields |
-| resourceUsage.totalDevices | number | Real filtered node count |
+| summaryCards | SummaryCard[] | Presentation-friendly cards. Node and compute cards include online/offline/all dimensions; `totalCompute` is kept for compatibility and equals `allCompute` |
+| resourceUsage.totalDevices | number | Real all-scope node count after `region` filtering |
 | resourceUsage.usedDevices | number | Best-effort count of online nodes with assigned model metadata or telemetry load >= 5% |
 | resourceUsage.usageRate | number | `usedDevices / totalDevices`, rounded percentage |
-| clusterStack | ClusterStackItem[] | Derived from GPU model names; unknown/CPU nodes fall into `cpu_edge` |
+| clusterStack | ClusterStackItem[] | All-scope cluster composition; derived from GPU model names |
+| statusBreakdown | OverviewStatusBreakdown | Three inventory views keyed by `all`, `online`, and `offline` |
+
+Compatibility rules:
+
+- Existing consumers can keep reading `summaryCards[onlineNodes]`,
+  `summaryCards[totalCompute]`, `resourceUsage`, and `clusterStack`.
+- New consumers should prefer `statusBreakdown` for structured all/online/offline
+  comparisons.
+- `summaryCards[].value` is the raw value. For compute cards it is raw TFLOPS.
+- `summaryCards[].displayValue` and `unit` are display helpers only. Do not use
+  them for reconciliation.
+- Token cards (`realtimeTokenThroughput`, `todayTokenTotal`) are not split by
+  online/offline status. They are time-series aggregates from
+  `inference_token_usage`, while node status is current inventory state.
+
+Inventory `summaryCards` keys:
+| Key | Label | Raw `value` | Unit | Meaning |
+|---|---|---:|---|---|
+| onlineNodes | 在线节点 | number | 个 | Online node count |
+| offlineNodes | 离线节点 | number | 个 | Offline/non-online node count |
+| allNodes | 全部节点 | number | 个 | All API-visible node count |
+| totalCompute | 总算力 | TFLOPS | PF display unit | All-scope compute, kept for backward compatibility |
+| onlineCompute | 在线算力 | TFLOPS | PF display unit | Online compute |
+| offlineCompute | 离线算力 | TFLOPS | PF display unit | Offline/non-online compute |
+| allCompute | 全部算力 | TFLOPS | PF display unit | All API-visible compute; same raw value as `totalCompute` |
+
+`OverviewStatusMetrics`:
+| Field | Type | v1 Notes |
+|---|---|---|
+| nodes | number | Node count for this status group |
+| compute | number | Raw TFLOPS for this status group |
+| computeDisplayValue | string | Display-scaled compute value in PF |
+| computeUnit | string | `PF` |
+| resourceUsage | ResourceUsage | Resource usage computed within this status group |
+| clusterStack | ClusterStackItem[] | Cluster composition computed within this status group |
+
+`statusBreakdown` semantics:
+| Path | Meaning |
+|---|---|
+| statusBreakdown.all | All API-visible inventory rows after `region` filtering |
+| statusBreakdown.online | Subset whose normalized status is `active` or `online` |
+| statusBreakdown.offline | Subset whose normalized status is not `active`/`online` |
+| statusBreakdown.*.nodes | Node count in that subset |
+| statusBreakdown.*.compute | Raw TFLOPS sum in that subset |
+| statusBreakdown.*.resourceUsage.totalDevices | Same as `statusBreakdown.*.nodes` |
+| statusBreakdown.*.resourceUsage.usedDevices | Best-effort used count within that subset |
+| statusBreakdown.*.clusterStack | GPU family percentages within that subset |
 
 ### Example
 ```bash
@@ -273,6 +354,41 @@ curl "http://<host>:18081/api/banking/admin/overview?region=beijing"
       {
         "key": "totalCompute",
         "label": "总算力",
+        "value": 80,
+        "displayValue": "0.1",
+        "unit": "PF"
+      },
+      {
+        "key": "offlineNodes",
+        "label": "离线节点",
+        "value": 0,
+        "displayValue": "0",
+        "unit": "个"
+      },
+      {
+        "key": "allNodes",
+        "label": "全部节点",
+        "value": 1,
+        "displayValue": "1",
+        "unit": "个"
+      },
+      {
+        "key": "onlineCompute",
+        "label": "在线算力",
+        "value": 80,
+        "displayValue": "0.1",
+        "unit": "PF"
+      },
+      {
+        "key": "offlineCompute",
+        "label": "离线算力",
+        "value": 0,
+        "displayValue": "0",
+        "unit": "PF"
+      },
+      {
+        "key": "allCompute",
+        "label": "全部算力",
         "value": 80,
         "displayValue": "0.1",
         "unit": "PF"
@@ -315,7 +431,93 @@ curl "http://<host>:18081/api/banking/admin/overview?region=beijing"
         "label": "CPU/边缘节点",
         "percent": 0
       }
-    ]
+    ],
+    "statusBreakdown": {
+      "all": {
+        "nodes": 1,
+        "compute": 80,
+        "computeDisplayValue": "0.1",
+        "computeUnit": "PF",
+        "resourceUsage": {
+          "totalDevices": 1,
+          "usedDevices": 0,
+          "usageRate": 0
+        },
+        "clusterStack": [
+          {
+            "key": "a100_h100",
+            "label": "GPU A100/H100",
+            "percent": 100
+          },
+          {
+            "key": "a800_4090",
+            "label": "GPU A800/4090",
+            "percent": 0
+          },
+          {
+            "key": "cpu_edge",
+            "label": "CPU/边缘节点",
+            "percent": 0
+          }
+        ]
+      },
+      "online": {
+        "nodes": 1,
+        "compute": 80,
+        "computeDisplayValue": "0.1",
+        "computeUnit": "PF",
+        "resourceUsage": {
+          "totalDevices": 1,
+          "usedDevices": 0,
+          "usageRate": 0
+        },
+        "clusterStack": [
+          {
+            "key": "a100_h100",
+            "label": "GPU A100/H100",
+            "percent": 100
+          },
+          {
+            "key": "a800_4090",
+            "label": "GPU A800/4090",
+            "percent": 0
+          },
+          {
+            "key": "cpu_edge",
+            "label": "CPU/边缘节点",
+            "percent": 0
+          }
+        ]
+      },
+      "offline": {
+        "nodes": 0,
+        "compute": 0,
+        "computeDisplayValue": "0",
+        "computeUnit": "PF",
+        "resourceUsage": {
+          "totalDevices": 0,
+          "usedDevices": 0,
+          "usageRate": 0
+        },
+        "clusterStack": [
+          {
+            "key": "a100_h100",
+            "label": "GPU A100/H100",
+            "percent": 0
+          },
+          {
+            "key": "a800_4090",
+            "label": "GPU A800/4090",
+            "percent": 0
+          },
+          {
+            "key": "cpu_edge",
+            "label": "CPU/边缘节点",
+            "percent": 0
+          }
+        ]
+      }
+    }
   }
 }
 ```
@@ -323,14 +525,20 @@ curl "http://<host>:18081/api/banking/admin/overview?region=beijing"
 ## GET `/api/banking/admin/network-map`
 Get city-level map nodes, region groups, highlighted provinces, and top cities.
 
+### Query Parameters
+| Param | Type | Optional | v1 Notes |
+|---|---:|:---:|---|
+| nodeStatus | string | Yes | `all`/`online`/`offline`; default is `all`; filters inventory rows before computing `cities`, `regions`, `highlightProvinces`, and `topCities` |
+| status | string | Yes | Alias for `nodeStatus` when `nodeStatus` is absent |
+
 ### Response `data`
 | Field | Type | v1 Notes |
 |---|---|---|
-| cities | NetworkCity[] | Real city-level aggregation, not per-device details |
+| cities | NetworkCity[] | Real city-level aggregation after `nodeStatus` filtering, not per-device details |
 | links | NetworkLink[] | Always `[]` in v1 |
-| regions | NetworkRegion[] | Static region definitions with currently active city ids |
-| highlightProvinces | HighlightProvince[] | Derived from top provinces by TFLOPS/nodes |
-| topCities | TopCity[] | Top 5 cities by TFLOPS then node count |
+| regions | NetworkRegion[] | Static region definitions with city ids that still have data after `nodeStatus` filtering |
+| highlightProvinces | HighlightProvince[] | Derived from top provinces by TFLOPS/nodes after `nodeStatus` filtering |
+| topCities | TopCity[] | Top 5 cities within the filtered node set, sorted by TFLOPS desc, node count desc, then city id asc |
 
 `NetworkCity`:
 | Field | Type | v1 Notes |
@@ -346,9 +554,32 @@ Get city-level map nodes, region groups, highlighted provinces, and top cities.
 | onlineNodes | number | Count of `active`/`online` nodes |
 | usedNodes | number | Best-effort count of used nodes in this city |
 
+Filtering examples:
+
+```bash
+# Default: all visible nodes, same as nodeStatus=all
+curl "http://<host>:18081/api/banking/admin/network-map"
+
+# Online city/top-city view
+curl "http://<host>:18081/api/banking/admin/network-map?nodeStatus=online"
+
+# Offline/non-online city/top-city view
+curl "http://<host>:18081/api/banking/admin/network-map?nodeStatus=offline"
+```
+
+Important frontend notes:
+
+- `topCities` is recalculated after the filter. For
+  `nodeStatus=offline`, it is the top 5 offline/non-online city set.
+- `cities[].nodes` and `cities[].tflops` are also recalculated after the filter.
+- `cities[].onlineNodes` keeps its literal meaning. For
+  `nodeStatus=offline`, it is usually `0`.
+- When no `nodeStatus` is provided, the API returns all visible nodes, including
+  online and offline/non-online nodes.
+
 ### Example
 ```bash
-curl "http://<host>:18081/api/banking/admin/network-map"
+curl "http://<host>:18081/api/banking/admin/network-map?nodeStatus=offline"
 ```
 
 ## GET `/api/banking/admin/compute-nodes`

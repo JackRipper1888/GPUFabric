@@ -6,10 +6,10 @@ use std::{collections::HashMap, fmt::Write};
 
 use crate::api_server::banking_admin::{
     ClusterStackItem, ComputeNodeItem, ComputeNodeStats, ComputeNodesData, ComputeNodesQuery,
-    HighlightProvince, NetworkCity, NetworkLink, NetworkMapData, NetworkRegion, OverviewData,
-    OverviewQuery, Pagination, ResourceUsage, SummaryCard, TokenThroughputData,
-    TokenThroughputPeaks, TokenThroughputPoint, TokenThroughputQuery, TokenThroughputTotals,
-    TopCity,
+    HighlightProvince, NetworkCity, NetworkLink, NetworkMapData, NetworkMapQuery, NetworkRegion,
+    OverviewData, OverviewQuery, OverviewStatusBreakdown, OverviewStatusMetrics, Pagination,
+    ResourceUsage, SummaryCard, TokenThroughputData, TokenThroughputPeaks, TokenThroughputPoint,
+    TokenThroughputQuery, TokenThroughputTotals, TopCity,
 };
 use crate::db::token_usage;
 
@@ -37,6 +37,13 @@ struct BankingAssetRow {
     avg_device_gpuusage: Option<f64>,
     token_tps: Option<f64>,
     last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeStatusFilter {
+    All,
+    Online,
+    Offline,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +136,85 @@ impl CityAggregate {
     }
 }
 
+#[derive(Debug)]
+struct OverviewInventoryMetrics {
+    nodes: u32,
+    compute_tflops: u64,
+    used_devices: u32,
+    usage_rate: u8,
+    cluster_stack: Vec<ClusterStackItem>,
+}
+
+impl OverviewInventoryMetrics {
+    fn resource_usage(&self) -> ResourceUsage {
+        ResourceUsage {
+            total_devices: self.nodes,
+            used_devices: self.used_devices,
+            usage_rate: self.usage_rate,
+        }
+    }
+
+    fn status_metrics(&self) -> OverviewStatusMetrics {
+        OverviewStatusMetrics {
+            nodes: self.nodes,
+            compute: self.compute_tflops,
+            compute_display_value: format_pf(self.compute_tflops),
+            compute_unit: "PF".to_string(),
+            resource_usage: self.resource_usage(),
+            cluster_stack: self.cluster_stack.clone(),
+        }
+    }
+}
+
+fn overview_rows_by_status<'a>(
+    rows: &[&'a BankingAssetRow],
+    filter: NodeStatusFilter,
+) -> Vec<&'a BankingAssetRow> {
+    rows.iter()
+        .copied()
+        .filter(|row| row_matches_node_status(row, filter))
+        .collect()
+}
+
+fn overview_inventory_metrics(rows: &[&BankingAssetRow]) -> OverviewInventoryMetrics {
+    let nodes = rows.len() as u32;
+    let compute_tflops = rows
+        .iter()
+        .map(|row| row.total_tflops.unwrap_or_default().max(0) as u64)
+        .sum();
+    let used_devices = rows.iter().filter(|row| is_used_node(row)).count() as u32;
+
+    OverviewInventoryMetrics {
+        nodes,
+        compute_tflops,
+        used_devices,
+        usage_rate: percent(used_devices, nodes),
+        cluster_stack: cluster_stack(rows),
+    }
+}
+
+fn node_summary_card(key: &str, label: &str, nodes: u32) -> SummaryCard {
+    SummaryCard {
+        key: key.to_string(),
+        label: label.to_string(),
+        value: json!(nodes),
+        display_value: format_number(nodes as u64),
+        unit: "个".to_string(),
+        caption: None,
+    }
+}
+
+fn compute_summary_card(key: &str, label: &str, compute_tflops: u64) -> SummaryCard {
+    SummaryCard {
+        key: key.to_string(),
+        label: label.to_string(),
+        value: json!(compute_tflops),
+        display_value: format_pf(compute_tflops),
+        unit: "PF".to_string(),
+        caption: None,
+    }
+}
+
 pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Result<OverviewData> {
     let time_range = overview_time_range(query)?;
     let rows = fetch_asset_rows(pool).await?;
@@ -138,23 +224,11 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
         .filter(|row| row_matches_region(row, query.region.as_deref()))
         .collect();
 
-    let total_devices = filtered_rows.len() as u32;
-    let online_nodes = filtered_rows
-        .iter()
-        .filter(|row| {
-            matches!(
-                normalize_compute_status(row.client_status.as_deref(), row.valid_status.as_deref())
-                    .as_str(),
-                "active" | "online"
-            )
-        })
-        .count() as u32;
-    let total_tflops: u64 = filtered_rows
-        .iter()
-        .map(|row| row.total_tflops.unwrap_or_default().max(0) as u64)
-        .sum();
-    let used_devices = filtered_rows.iter().filter(|row| is_used_node(row)).count() as u32;
-    let usage_rate = percent(used_devices, total_devices);
+    let online_rows = overview_rows_by_status(&filtered_rows, NodeStatusFilter::Online);
+    let offline_rows = overview_rows_by_status(&filtered_rows, NodeStatusFilter::Offline);
+    let all_metrics = overview_inventory_metrics(&filtered_rows);
+    let online_metrics = overview_inventory_metrics(&online_rows);
+    let offline_metrics = overview_inventory_metrics(&offline_rows);
     let token_total = match time_range {
         Some((from, to)) => {
             token_usage::get_token_usage_total_in_range(pool, from, to, query.region.as_deref())
@@ -177,22 +251,13 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
 
     Ok(OverviewData {
         summary_cards: vec![
-            SummaryCard {
-                key: "onlineNodes".to_string(),
-                label: "在线节点".to_string(),
-                value: json!(online_nodes),
-                display_value: format_number(online_nodes as u64),
-                unit: "个".to_string(),
-                caption: None,
-            },
-            SummaryCard {
-                key: "totalCompute".to_string(),
-                label: "总算力".to_string(),
-                value: json!(total_tflops),
-                display_value: format_pf(total_tflops),
-                unit: "PF".to_string(),
-                caption: None,
-            },
+            node_summary_card("onlineNodes", "在线节点", online_metrics.nodes),
+            compute_summary_card("totalCompute", "总算力", all_metrics.compute_tflops),
+            node_summary_card("offlineNodes", "离线节点", offline_metrics.nodes),
+            node_summary_card("allNodes", "全部节点", all_metrics.nodes),
+            compute_summary_card("onlineCompute", "在线算力", online_metrics.compute_tflops),
+            compute_summary_card("offlineCompute", "离线算力", offline_metrics.compute_tflops),
+            compute_summary_card("allCompute", "全部算力", all_metrics.compute_tflops),
             SummaryCard {
                 key: "realtimeTokenThroughput".to_string(),
                 label: "实时Token吞吐".to_string(),
@@ -214,22 +279,29 @@ pub async fn get_overview(pool: &Pool<Postgres>, query: &OverviewQuery) -> Resul
                 }),
             },
         ],
-        resource_usage: ResourceUsage {
-            total_devices,
-            used_devices,
-            usage_rate,
+        resource_usage: all_metrics.resource_usage(),
+        cluster_stack: all_metrics.cluster_stack.clone(),
+        status_breakdown: OverviewStatusBreakdown {
+            all: all_metrics.status_metrics(),
+            online: online_metrics.status_metrics(),
+            offline: offline_metrics.status_metrics(),
         },
-        cluster_stack: cluster_stack(&filtered_rows),
     })
 }
 
-pub async fn get_network_map(pool: &Pool<Postgres>) -> Result<NetworkMapData> {
+pub async fn get_network_map(
+    pool: &Pool<Postgres>,
+    query: &NetworkMapQuery,
+) -> Result<NetworkMapData> {
+    let node_status =
+        parse_node_status_filter(query.node_status.as_deref(), query.status.as_deref())?;
     let rows = fetch_asset_rows(pool).await?;
     let mut cities: HashMap<String, CityAggregate> = HashMap::new();
 
     for row in rows
         .iter()
         .filter(|row| country_allowed(row.geo_country.as_deref()))
+        .filter(|row| row_matches_node_status(row, node_status))
     {
         let Some(raw_city) = row.geo_city.as_deref() else {
             continue;
@@ -809,6 +881,15 @@ fn city_meta(raw_city: &str, raw_region: Option<&str>) -> CityMeta {
             117.2009,
             39.0842,
         ),
+        "hohhot" | "呼和浩特" | "呼和浩特市" => known_city(
+            "hohhot",
+            "呼和浩特",
+            "内蒙古自治区",
+            "north",
+            "华北算力区",
+            111.7492,
+            40.8426,
+        ),
         "qingdao" | "青岛" | "青岛市" => known_city(
             "qingdao",
             "青岛",
@@ -1089,6 +1170,45 @@ fn normalize_compute_status(client_status: Option<&str>, valid_status: Option<&s
     }
 }
 
+fn parse_node_status_filter(
+    node_status: Option<&str>,
+    status_alias: Option<&str>,
+) -> Result<NodeStatusFilter> {
+    let raw = node_status
+        .or(status_alias)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let Some(raw) = raw else {
+        return Ok(NodeStatusFilter::All);
+    };
+
+    match normalize_filter(raw).as_str() {
+        "all" | "全部" => Ok(NodeStatusFilter::All),
+        "online" | "active" | "在线" => Ok(NodeStatusFilter::Online),
+        "offline" | "离线" => Ok(NodeStatusFilter::Offline),
+        _ => Err(anyhow::anyhow!(
+            "invalid node status filter: expected all, online, or offline"
+        )),
+    }
+}
+
+fn row_matches_node_status(row: &BankingAssetRow, filter: NodeStatusFilter) -> bool {
+    match filter {
+        NodeStatusFilter::All => true,
+        NodeStatusFilter::Online => is_online_node(row),
+        NodeStatusFilter::Offline => !is_online_node(row),
+    }
+}
+
+fn is_online_node(row: &BankingAssetRow) -> bool {
+    matches!(
+        normalize_compute_status(row.client_status.as_deref(), row.valid_status.as_deref())
+            .as_str(),
+        "active" | "online"
+    )
+}
+
 fn normalize_device(os_type: Option<&str>) -> String {
     let value = os_type.unwrap_or_default().trim().to_ascii_lowercase();
     if value.contains("windows") || value == "win" {
@@ -1187,11 +1307,7 @@ fn current_load(row: &BankingAssetRow) -> u8 {
 }
 
 fn is_used_node(row: &BankingAssetRow) -> bool {
-    if !matches!(
-        normalize_compute_status(row.client_status.as_deref(), row.valid_status.as_deref())
-            .as_str(),
-        "active" | "online"
-    ) {
+    if !is_online_node(row) {
         return false;
     }
 
@@ -1351,4 +1467,119 @@ fn short_id(id: &str) -> String {
 
 fn round4(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset(client_status: Option<&str>, valid_status: Option<&str>) -> BankingAssetRow {
+        BankingAssetRow {
+            client_id: "client-1".to_string(),
+            user_id: None,
+            client_name: None,
+            client_status: client_status.map(str::to_string),
+            valid_status: valid_status.map(str::to_string),
+            os_type: None,
+            geo_country: None,
+            geo_region: None,
+            geo_city: None,
+            geo_latitude: None,
+            geo_longitude: None,
+            total_tflops: Some(1),
+            model: None,
+            model_version: None,
+            cpu_usage: None,
+            mem_usage: None,
+            disk_usage: None,
+            gpu_count: 0,
+            device_names: None,
+            avg_device_gpuusage: None,
+            token_tps: None,
+            last_seen_at: Utc::now(),
+        }
+    }
+
+    fn asset_with_tflops(
+        client_status: Option<&str>,
+        valid_status: Option<&str>,
+        total_tflops: i32,
+    ) -> BankingAssetRow {
+        let mut row = asset(client_status, valid_status);
+        row.total_tflops = Some(total_tflops);
+        row
+    }
+
+    #[test]
+    fn parses_node_status_filter_aliases() {
+        assert_eq!(
+            parse_node_status_filter(None, None).unwrap(),
+            NodeStatusFilter::All
+        );
+        assert_eq!(
+            parse_node_status_filter(Some("online"), None).unwrap(),
+            NodeStatusFilter::Online
+        );
+        assert_eq!(
+            parse_node_status_filter(None, Some("离线")).unwrap(),
+            NodeStatusFilter::Offline
+        );
+        assert_eq!(
+            parse_node_status_filter(Some("全部"), Some("online")).unwrap(),
+            NodeStatusFilter::All
+        );
+        assert!(parse_node_status_filter(Some("busy"), None).is_err());
+    }
+
+    #[test]
+    fn offline_node_filter_matches_non_online_visible_nodes() {
+        let online = asset(Some("online"), Some("valid"));
+        let active = asset(Some("active"), Some("valid"));
+        let offline = asset(Some("offline"), Some("valid"));
+        let warning = asset(Some("online"), Some("warning"));
+        let maintenance = asset(Some("maintenance"), Some("valid"));
+
+        assert!(row_matches_node_status(&online, NodeStatusFilter::Online));
+        assert!(row_matches_node_status(&active, NodeStatusFilter::Online));
+        assert!(!row_matches_node_status(&offline, NodeStatusFilter::Online));
+        assert!(!row_matches_node_status(&warning, NodeStatusFilter::Online));
+
+        assert!(!row_matches_node_status(&online, NodeStatusFilter::Offline));
+        assert!(row_matches_node_status(&offline, NodeStatusFilter::Offline));
+        assert!(row_matches_node_status(&warning, NodeStatusFilter::Offline));
+        assert!(row_matches_node_status(
+            &maintenance,
+            NodeStatusFilter::Offline
+        ));
+    }
+
+    #[test]
+    fn overview_inventory_metrics_groups_all_online_offline() {
+        let online = asset_with_tflops(Some("online"), Some("valid"), 10);
+        let active = asset_with_tflops(Some("active"), Some("valid"), 20);
+        let offline = asset_with_tflops(Some("offline"), Some("valid"), 30);
+        let warning = asset_with_tflops(Some("online"), Some("warning"), 40);
+        let rows = vec![&online, &active, &offline, &warning];
+
+        let online_rows = overview_rows_by_status(&rows, NodeStatusFilter::Online);
+        let offline_rows = overview_rows_by_status(&rows, NodeStatusFilter::Offline);
+        let all_metrics = overview_inventory_metrics(&rows);
+        let online_metrics = overview_inventory_metrics(&online_rows);
+        let offline_metrics = overview_inventory_metrics(&offline_rows);
+
+        assert_eq!(all_metrics.nodes, 4);
+        assert_eq!(all_metrics.compute_tflops, 100);
+        assert_eq!(online_metrics.nodes, 2);
+        assert_eq!(online_metrics.compute_tflops, 30);
+        assert_eq!(offline_metrics.nodes, 2);
+        assert_eq!(offline_metrics.compute_tflops, 70);
+        assert_eq!(
+            online_metrics.nodes + offline_metrics.nodes,
+            all_metrics.nodes
+        );
+        assert_eq!(
+            online_metrics.compute_tflops + offline_metrics.compute_tflops,
+            all_metrics.compute_tflops
+        );
+    }
 }
