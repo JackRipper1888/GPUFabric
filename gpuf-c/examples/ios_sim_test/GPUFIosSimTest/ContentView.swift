@@ -43,7 +43,7 @@ struct ContentView: View {
 }
 
 private func startRemoteWorkerOnce() -> String {
-    let modelFileName = "Llama-3.2-1B-Instruct-Q8_0.gguf"
+    let modelFileName = environment["GPUF_IOS_TEST_MODEL_FILE_NAME"] ?? "Llama-3.2-1B-Instruct-Q8_0.gguf"
 
     let documentsModelPath: String? = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
         .first?
