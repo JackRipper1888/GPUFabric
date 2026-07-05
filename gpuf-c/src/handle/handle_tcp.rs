@@ -29,7 +29,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::ToSocketAddrs;
-#[cfg(not(target_os = "android"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +46,14 @@ static HTTP_SERVER_STARTED: AtomicBool = AtomicBool::new(false);
 use std::sync::OnceLock;
 #[cfg(not(target_os = "android"))]
 static GLOBAL_ENGINE: OnceLock<Arc<Mutex<Option<AnyEngine>>>> = OnceLock::new();
+
+struct ConnectionTaskGuard(Arc<AtomicBool>);
+
+impl Drop for ConnectionTaskGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 
 #[cfg(not(target_os = "android"))]
 fn start_llama_http_server_once(
@@ -1786,6 +1793,7 @@ impl ClientWorker {
                 cancelled: Mutex::new(HashSet::new()),
                 notify: tokio::sync::Notify::new(),
             }),
+            connection_closed: Arc::new(AtomicBool::new(false)),
         };
         Ok(worker)
     }
@@ -2326,10 +2334,15 @@ impl WorkerHandle for ClientWorker {
             info!("{} Model task started", log_icon("✅", "[OK]"));
             let local_port = self.args.local_port;
             let devices_info = self.devices_info.clone();
+            let connection_closed = Arc::clone(&self.connection_closed);
             tokio::spawn(async move {
                 let mut interval = interval(Duration::from_secs(300)); // Send heartbeat every 10 seconds
                 loop {
                     interval.tick().await;
+                    if connection_closed.load(Ordering::SeqCst) {
+                        debug!("Model status task exiting because control connection closed");
+                        break;
+                    }
 
                     let models: Vec<common::Model> = match engine_type {
                         common::EngineType::Ollama => match get_engine_models(local_port).await {
@@ -2406,12 +2419,17 @@ impl WorkerHandle for ClientWorker {
             let network_monitor = Arc::clone(&self.network_monitor);
             let public_ipv4 = self.public_ipv4;
             let engine_type = self.engine_type; // Clone engine_type for use in spawn
-                                                // network_monitor.lock().await.update();
+            let connection_closed = Arc::clone(&self.connection_closed);
+            // network_monitor.lock().await.update();
             tokio::spawn(async move {
                 let mut interval = interval(Duration::from_secs(120)); // Send heartbeat every 120 seconds
 
                 loop {
                     interval.tick().await;
+                    if connection_closed.load(Ordering::SeqCst) {
+                        debug!("Heartbeat task exiting because control connection closed");
+                        break;
+                    }
 
                     let (cpu_usage, memory_usage, disk_usage, _computer_name) =
                         match collect_system_info().await {
@@ -2485,6 +2503,7 @@ impl WorkerHandle for ClientWorker {
 
     fn handler(&self) -> impl Future<Output = Result<()>> + Send {
         async move {
+            let _connection_guard = ConnectionTaskGuard(Arc::clone(&self.connection_closed));
             let mut buf = BytesMut::with_capacity(MAX_MESSAGE_SIZE);
             let mut p2p_turn_config: HashMap<[u8; 16], P2PConnectionRuntimeConfig> = HashMap::new();
             loop {

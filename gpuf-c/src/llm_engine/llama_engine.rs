@@ -971,10 +971,12 @@ impl LlamaEngine {
                             ));
                         }
 
+                        let embedding_batch = n_batch.max(tokens.len() as u32);
                         let context_params = || {
                             LlamaContextParams::default()
                                 .with_n_ctx(NonZeroU32::new(n_ctx))
-                                .with_n_batch(n_batch.max(tokens.len() as u32))
+                                .with_n_batch(embedding_batch)
+                                .with_n_ubatch(embedding_batch)
                                 .with_embeddings(true)
                                 .with_pooling_type(LlamaPoolingType::Mean)
                                 .with_attention_type(LlamaAttentionType::NonCausal)

@@ -20,6 +20,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use std::future::Future;
 #[allow(unused_imports)]
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
@@ -63,6 +64,7 @@ pub struct ClientWorker {
     engine_type: ClientEngineType,
     args: Args,
     cancel_state: Arc<CancelState>,
+    connection_closed: Arc<AtomicBool>,
     #[cfg(not(target_os = "android"))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
     #[cfg(target_os = "android")]

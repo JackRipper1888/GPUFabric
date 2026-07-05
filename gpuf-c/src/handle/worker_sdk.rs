@@ -119,6 +119,14 @@ fn derive_model_id_from_path(model_path: &str) -> String {
     if lower.contains("llama-3") || lower.contains("llama3") {
         return "llama3".to_string();
     }
+    if lower.contains("minicpm") {
+        return std::path::Path::new(model_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("minicpm")
+            .to_string();
+    }
     if lower.contains("qwen") {
         return "qwen".to_string();
     }

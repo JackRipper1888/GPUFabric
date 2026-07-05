@@ -494,6 +494,21 @@ fn main() {
         }
 
         println!("cargo:rustc-link-search=native={}", llama_lib_dir.display());
+        println!("cargo:rerun-if-changed={}", llama_lib_dir.display());
+        for lib in [
+            "libllama.a",
+            "libggml.a",
+            "libggml-base.a",
+            "libggml-cpu.a",
+            "libggml-metal.a",
+            "libggml-blas.a",
+            "libmtmd.a",
+        ] {
+            println!(
+                "cargo:rerun-if-changed={}",
+                llama_lib_dir.join(lib).display()
+            );
+        }
 
         // Core llama.cpp libs
         println!("cargo:rustc-link-lib=static=llama");
