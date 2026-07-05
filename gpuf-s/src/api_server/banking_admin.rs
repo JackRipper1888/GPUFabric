@@ -42,6 +42,7 @@ pub struct OverviewData {
     pub summary_cards: Vec<SummaryCard>,
     pub resource_usage: ResourceUsage,
     pub cluster_stack: Vec<ClusterStackItem>,
+    pub status_breakdown: OverviewStatusBreakdown,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +57,7 @@ pub struct SummaryCard {
     pub caption: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceUsage {
     pub total_devices: u32,
@@ -64,11 +65,30 @@ pub struct ResourceUsage {
     pub usage_rate: u8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ClusterStackItem {
     pub key: String,
     pub label: String,
     pub percent: u8,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewStatusBreakdown {
+    pub all: OverviewStatusMetrics,
+    pub online: OverviewStatusMetrics,
+    pub offline: OverviewStatusMetrics,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewStatusMetrics {
+    pub nodes: u32,
+    pub compute: u64,
+    pub compute_display_value: String,
+    pub compute_unit: String,
+    pub resource_usage: ResourceUsage,
+    pub cluster_stack: Vec<ClusterStackItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +99,14 @@ pub struct NetworkMapData {
     pub regions: Vec<NetworkRegion>,
     pub highlight_provinces: Vec<HighlightProvince>,
     pub top_cities: Vec<TopCity>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkMapQuery {
+    /// Node inventory status filter: all, online, or offline. `status` is kept as an alias.
+    pub node_status: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,12 +274,17 @@ pub async fn get_overview(
 
 pub async fn get_network_map(
     State(app_state): State<Arc<ApiServer>>,
+    Query(query): Query<NetworkMapQuery>,
 ) -> Result<Json<BankingAdminEnvelope<NetworkMapData>>, StatusCode> {
-    let data = banking_admin::get_network_map(&app_state.db_pool)
+    let data = banking_admin::get_network_map(&app_state.db_pool, &query)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get banking admin network map: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            if e.to_string().contains("invalid node status") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         })?;
 
     Ok(Json(BankingAdminEnvelope::ok(data)))
