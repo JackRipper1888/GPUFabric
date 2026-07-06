@@ -479,6 +479,59 @@ pub enum CommandV2 {
         repeat_last_n: i32,
         min_keep: u32,
     },
+
+    /// P2P file transfer start metadata for OCR/chat attachments.
+    P2PFileStart {
+        connection_id: [u8; 16],
+        transfer_id: [u8; 16],
+        task_id: Option<String>,
+        purpose: P2PFilePurpose,
+        file_name: Option<String>,
+        mime_type: String,
+        byte_size: u64,
+        sha256: [u8; 32],
+    },
+
+    /// P2P file payload chunk. Integrity is covered by the signed data-plane envelope.
+    P2PFileChunk {
+        connection_id: [u8; 16],
+        transfer_id: [u8; 16],
+        seq: u32,
+        offset: u64,
+        data: Vec<u8>,
+    },
+
+    /// P2P file transfer completion marker.
+    P2PFileDone {
+        connection_id: [u8; 16],
+        transfer_id: [u8; 16],
+        byte_size: u64,
+        sha256: [u8; 32],
+    },
+
+    /// P2P file transfer acknowledgement for flow control and resume.
+    P2PFileAck {
+        connection_id: [u8; 16],
+        transfer_id: [u8; 16],
+        received_bytes: u64,
+        next_offset: u64,
+        done: bool,
+        error: Option<String>,
+    },
+
+    /// P2P file transfer cancellation.
+    P2PFileCancel {
+        connection_id: [u8; 16],
+        transfer_id: [u8; 16],
+        reason: String,
+    },
+}
+
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+pub enum P2PFilePurpose {
+    OcrImage,
+    ChatImage,
+    GenericAttachment,
 }
 
 #[derive(Encode, Decode, Clone, PartialEq, Eq)]
@@ -1129,6 +1182,77 @@ async fn test_chat_inference_v2_multimodal_roundtrip() {
             assert!(messages[0].content.is_multimodal());
         }
         _ => panic!("unexpected chat v2 variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_p2p_file_transfer_roundtrip() {
+    let connection_id = [1u8; 16];
+    let transfer_id = [2u8; 16];
+    let sha256 = [3u8; 32];
+    let start = Command::V2(CommandV2::P2PFileStart {
+        connection_id,
+        transfer_id,
+        task_id: Some("ocr-task-1".to_string()),
+        purpose: P2PFilePurpose::OcrImage,
+        file_name: Some("screen.png".to_string()),
+        mime_type: "image/png".to_string(),
+        byte_size: 6,
+        sha256,
+    });
+    let chunk = Command::V2(CommandV2::P2PFileChunk {
+        connection_id,
+        transfer_id,
+        seq: 0,
+        offset: 0,
+        data: b"screen".to_vec(),
+    });
+    let done = Command::V2(CommandV2::P2PFileDone {
+        connection_id,
+        transfer_id,
+        byte_size: 6,
+        sha256,
+    });
+    let ack = Command::V2(CommandV2::P2PFileAck {
+        connection_id,
+        transfer_id,
+        received_bytes: 6,
+        next_offset: 6,
+        done: true,
+        error: None,
+    });
+
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+
+    for command in [start, chunk, done, ack] {
+        let encoded = bincode::encode_to_vec(&command, config).unwrap();
+        let (decoded, _) = bincode::decode_from_slice::<Command, _>(&encoded, config).unwrap();
+        match decoded {
+            Command::V2(CommandV2::P2PFileStart {
+                purpose,
+                mime_type,
+                byte_size,
+                ..
+            }) => {
+                assert_eq!(purpose, P2PFilePurpose::OcrImage);
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(byte_size, 6);
+            }
+            Command::V2(CommandV2::P2PFileChunk { data, offset, .. }) => {
+                assert_eq!(offset, 0);
+                assert_eq!(data, b"screen");
+            }
+            Command::V2(CommandV2::P2PFileDone { sha256, .. }) => {
+                assert_eq!(sha256, [3u8; 32]);
+            }
+            Command::V2(CommandV2::P2PFileAck { done, error, .. }) => {
+                assert!(done);
+                assert!(error.is_none());
+            }
+            _ => panic!("unexpected p2p file variant"),
+        }
     }
 }
 
