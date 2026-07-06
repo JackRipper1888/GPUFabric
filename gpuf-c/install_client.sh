@@ -551,7 +551,7 @@ main() {
             fi
 
             local archive_name
-            archive_name="v1.0.3-${pkg_os}-gpuf-c.tar.gz"
+            archive_name="v1.0.4-${pkg_os}-gpuf-c.tar.gz"
 
             ARCHIVE_NAME="${GPUF_C_CLIENT_ARCHIVE_NAME:-$archive_name}"
 
