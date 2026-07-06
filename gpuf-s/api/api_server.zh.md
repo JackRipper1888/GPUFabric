@@ -27,6 +27,59 @@
 | message | string | 成功时为 `ok` |
 | data | object | 具体接口数据 |
 
+## 推理网关说明
+
+本文档中的管理 API 通常监听 gpuf-s API Server 端口，例如 `18081`。
+OpenAI 兼容推理请求使用 gpuf-s 的独立推理网关端口，例如：
+
+```text
+http://<gpuf-s-host>:<inference_gateway_port>/v1/chat/completions
+```
+
+`POST /v1/chat/completions` 的 `messages[].content` 支持两种格式：
+
+| 格式 | 说明 |
+|---|---|
+| string | 纯文本对话，保持旧 worker 协议兼容 |
+| array | OpenAI 风格多模态内容数组，会走新版 chat task 协议 |
+
+PaddleOCR-VL OCR 多模态请求示例：
+
+```json
+{
+  "model": "PaddleOCR-VL-1.6-GGUF",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "请识别图片中的文字。"},
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,<base64-image>"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0.0,
+  "stream": false
+}
+```
+
+多模态数组说明：
+
+- 支持的 part 类型：`text`、`image_url`、`image`、`media_marker`。
+- 图片 URL 支持 `data:`、`http://`、`https://`。
+- `file://` 默认禁用；只有服务该请求的 `gpuf-c` 进程设置
+  `GPUF_ALLOW_FILE_IMAGE_URLS=1` 时才允许，建议只用于可信本地测试。
+- OCR/视觉模型需要 `gpuf-c` 启动时传入匹配的 `--llama-mmproj-path`。
+- 多模态数组请求需要更新后的非 Android `gpuf-c` worker；`cuda`、
+  `vulkan`、`metal`、`cpu` 构建都包含 multimodal 支持。
+
+完整 OpenAI 兼容推理接口见 `docs/gpuf-openai-compatible-api.md`。
+
 ## 数据来源和口径
 
 当前银行后台看板主要读取以下表：

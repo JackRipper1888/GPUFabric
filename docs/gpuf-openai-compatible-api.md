@@ -1,6 +1,6 @@
 # GPUFabric OpenAI-Compatible API Current Status
 
-Last updated: 2026-07-03
+Last updated: 2026-07-06
 
 This document describes the current external inference API surface for
 GPUFabric compute sharing. It is based on the current `gpuf-s` inference
@@ -47,14 +47,14 @@ If the header is missing or invalid, the gateway returns `401`.
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| `POST /v1/chat/completions` | Supported | Main recommended endpoint |
+| `POST /v1/chat/completions` | Supported | Main recommended endpoint; supports plain text and OpenAI-style multimodal message content arrays for compatible `gpuf-c` workers |
 | `POST /v1/completions` | Supported | Legacy text completion endpoint |
 | `POST /v1/embeddings` | Supported | Text embeddings through non-mobile `gpuf-c` workers with a compatible loaded embedding model |
 | `POST /api/open-apis/projects/:project_id/easyllms/embeddings` | Supported | Sophnet-compatible text embeddings adapter |
 | `GET /v1/models` | Supported, simplified | Returns a simple model list, not the full OpenAI list envelope |
 | `POST /v1/messages` | Not supported on `gpuf-s` | Anthropic-compatible route exists only in `gpuf-c` standalone llama server |
 | `POST /v1/responses` | Not supported | No gateway route |
-| image/audio/file APIs | Not supported | No gateway route |
+| image/audio/file APIs | Not supported | No standalone image/audio/file routes. Image inputs are supported only as `messages[].content` parts on `POST /v1/chat/completions` |
 
 ## POST `/v1/chat/completions`
 
@@ -89,7 +89,7 @@ Recommended for new integrations.
 | Field | Type | Required | Default | Notes |
 |---|---:|---:|---:|---|
 | `model` | string | No | `gpuf` | Used by routing/model matching when devices report loaded models |
-| `messages` | array | Yes | none | Each message must be `{role: string, content: string}` |
+| `messages` | array | Yes | none | Each message is `{role: string, content: string | content_part[]}` |
 | `max_tokens` | integer | No | `4090` for request dispatch, `1024` for finish-reason comparison in non-stream fallback | Sent to `gpuf-c` as generation limit |
 | `temperature` | number | No | `0.7` | Sampling |
 | `top_k` | integer | No | `40` | Sampling |
@@ -101,7 +101,7 @@ Recommended for new integrations.
 | `session_id` | string | No | none | GPUFabric extension for sticky routing |
 | `cache_policy` | string | No | `auto` | GPUFabric extension: `auto`, `bypass`, or `reset`; requires `session_id` unless `auto` |
 
-### Message Format Limitations
+### Message Format Support
 
 Currently supported:
 
@@ -109,12 +109,51 @@ Currently supported:
 {"role": "user", "content": "plain text"}
 ```
 
+OpenAI-style multimodal content arrays are also supported when the selected
+worker runs an updated non-Android `gpuf-c` build with multimodal llama.cpp
+support, including the `cuda`, `vulkan`, `metal`, and `cpu` feature builds:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "text", "text": "OCR this image and return the visible text."},
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "data:image/png;base64,<base64-image>"
+      }
+    }
+  ]
+}
+```
+
+Supported content part types:
+
+| Part type | Required fields | Notes |
+|---|---|---|
+| `text` | `text` | Appended to the prompt as text |
+| `image_url` | `image_url` string or `{ "url": string }` | Replaced with the llama.cpp mtmd media marker and loaded as image bytes |
+| `image` | `image` string or `image_url` | Alias for image input |
+| `media_marker` | none | Advanced use; inserts the mtmd media marker without loading an image |
+
+Supported image URL forms:
+
+- `data:<mime>;base64,...`
+- `http://...`
+- `https://...`
+- `file://...` only when the serving `gpuf-c` process sets
+  `GPUF_ALLOW_FILE_IMAGE_URLS=1`; use this only for trusted local tests.
+
+The serving `gpuf-c` enforces image limits with
+`GPUF_MAX_IMAGES_PER_REQUEST` (default `8`) and `GPUF_MAX_IMAGE_BYTES`
+(default `33554432`). Multimodal OCR or vision models must be started with a
+matching `--llama-mmproj-path`; otherwise image requests fail at the worker.
+
 Currently not supported by the gateway request schema:
 
-- OpenAI multimodal `content` arrays
-- image URL or base64 image blocks
 - tool/function call message content
-- structured content parts
+- arbitrary structured content part types beyond the table above
 
 ### Non-Streaming Response
 
@@ -195,6 +234,34 @@ curl -sS http://<gpuf-s-host>:<inference_gateway_port>/v1/chat/completions \
     "messages": [{"role": "user", "content": "Reply only: OK"}],
     "max_tokens": 8,
     "temperature": 0.1,
+    "stream": false
+  }'
+```
+
+### Multimodal OCR Example
+
+```bash
+curl -sS http://<gpuf-s-host>:<inference_gateway_port>/v1/chat/completions \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "PaddleOCR-VL-1.6-GGUF",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Please OCR this image and return the text."},
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,<base64-image>"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 256,
+    "temperature": 0.0,
     "stream": false
   }'
 ```

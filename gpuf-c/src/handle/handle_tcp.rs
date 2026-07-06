@@ -784,6 +784,170 @@ impl ClientWorker {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn convert_chat_message_v2(
+        message: common::ChatMessageV2,
+    ) -> crate::llm_engine::llama_server::ChatMessage {
+        crate::llm_engine::llama_server::ChatMessage {
+            role: message.role,
+            content: match message.content {
+                common::ChatMessageContent::Text(text) => {
+                    crate::llm_engine::llama_server::ChatMessageContent::Text(text)
+                }
+                common::ChatMessageContent::Parts(parts) => {
+                    crate::llm_engine::llama_server::ChatMessageContent::Parts(
+                        parts
+                            .into_iter()
+                            .map(|part| crate::llm_engine::llama_server::ChatContentPart {
+                                r#type: part.r#type,
+                                text: part.text,
+                                image_url: part.image_url.map(|image_url| match image_url {
+                                    common::ImageUrlValue::Url(url) => {
+                                        crate::llm_engine::llama_server::ImageUrlValue::Url(url)
+                                    }
+                                    common::ImageUrlValue::Object { url, detail } => {
+                                        crate::llm_engine::llama_server::ImageUrlValue::Object {
+                                            url,
+                                            detail,
+                                        }
+                                    }
+                                }),
+                                image: part.image,
+                            })
+                            .collect(),
+                    )
+                }
+            },
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    async fn stream_chat_v2_task_to_server(
+        &self,
+        task_id: String,
+        messages: Vec<common::ChatMessageV2>,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
+    ) -> Result<()> {
+        let messages = messages
+            .into_iter()
+            .map(Self::convert_chat_message_v2)
+            .collect::<Vec<_>>();
+        let prepared = crate::llm_engine::llama_server::prepare_chat_messages(&messages)
+            .map_err(|e| anyhow!("Failed to prepare chat messages: {:?}", e))?;
+        let fallback_prompt =
+            crate::llm_engine::llama_server::build_chat_prompt_from_prepared(&prepared.messages);
+        let role_content = prepared
+            .messages
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect::<Vec<_>>();
+
+        let llama = {
+            let engine_guard = self.engine.lock().await;
+            let engine = engine_guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("Engine not initialized"))?;
+
+            let AnyEngine::Llama(llama) = engine else {
+                return Err(anyhow!(
+                    "stream_chat_v2_task_to_server is only supported for LLAMA engine"
+                ));
+            };
+            llama.clone()
+        };
+
+        let prompt = llama
+            .render_chat_prompt(&role_content, true)
+            .await
+            .unwrap_or_else(|err| {
+                info!("Falling back to built-in chat prompt template: {}", err);
+                fallback_prompt
+            });
+        let image_data = crate::llm_engine::llama_server::load_chat_images(&prepared.image_urls)
+            .await
+            .map_err(|e| anyhow!("Failed to load chat images: {:?}", e))?;
+
+        if image_data.is_empty() {
+            return self
+                .stream_inference_task_to_server(
+                    task_id,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_k,
+                    top_p,
+                    repeat_penalty,
+                    repeat_last_n,
+                    min_keep,
+                    session_id,
+                    cache_policy,
+                )
+                .await;
+        }
+
+        let sampling = crate::llm_engine::llama_engine::SamplingParams {
+            temperature,
+            top_k: top_k as i32,
+            top_p,
+            repeat_penalty,
+            repeat_last_n,
+            seed: 0,
+            min_keep: min_keep as usize,
+            thinking_budget_tokens: None,
+        };
+
+        let (response_text, prompt_tokens, completion_tokens) = llama
+            .generate_multimodal_with_cached_model_sampling(
+                &prompt,
+                image_data,
+                max_tokens as usize,
+                &sampling,
+            )
+            .await?;
+        let prompt_tokens = prompt_tokens.min(u32::MAX as usize) as u32;
+        let completion_tokens = completion_tokens.min(u32::MAX as usize) as u32;
+
+        if !response_text.is_empty() {
+            self.send_command(CommandV1::InferenceResultChunk {
+                task_id: task_id.clone(),
+                seq: 0,
+                delta: response_text,
+                phase: OutputPhase::Unknown,
+                done: false,
+                error: None,
+                prompt_tokens,
+                completion_tokens,
+                analysis_tokens: 0,
+                final_tokens: 0,
+            })
+            .await?;
+        }
+
+        self.send_command(CommandV1::InferenceResultChunk {
+            task_id,
+            seq: 1,
+            delta: String::new(),
+            phase: OutputPhase::Unknown,
+            done: true,
+            error: None,
+            prompt_tokens,
+            completion_tokens,
+            analysis_tokens: 0,
+            final_tokens: 0,
+        })
+        .await?;
+
+        Ok(())
+    }
+
     fn build_chat_prompt_fallback(&self, messages: &[common::ChatMessage]) -> String {
         let template = std::env::var("CHAT_TEMPLATE").unwrap_or_else(|_| "simple".to_string());
         match template.to_ascii_lowercase().as_str() {
@@ -3017,6 +3181,94 @@ impl WorkerHandle for ClientWorker {
                     }
                     Command::V2(cmd_v2) => {
                         match cmd_v2 {
+                            CommandV2::ChatInferenceTask {
+                                task_id,
+                                session_id,
+                                cache_policy,
+                                model: _model,
+                                messages,
+                                max_tokens,
+                                temperature,
+                                top_k,
+                                top_p,
+                                repeat_penalty,
+                                repeat_last_n,
+                                min_keep,
+                            } => {
+                                info!(
+                                    "Received chat inference v2 task: {} messages: {} max_tokens: {}",
+                                    task_id,
+                                    messages.len(),
+                                    max_tokens
+                                );
+                                let cache_decision = record_worker_cache_decision(
+                                    session_id.as_deref(),
+                                    cache_policy.as_deref(),
+                                );
+                                info!(
+                                    task_id = %task_id,
+                                    session = cache_decision.session_hash.as_deref().unwrap_or("none"),
+                                    policy = cache_decision.policy.as_str(),
+                                    status = cache_decision.status.as_str(),
+                                    kv_reuse_enabled = cache_decision.kv_reuse_enabled,
+                                    "Worker session cache decision for chat v2 task"
+                                );
+
+                                #[cfg(not(target_os = "android"))]
+                                {
+                                    let result = self
+                                        .stream_chat_v2_task_to_server(
+                                            task_id.clone(),
+                                            messages,
+                                            max_tokens,
+                                            temperature,
+                                            top_k,
+                                            top_p,
+                                            repeat_penalty,
+                                            repeat_last_n,
+                                            min_keep,
+                                            session_id,
+                                            cache_policy,
+                                        )
+                                        .await;
+
+                                    if let Err(e) = result {
+                                        let chunk = CommandV1::InferenceResultChunk {
+                                            task_id,
+                                            seq: 0,
+                                            delta: String::new(),
+                                            phase: OutputPhase::Unknown,
+                                            done: true,
+                                            error: Some(e.to_string()),
+                                            prompt_tokens: 0,
+                                            completion_tokens: 0,
+                                            analysis_tokens: 0,
+                                            final_tokens: 0,
+                                        };
+                                        self.send_command(chunk).await?;
+                                    }
+                                }
+
+                                #[cfg(target_os = "android")]
+                                {
+                                    let chunk = CommandV1::InferenceResultChunk {
+                                        task_id,
+                                        seq: 0,
+                                        delta: String::new(),
+                                        phase: OutputPhase::Unknown,
+                                        done: true,
+                                        error: Some(
+                                            "ChatInferenceTask v2 is not supported on Android yet"
+                                                .to_string(),
+                                        ),
+                                        prompt_tokens: 0,
+                                        completion_tokens: 0,
+                                        analysis_tokens: 0,
+                                        final_tokens: 0,
+                                    };
+                                    self.send_command(chunk).await?;
+                                }
+                            }
                             CommandV2::P2PConnectionConfig {
                                 peer_id,
                                 connection_id,

@@ -42,6 +42,62 @@ JSON instead of this envelope.
 
 ---
 
+# Inference Gateway Notes
+
+The management API in this document normally listens on the gpuf-s API server
+port, for example `18081`. OpenAI-compatible inference uses the separate gpuf-s
+inference gateway port, for example:
+
+```text
+http://<gpuf-s-host>:<inference_gateway_port>/v1/chat/completions
+```
+
+`POST /v1/chat/completions` accepts OpenAI-style message content in either
+plain-text form or multimodal array form:
+
+```json
+{
+  "model": "PaddleOCR-VL-1.6-GGUF",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Please OCR this image and return the text."},
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,<base64-image>"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0.0,
+  "stream": false
+}
+```
+
+Routing behavior:
+
+- Plain string `messages[].content` remains backward-compatible and is sent to
+  workers as the original chat task protocol.
+- Array `messages[].content` is sent as the newer chat task protocol and
+  requires an updated non-Android `gpuf-c` worker with multimodal llama.cpp
+  support. The `cuda`, `vulkan`, `metal`, and `cpu` gpuf-c feature builds
+  include the multimodal feature.
+- Supported part types are `text`, `image_url`, `image`, and `media_marker`.
+- Image URLs may be `data:`, `http://`, or `https://`. `file://` is disabled
+  unless the serving `gpuf-c` process sets `GPUF_ALLOW_FILE_IMAGE_URLS=1`, and
+  should only be used for trusted local tests.
+- Vision/OCR models must start `gpuf-c` with a matching
+  `--llama-mmproj-path`.
+
+For the complete OpenAI-compatible inference surface, see
+`docs/gpuf-openai-compatible-api.md`.
+
+---
+
 # Compute Map API
 
 ## GET `/api/compute-map`

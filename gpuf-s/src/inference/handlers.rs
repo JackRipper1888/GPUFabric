@@ -72,7 +72,10 @@ fn should_force_short_answer(messages: &[crate::inference::scheduler::ChatMessag
     let Some(m) = last_user else {
         return false;
     };
-    let c = m.content.to_ascii_lowercase();
+    let Some(content) = m.content.as_text() else {
+        return false;
+    };
+    let c = content.to_ascii_lowercase();
     c.contains("only reply")
         || c.contains("only answer")
         || c.contains("reply only")
@@ -1219,7 +1222,7 @@ pub async fn handle_chat_completion(
                     index: 0,
                     message: crate::inference::scheduler::ChatMessage {
                         role: "assistant".to_string(),
-                        content: text,
+                        content: common::ChatMessageContent::Text(text),
                     },
                     finish_reason: finish_reason.to_string(),
                 }],

@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::handle::ActiveClients;
 use crate::util::protoc::ClientId;
 use common::{
-    Command, CommandV1, EngineType, OsType, OutputPhase, COMMAND_V1_EMBEDDING_TASKS_VERSION,
+    ChatMessageContent, ChatMessageV2, Command, CommandV1, CommandV2, EngineType, OsType,
+    OutputPhase, COMMAND_V1_EMBEDDING_TASKS_VERSION,
 };
 
 // Type aliases for easier function signatures
@@ -106,7 +107,7 @@ pub struct SophnetEmbeddingRequest {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: ChatMessageContent,
 }
 
 #[derive(Debug, Serialize)]
@@ -1037,14 +1038,6 @@ impl InferenceScheduler {
             route_outcome.client_id.log_label(),
             model
         );
-        let common_messages = messages
-            .into_iter()
-            .map(|m| common::ChatMessage {
-                role: m.role,
-                content: m.content,
-            })
-            .collect::<Vec<_>>();
-
         if let Err(e) = self
             .send_chat_task_to_device(
                 &route_outcome.client_id,
@@ -1052,7 +1045,7 @@ impl InferenceScheduler {
                 session_id,
                 cache_policy,
                 model,
-                common_messages,
+                messages,
                 max_tokens,
                 temperature,
                 top_k,
@@ -1223,7 +1216,7 @@ impl InferenceScheduler {
         session_id: Option<String>,
         cache_policy: Option<String>,
         model: String,
-        messages: Vec<common::ChatMessage>,
+        messages: Vec<ChatMessage>,
         max_tokens: u32,
         temperature: f32,
         top_k: u32,
@@ -1249,30 +1242,61 @@ impl InferenceScheduler {
             .try_lock()
             .map_err(|_| anyhow!("Device is busy, please try again"))?;
 
-        let chat_task = CommandV1::ChatInferenceTask {
-            task_id: task_id.clone(),
-            session_id,
-            cache_policy,
-            model,
-            messages,
-            max_tokens,
-            temperature,
-            top_k,
-            top_p,
-            repeat_penalty,
-            repeat_last_n,
-            min_keep,
+        let message_count = messages.len();
+        let command = if messages
+            .iter()
+            .all(|message| matches!(message.content, ChatMessageContent::Text(_)))
+        {
+            Command::V1(CommandV1::ChatInferenceTask {
+                task_id: task_id.clone(),
+                session_id,
+                cache_policy,
+                model,
+                messages: messages
+                    .into_iter()
+                    .map(|message| common::ChatMessage {
+                        role: message.role,
+                        content: match message.content {
+                            ChatMessageContent::Text(text) => text,
+                            ChatMessageContent::Parts(_) => unreachable!("checked above"),
+                        },
+                    })
+                    .collect(),
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                repeat_penalty,
+                repeat_last_n,
+                min_keep,
+            })
+        } else {
+            Command::V2(CommandV2::ChatInferenceTask {
+                task_id: task_id.clone(),
+                session_id,
+                cache_policy,
+                model,
+                messages: messages
+                    .into_iter()
+                    .map(|message| ChatMessageV2 {
+                        role: message.role,
+                        content: message.content,
+                    })
+                    .collect(),
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                repeat_penalty,
+                repeat_last_n,
+                min_keep,
+            })
         };
-
-        let command = Command::V1(chat_task);
         info!(
             "sent chat inference task {} to device {} (messages={}, max_tokens={})",
             task_id,
             device_id.log_label(),
-            match &command {
-                Command::V1(CommandV1::ChatInferenceTask { messages, .. }) => messages.len(),
-                _ => 0,
-            },
+            message_count,
             max_tokens
         );
         write_command(&mut *writer, &command).await?;

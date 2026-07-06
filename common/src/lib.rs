@@ -80,6 +80,68 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+pub struct ChatMessageV2 {
+    pub role: String,
+    pub content: ChatMessageContent,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[serde(untagged)]
+pub enum ChatMessageContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+impl ChatMessageContent {
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Parts(_) => None,
+        }
+    }
+
+    pub fn is_multimodal(&self) -> bool {
+        matches!(self, Self::Parts(parts) if parts.iter().any(ChatContentPart::is_image_like))
+    }
+}
+
+impl From<String> for ChatMessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+pub struct ChatContentPart {
+    pub r#type: String,
+    pub text: Option<String>,
+    pub image_url: Option<ImageUrlValue>,
+    pub image: Option<String>,
+}
+
+impl ChatContentPart {
+    pub fn is_image_like(&self) -> bool {
+        matches!(self.r#type.as_str(), "image_url" | "image")
+    }
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[serde(untagged)]
+pub enum ImageUrlValue {
+    Url(String),
+    Object { url: String, detail: Option<String> },
+}
+
+impl ImageUrlValue {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Url(url) => url,
+            Self::Object { url, .. } => url,
+        }
+    }
+}
+
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputPhase {
     Unknown,
@@ -400,6 +462,22 @@ pub enum CommandV2 {
         peer_id: [u8; 16],
         connection_id: [u8; 16],
         error: String,
+    },
+
+    /// Chat inference task with OpenAI-compatible multimodal content parts.
+    ChatInferenceTask {
+        task_id: String,
+        session_id: Option<String>,
+        cache_policy: Option<String>,
+        model: String,
+        messages: Vec<ChatMessageV2>,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
     },
 }
 
@@ -1000,6 +1078,57 @@ async fn test_inference_task_preserves_session_fields() {
             assert_eq!(cache_policy.as_deref(), Some("bypass"));
         }
         _ => panic!("unexpected chat variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_chat_inference_v2_multimodal_roundtrip() {
+    let chat_cmd = Command::V2(CommandV2::ChatInferenceTask {
+        task_id: "task-mm-1".to_string(),
+        session_id: None,
+        cache_policy: None,
+        model: "PaddleOCR-VL-1.6-GGUF".to_string(),
+        messages: vec![ChatMessageV2 {
+            role: "user".to_string(),
+            content: ChatMessageContent::Parts(vec![
+                ChatContentPart {
+                    r#type: "text".to_string(),
+                    text: Some("OCR this image".to_string()),
+                    image_url: None,
+                    image: None,
+                },
+                ChatContentPart {
+                    r#type: "image_url".to_string(),
+                    text: None,
+                    image_url: Some(ImageUrlValue::Object {
+                        url: "file:///tmp/demo.png".to_string(),
+                        detail: Some("auto".to_string()),
+                    }),
+                    image: None,
+                },
+            ]),
+        }],
+        max_tokens: 32,
+        temperature: 0.0,
+        top_k: 16,
+        top_p: 0.95,
+        repeat_penalty: 1.0,
+        repeat_last_n: 8,
+        min_keep: 1,
+    });
+
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+    let encoded = bincode::encode_to_vec(&chat_cmd, config).unwrap();
+    let (decoded, _) = bincode::decode_from_slice::<Command, _>(&encoded, config).unwrap();
+
+    match decoded {
+        Command::V2(CommandV2::ChatInferenceTask { messages, .. }) => {
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].content.is_multimodal());
+        }
+        _ => panic!("unexpected chat v2 variant"),
     }
 }
 

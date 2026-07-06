@@ -261,9 +261,9 @@ pub(crate) struct PreparedChatMessage {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedChatInput {
-    messages: Vec<PreparedChatMessage>,
-    image_urls: Vec<String>,
+pub(crate) struct PreparedChatInput {
+    pub(crate) messages: Vec<PreparedChatMessage>,
+    pub(crate) image_urls: Vec<String>,
 }
 
 /// OpenAI compatible chat completion response
@@ -465,7 +465,9 @@ async fn security_metrics_handler() -> Json<security_metrics::SecurityMetricsSna
 
 const MTMD_MEDIA_MARKER: &str = "<__media__>";
 
-fn prepare_chat_messages(messages: &[ChatMessage]) -> Result<PreparedChatInput, AppError> {
+pub(crate) fn prepare_chat_messages(
+    messages: &[ChatMessage],
+) -> Result<PreparedChatInput, AppError> {
     let mut prepared = Vec::with_capacity(messages.len());
     let mut image_urls = Vec::new();
 
@@ -529,7 +531,7 @@ fn max_images_per_request() -> usize {
     read_usize_env("GPUF_MAX_IMAGES_PER_REQUEST", 8)
 }
 
-async fn load_chat_images(urls: &[String]) -> Result<Vec<Vec<u8>>, AppError> {
+pub(crate) async fn load_chat_images(urls: &[String]) -> Result<Vec<Vec<u8>>, AppError> {
     if urls.is_empty() {
         return Ok(Vec::new());
     }
