@@ -34,6 +34,10 @@ use crate::handle::session_cache::{
 use crate::util::cmd::LlamaSplitModeArg;
 
 // llama-cpp-2 imports (only for non-Android platforms)
+#[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+use llama_cpp_2::mtmd::{
+    mtmd_default_marker, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText,
+};
 #[cfg(not(target_os = "android"))]
 use llama_cpp_2::{
     context::params::{LlamaAttentionType, LlamaContextParams, LlamaPoolingType},
@@ -504,6 +508,7 @@ pub struct LlamaEngine {
     pub models: Arc<RwLock<Vec<super::ModelInfo>>>,
     pub models_name: Vec<String>,
     pub model_path: Option<String>,
+    pub llama_mmproj_path: Option<String>,
     pub n_ctx: u32,
     pub n_batch: u32,
     pub n_gpu_layers: u32,
@@ -523,6 +528,10 @@ pub struct LlamaEngine {
     pub cached_model: Option<Arc<Mutex<LlamaModel>>>,
     #[cfg(not(target_os = "android"))]
     pub cached_model_path: Option<String>, // Track which model is currently cached
+    #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+    pub cached_mtmd: Option<Arc<Mutex<MtmdContext>>>,
+    #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+    pub cached_mmproj_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -597,10 +606,38 @@ impl LlamaEngine {
 
             let resolved_model_path = self.validate_model_path(&model_path)?;
             let resolved_model_path_str = resolved_model_path.to_string_lossy().to_string();
+            let resolved_mmproj_path = match self.llama_mmproj_path.as_deref() {
+                Some(path) => Some(self.validate_model_path(path)?),
+                None => None,
+            };
+            let resolved_mmproj_path_str = resolved_mmproj_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string());
+
+            #[cfg(not(feature = "multimodal"))]
+            if resolved_mmproj_path_str.is_some() {
+                return Err(anyhow!(
+                    "LLAMA multimodal projector was configured, but gpuf-c was built without the 'multimodal' feature"
+                ));
+            }
 
             // Check if model is already cached AND matches current path
             if let Some(ref cached_path) = self.cached_model_path {
-                if cached_path == &resolved_model_path_str && self.cached_model.is_some() {
+                let mmproj_matches = {
+                    #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+                    {
+                        self.cached_mmproj_path == resolved_mmproj_path_str
+                    }
+                    #[cfg(not(all(not(target_os = "android"), feature = "multimodal")))]
+                    {
+                        true
+                    }
+                };
+
+                if cached_path == &resolved_model_path_str
+                    && self.cached_model.is_some()
+                    && mmproj_matches
+                {
                     info!(
                         "Model already loaded and cached: {}",
                         resolved_model_path_str
@@ -621,6 +658,8 @@ impl LlamaEngine {
             let llama_devices = self.llama_devices.clone();
             let model_path_for_closure = resolved_model_path_str.clone();
             let model_path_for_cache = model_path_for_closure.clone();
+            let mmproj_path_for_closure = resolved_mmproj_path_str.clone();
+            let mmproj_path_for_cache = resolved_mmproj_path_str.clone();
 
             info!(
                 "Loading and caching llama-cpp-2 model: {}",
@@ -628,7 +667,8 @@ impl LlamaEngine {
             );
 
             // Run model loading in blocking thread
-            let (backend, model) = tokio::task::spawn_blocking(move || {
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            let (backend, model, mtmd_context) = tokio::task::spawn_blocking(move || {
                 // Use global backend singleton - initialize only once
                 let backend = LLAMA_BACKEND
                     .get_or_init(|| {
@@ -696,6 +736,101 @@ impl LlamaEngine {
                     LlamaModel::load_from_file(&*backend, &model_path_for_closure, &model_params)
                         .map_err(|e| anyhow!("Failed to load model: {:?}", e))?;
 
+                let mtmd_context = match mmproj_path_for_closure {
+                    Some(mmproj_path) => {
+                        let mut mtmd_params = MtmdContextParams::default();
+                        mtmd_params.use_gpu = true;
+                        mtmd_params.print_timings = false;
+                        let context =
+                            MtmdContext::init_from_file(&mmproj_path, &model, &mtmd_params)
+                                .map_err(|e| {
+                                    anyhow!(
+                                        "Failed to load multimodal projector {}: {:?}",
+                                        mmproj_path,
+                                        e
+                                    )
+                                })?;
+                        if !context.support_vision() {
+                            warn!("Multimodal projector loaded but vision support is not reported");
+                        }
+                        Some(context)
+                    }
+                    None => None,
+                };
+
+                Ok::<(Arc<LlamaBackend>, LlamaModel, Option<MtmdContext>), anyhow::Error>((
+                    backend,
+                    model,
+                    mtmd_context,
+                ))
+            })
+            .await??;
+
+            #[cfg(not(feature = "multimodal"))]
+            let (backend, model) = tokio::task::spawn_blocking(move || {
+                // Use global backend singleton - initialize only once
+                let backend = LLAMA_BACKEND
+                    .get_or_init(|| {
+                        info!("Initializing Llama backend (first time only)");
+                        match LlamaBackend::init() {
+                            Ok(b) => Arc::new(b),
+                            Err(e) => {
+                                warn!("Failed to initialize Llama backend: {:?}", e);
+                                panic!("Cannot initialize Llama backend: {:?}", e);
+                            }
+                        }
+                    })
+                    .clone();
+
+                use crate::util::nvswitch_check;
+                use llama_cpp_2::model::params::LlamaSplitMode as LlamaCppSplitMode;
+
+                if !nvswitch_check::check_hgx_nvswitch_available() {
+                    return Err(anyhow!(
+                        "NVSwitch/HGX not ready - CUDA will fail with error 802. \
+                         Run: sudo systemctl start nvidia-fabricmanager"
+                    ));
+                }
+
+                let split_mode = match llama_split_mode {
+                    LlamaSplitModeArg::None => LlamaCppSplitMode::None,
+                    LlamaSplitModeArg::Layer => LlamaCppSplitMode::Layer,
+                    LlamaSplitModeArg::Row => LlamaCppSplitMode::Row,
+                };
+
+                let mut model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
+                model_params = model_params.with_split_mode(split_mode);
+                model_params = model_params.with_main_gpu(llama_main_gpu);
+
+                if let Some(ref devs) = llama_devices {
+                    let devs = devs.trim();
+                    if !devs.is_empty() {
+                        if let Ok(devices) = devs
+                            .split(',')
+                            .map(|s| s.trim().parse::<usize>())
+                            .collect::<Result<Vec<_>, _>>()
+                        {
+                            let new_params = LlamaModelParams::default()
+                                .with_n_gpu_layers(n_gpu_layers)
+                                .with_split_mode(split_mode)
+                                .with_main_gpu(llama_main_gpu)
+                                .with_devices(&devices);
+                            if let Ok(p) = new_params {
+                                model_params = p;
+                                info!("Applied llama_devices: {:?}", devices);
+                            } else {
+                                warn!("Failed to apply llama_devices: {:?}", devices);
+                            }
+                        } else {
+                            warn!("Failed to parse llama_devices: '{}'", devs);
+                        }
+                    }
+                }
+
+                let model =
+                    LlamaModel::load_from_file(&*backend, &model_path_for_closure, &model_params)
+                        .map_err(|e| anyhow!("Failed to load model: {:?}", e))?;
+
                 Ok::<(Arc<LlamaBackend>, LlamaModel), anyhow::Error>((backend, model))
             })
             .await??;
@@ -704,6 +839,11 @@ impl LlamaEngine {
             self.cached_backend = Some(backend);
             self.cached_model = Some(Arc::new(Mutex::new(model)));
             self.cached_model_path = Some(model_path_for_cache.clone());
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            {
+                self.cached_mtmd = mtmd_context.map(|ctx| Arc::new(Mutex::new(ctx)));
+                self.cached_mmproj_path = mmproj_path_for_cache;
+            }
             self.is_initialized = true;
 
             info!(
@@ -722,6 +862,11 @@ impl LlamaEngine {
             self.cached_model = None;
             self.cached_backend = None;
             self.cached_model_path = None;
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            {
+                self.cached_mtmd = None;
+                self.cached_mmproj_path = None;
+            }
             self.is_initialized = false;
             info!("Model cache cleared");
         }
@@ -906,6 +1051,232 @@ impl LlamaEngine {
             })
             .await?
         }
+    }
+
+    pub async fn render_chat_prompt(
+        &self,
+        messages: &[(String, String)],
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = add_generation_prompt;
+            let mut prompt = String::new();
+            for (role, content) in messages {
+                prompt.push_str(role);
+                prompt.push_str(": ");
+                prompt.push_str(content);
+                prompt.push('\n');
+            }
+            return Ok(prompt);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let model = self
+                .cached_model
+                .as_ref()
+                .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+                .clone();
+            let messages = messages.to_vec();
+
+            tokio::task::spawn_blocking(move || {
+                use llama_cpp_2::model::LlamaChatMessage;
+
+                let model_guard = model
+                    .lock()
+                    .map_err(|e| anyhow!("Failed to lock model: {:?}", e))?;
+
+                let tmpl = model_guard
+                    .chat_template(None)
+                    .map_err(|e| anyhow!("Failed to get chat template: {:?}", e))?;
+
+                let mut chat = Vec::with_capacity(messages.len());
+                for (role, content) in messages {
+                    chat.push(
+                        LlamaChatMessage::new(role, content)
+                            .map_err(|e| anyhow!("Failed to build chat message: {:?}", e))?,
+                    );
+                }
+
+                model_guard
+                    .apply_chat_template(&tmpl, &chat, add_generation_prompt)
+                    .map_err(|e| anyhow!("Failed to apply chat template: {:?}", e))
+            })
+            .await?
+        }
+    }
+
+    #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+    pub async fn generate_multimodal_with_cached_model_sampling(
+        &self,
+        prompt: &str,
+        images: Vec<Vec<u8>>,
+        max_tokens: usize,
+        sampling: &SamplingParams,
+    ) -> Result<(String, usize, usize)> {
+        if !self.is_initialized {
+            return Err(anyhow!("Engine not initialized - call load_model() first"));
+        }
+        if images.is_empty() {
+            return Err(anyhow!("multimodal generation requires at least one image"));
+        }
+
+        let backend = self
+            .cached_backend
+            .as_ref()
+            .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+            .clone();
+        let model = self
+            .cached_model
+            .as_ref()
+            .ok_or_else(|| anyhow!("Model not loaded - call load_model() first"))?
+            .clone();
+        let mtmd = self
+            .cached_mtmd
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow!("Multimodal projector not loaded; start gpuf-c with --llama-mmproj-path")
+            })?
+            .clone();
+
+        let mut prompt = prompt.to_string();
+        let marker = mtmd_default_marker();
+        let marker_count = prompt.matches(marker).count();
+        if marker_count == 0 {
+            let prefix = marker.repeat(images.len());
+            prompt = format!("{prefix}{prompt}");
+        } else if marker_count != images.len() {
+            return Err(anyhow!(
+                "multimodal prompt contains {} media markers but {} images were provided",
+                marker_count,
+                images.len()
+            ));
+        }
+
+        let n_ctx = self.n_ctx;
+        let n_batch = self.n_batch;
+        let sampling = sampling.clone();
+
+        tokio::task::spawn_blocking(move || {
+            use llama_cpp_2::llama_batch::LlamaBatch;
+            use llama_cpp_2::sampling::LlamaSampler;
+
+            let context_params = LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(n_ctx))
+                .with_n_batch(n_batch);
+
+            let model_guard = model
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock model: {:?}", e))?;
+            let mtmd_guard = mtmd
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock multimodal context: {:?}", e))?;
+
+            let mut context = model_guard
+                .new_context(&*backend, context_params)
+                .map_err(|e| anyhow!("Failed to create context: {:?}", e))?;
+
+            let bitmaps = images
+                .iter()
+                .map(|image| {
+                    MtmdBitmap::from_buffer(&mtmd_guard, image)
+                        .map_err(|e| anyhow!("Failed to decode image for mtmd: {:?}", e))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let bitmap_refs = bitmaps.iter().collect::<Vec<_>>();
+
+            let input = MtmdInputText {
+                text: prompt,
+                add_special: true,
+                parse_special: true,
+            };
+            let chunks = mtmd_guard
+                .tokenize(input, bitmap_refs.as_slice())
+                .map_err(|e| anyhow!("Failed to tokenize multimodal prompt: {:?}", e))?;
+            let prompt_token_count = chunks.total_tokens();
+            let n_past = chunks
+                .eval_chunks(&mtmd_guard, &context, 0, 0, n_batch as i32, true)
+                .map_err(|e| anyhow!("Failed to eval multimodal chunks: {:?}", e))?;
+
+            let mut samplers = Vec::new();
+            if sampling.repeat_penalty != 1.0 {
+                samplers.push(LlamaSampler::penalties(
+                    sampling.repeat_last_n,
+                    sampling.repeat_penalty,
+                    0.0,
+                    0.0,
+                ));
+            }
+            if sampling.top_k > 0 {
+                samplers.push(LlamaSampler::top_k(sampling.top_k));
+            }
+            if sampling.top_p > 0.0 && sampling.top_p < 1.0 {
+                samplers.push(LlamaSampler::top_p(sampling.top_p, sampling.min_keep));
+            }
+            samplers.push(LlamaSampler::temp(sampling.temperature));
+            if sampling.temperature <= 0.0 {
+                samplers.push(LlamaSampler::greedy());
+            } else {
+                samplers.push(LlamaSampler::dist(sampling.seed));
+            }
+
+            let mut sampler = LlamaSampler::chain_simple(samplers);
+            let mut output_tokens = Vec::new();
+            let mut output_text = String::new();
+            let mut n_cur = n_past;
+
+            for i in 0..max_tokens {
+                let new_token = sampler.sample(&context, -1);
+                sampler.accept(new_token);
+
+                if new_token == model_guard.token_eos() {
+                    break;
+                }
+
+                let mut token_decoder = encoding_rs::UTF_8.new_decoder();
+                if let Ok(piece) =
+                    model_guard.token_to_piece(new_token, &mut token_decoder, true, None)
+                {
+                    debug!("Multimodal token {}: id={}, text={:?}", i, new_token, piece);
+                    if piece.contains("<|im_end|>")
+                        || piece.contains("<|eot_id|>")
+                        || piece.contains("<|end_of_text|>")
+                        || piece.contains("</s>")
+                    {
+                        break;
+                    }
+                    output_text.push_str(&piece);
+                }
+
+                output_tokens.push(new_token);
+
+                let mut next_batch = LlamaBatch::new(1, 1);
+                next_batch
+                    .add(new_token, n_cur, &[0], true)
+                    .map_err(|e| anyhow!("Failed to add multimodal token: {:?}", e))?;
+                context
+                    .decode(&mut next_batch)
+                    .map_err(|e| anyhow!("Failed to decode multimodal token: {:?}", e))?;
+                n_cur += 1;
+            }
+
+            Ok((output_text, prompt_token_count, output_tokens.len()))
+        })
+        .await?
+    }
+
+    #[cfg(any(target_os = "android", not(feature = "multimodal")))]
+    pub async fn generate_multimodal_with_cached_model_sampling(
+        &self,
+        _prompt: &str,
+        _images: Vec<Vec<u8>>,
+        _max_tokens: usize,
+        _sampling: &SamplingParams,
+    ) -> Result<(String, usize, usize)> {
+        Err(anyhow!(
+            "Multimodal generation is not available in this gpuf-c build"
+        ))
     }
 
     pub async fn generate_embeddings(
@@ -1607,6 +1978,7 @@ impl LlamaEngine {
             models: Arc::new(RwLock::new(Vec::new())),
             models_name: Vec::new(),
             model_path: None,
+            llama_mmproj_path: None,
             n_ctx: 2048,
             n_batch: 4096,
             n_gpu_layers: 99,
@@ -1624,6 +1996,10 @@ impl LlamaEngine {
             cached_model: None,
             #[cfg(not(target_os = "android"))]
             cached_model_path: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mtmd: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mmproj_path: None,
         }
     }
 
@@ -1644,6 +2020,7 @@ impl LlamaEngine {
             models: Arc::new(RwLock::new(Vec::new())),
             models_name: Vec::new(),
             model_path: None,
+            llama_mmproj_path: None,
             n_ctx,
             n_batch,
             n_gpu_layers,
@@ -1661,11 +2038,16 @@ impl LlamaEngine {
             cached_model: None,
             #[cfg(not(target_os = "android"))]
             cached_model_path: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mtmd: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mmproj_path: None,
         }
     }
 
     pub fn with_config(
         model_path: String,
+        llama_mmproj_path: Option<String>,
         n_ctx: u32,
         n_batch: u32,
         n_gpu_layers: u32,
@@ -1682,6 +2064,7 @@ impl LlamaEngine {
             models: Arc::new(RwLock::new(Vec::new())),
             models_name: Vec::new(),
             model_path: Some(model_path.clone()),
+            llama_mmproj_path,
             n_ctx,
             n_batch,
             n_gpu_layers,
@@ -1699,6 +2082,10 @@ impl LlamaEngine {
             cached_model: None,
             #[cfg(not(target_os = "android"))]
             cached_model_path: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mtmd: None,
+            #[cfg(all(not(target_os = "android"), feature = "multimodal"))]
+            cached_mmproj_path: None,
         }
     }
 

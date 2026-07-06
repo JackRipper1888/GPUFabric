@@ -4307,6 +4307,7 @@ pub extern "C" fn start_remote_worker(
         standalone_llama: false,
         api_key: None,
         llama_model_path: None,
+        llama_mmproj_path: None,
         n_gpu_layers: 99,
         n_ctx: 2048,  // Reduced for Android memory constraints
         n_batch: 512, // Reduced for Android memory constraints

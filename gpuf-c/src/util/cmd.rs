@@ -170,6 +170,14 @@ pub struct Args {
     #[arg(long, help = "Path to GGUF model file for standalone mode")]
     pub llama_model_path: Option<String>,
 
+    /// Optional multimodal projector path for LLAMA vision/OCR models.
+    #[arg(
+        long,
+        env = "GPUF_LLAMA_MMPROJ_PATH",
+        help = "Path to GGUF mmproj file for multimodal LLAMA models"
+    )]
+    pub llama_mmproj_path: Option<String>,
+
     /// Number of GPU layers to offload (default: 99 for large models)
     #[arg(
         long,
@@ -309,6 +317,11 @@ impl Args {
                 standalone_llama: false, // Config file doesn't support standalone mode
                 api_key: self.api_key.clone(),
                 llama_model_path: None,
+                llama_mmproj_path: config_data
+                    .client
+                    .llama_mmproj_path
+                    .clone()
+                    .or_else(|| self.llama_mmproj_path.clone()),
                 n_ctx: config_data.client.n_ctx,
                 n_batch: self.n_batch,
                 n_gpu_layers: config_data.client.n_gpu_layers,

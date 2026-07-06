@@ -133,10 +133,14 @@ async fn run_standalone_llama(mut args: Args) -> Result<()> {
     info!("  - Context size: {}", args.n_ctx);
     info!("  - Batch size: {}", args.n_batch);
     info!("  - GPU layers: {}", args.n_gpu_layers);
+    if let Some(mmproj_path) = &args.llama_mmproj_path {
+        info!("  - Multimodal projector: {}", mmproj_path);
+    }
 
     // Create and initialize engine
     let mut engine = LlamaEngine::with_config(
         model_path.clone(),
+        args.llama_mmproj_path.clone(),
         args.n_ctx,        // context size from args
         args.n_batch,      // batch size from args
         args.n_gpu_layers, // GPU layers from args

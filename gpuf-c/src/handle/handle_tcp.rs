@@ -1574,6 +1574,7 @@ impl ClientWorker {
                         );
                         llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
                             model_path.clone(),
+                            args.llama_mmproj_path.clone(),
                             args.n_ctx,
                             args.n_batch,
                             args.n_gpu_layers,
@@ -1678,6 +1679,7 @@ impl ClientWorker {
                         );
                         llm_engine::AnyEngine::Llama(LlamaEngine::with_config(
                             model_path.clone(),
+                            args.llama_mmproj_path.clone(),
                             args.n_ctx,
                             args.n_batch,
                             args.n_gpu_layers,
