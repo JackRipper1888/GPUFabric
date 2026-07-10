@@ -32,6 +32,8 @@ use tracing::{error, info};
 pub type UserDb = Arc<Mutex<HashMap<String, User>>>;
 pub type TokenDb = Arc<Mutex<HashMap<String, String>>>;
 pub type ActiveClients = Arc<Mutex<HashMap<ClientId, ClientInfo>>>;
+pub type ConsumerSessions = Arc<Mutex<HashMap<ClientId, ConsumerSession>>>;
+pub type P2PUsageSessions = Arc<Mutex<HashMap<ClientId, P2PUsageSession>>>;
 pub type PendingConnections = Arc<Mutex<HashMap<ProxyConnId, (TcpStream, BytesMut)>>>;
 pub type ControlWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
@@ -72,6 +74,57 @@ pub struct ClientInfo {
     pub models: Option<Vec<Model>>,
 }
 
+pub struct ConsumerSession {
+    pub connection_id: ConnectionId,
+    pub writer: Arc<Mutex<ControlWriter>>,
+    pub authed: bool,
+    pub allowed_client_ids: Vec<ClientId>,
+    pub token_hash: String,
+    #[allow(dead_code)] // Consumer connection timestamp
+    pub connected_at: DateTime<Utc>,
+}
+
+pub struct P2PUsageSession {
+    pub source_client_id: ClientId,
+    pub target_client_id: ClientId,
+    pub source_is_consumer: bool,
+    pub consumer_token_hash: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub recording: bool,
+    pub recorded: bool,
+    pub consumer_report: Option<P2PConsumerUsageReport>,
+    pub target_receipt: Option<P2PTargetUsageReceipt>,
+}
+
+pub struct P2PConsumerUsageReport {
+    pub task_id: String,
+    pub request_id: Option<String>,
+    pub model: String,
+    pub endpoint: String,
+    pub stream: bool,
+    pub multimodal: bool,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub analysis_tokens: u32,
+    pub final_tokens: u32,
+    pub success: bool,
+    pub error: Option<String>,
+    pub output_sha256: Option<[u8; 32]>,
+}
+
+pub struct P2PTargetUsageReceipt {
+    pub task_id: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub analysis_tokens: u32,
+    pub final_tokens: u32,
+    pub success: bool,
+    pub error: Option<String>,
+    pub output_sha256: Option<[u8; 32]>,
+}
+
 pub struct User {
     #[allow(dead_code)] // User password hash
     pub pass: String,
@@ -109,6 +162,8 @@ pub struct ServerConfig {
 #[derive(Clone)]
 pub struct ServerState {
     pub active_clients: ActiveClients,
+    pub consumer_sessions: ConsumerSessions,
+    pub p2p_usage_sessions: P2PUsageSessions,
     pub pending_connections: PendingConnections,
     #[allow(dead_code)] // User authentication database
     pub user_db: UserDb,
@@ -179,6 +234,8 @@ pub async fn new_server_state(args: &cmd::Args) -> Result<ServerState, anyhow::E
     ) = db::init_db(&args.bootstrap_server, &args.database_url, &args.redis_url).await?;
 
     let active_clients = Arc::new(Mutex::new(HashMap::new()));
+    let consumer_sessions = Arc::new(Mutex::new(HashMap::new()));
+    let p2p_usage_sessions = Arc::new(Mutex::new(HashMap::new()));
     let pending_connections = Arc::new(Mutex::new(HashMap::new()));
     let user_db = Arc::new(Mutex::new(HashMap::<String, User>::new()));
     let token_db = Arc::new(Mutex::new(HashMap::new()));
@@ -192,6 +249,8 @@ pub async fn new_server_state(args: &cmd::Args) -> Result<ServerState, anyhow::E
 
     let app_state = ServerState {
         active_clients: active_clients.clone(),
+        consumer_sessions: consumer_sessions.clone(),
+        p2p_usage_sessions: p2p_usage_sessions.clone(),
         pending_connections: pending_connections.clone(),
         user_db: user_db.clone(),
         token_db: token_db.clone(),

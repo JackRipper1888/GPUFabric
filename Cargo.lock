@@ -1334,6 +1334,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpuf-p2p-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bincode",
+ "bytes",
+ "clap 4.5.53",
+ "common",
+ "futures-util",
+ "hex",
+ "hmac",
+ "reqwest",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+ "tower-http 0.6.7",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "gpuf-s"
 version = "0.1.0"
 dependencies = [
@@ -4069,6 +4095,7 @@ dependencies = [
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

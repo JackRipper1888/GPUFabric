@@ -3,6 +3,7 @@ members = [
     "gpuf-s",
     "gpuf-c",
     "common",
+    "gpuf-p2p-proxy",
 ]
 resolver = "2"
 

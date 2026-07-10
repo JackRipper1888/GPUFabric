@@ -525,6 +525,68 @@ pub enum CommandV2 {
         transfer_id: [u8; 16],
         reason: String,
     },
+
+    /// Consumer-only P2P session login. This is used by lightweight SDK/proxy
+    /// clients that need to initiate P2P data-plane sessions but must not be
+    /// registered as compute devices.
+    P2PConsumerLogin {
+        consumer_id: [u8; 16],
+        api_token: RedactedString,
+    },
+
+    P2PConsumerLoginResult {
+        success: bool,
+        error: Option<String>,
+    },
+
+    /// Usage reported by an authenticated consumer-only P2P proxy after a
+    /// real data-plane request completes. gpuf-s must bind this to the
+    /// authenticated consumer session; token_hash/client ownership is never
+    /// trusted from this payload.
+    P2PUsageReport {
+        consumer_id: [u8; 16],
+        target_client_id: [u8; 16],
+        connection_id: [u8; 16],
+        task_id: String,
+        request_id: Option<String>,
+        model: String,
+        endpoint: String,
+        transport: P2PUsageTransport,
+        stream: bool,
+        multimodal: bool,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+        analysis_tokens: u32,
+        final_tokens: u32,
+        bytes_up: u64,
+        bytes_down: u64,
+        chunk_count: u32,
+        retry_count: u32,
+        connect_ms: u64,
+        ttft_ms: Option<u64>,
+        total_ms: u64,
+        success: bool,
+        error: Option<String>,
+        output_sha256: Option<[u8; 32]>,
+    },
+
+    /// Usage receipt emitted by the target compute client. gpuf-s records
+    /// consumer P2P usage only when this receipt matches the consumer report.
+    P2PUsageReceipt {
+        source_client_id: [u8; 16],
+        target_client_id: [u8; 16],
+        connection_id: [u8; 16],
+        task_id: String,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+        analysis_tokens: u32,
+        final_tokens: u32,
+        success: bool,
+        error: Option<String>,
+        output_sha256: Option<[u8; 32]>,
+    },
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
@@ -532,6 +594,13 @@ pub enum P2PFilePurpose {
     OcrImage,
     ChatImage,
     GenericAttachment,
+}
+
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P2PUsageTransport {
+    DirectUdp,
+    RelayUdp,
+    FallbackHttp,
 }
 
 #[derive(Encode, Decode, Clone, PartialEq, Eq)]

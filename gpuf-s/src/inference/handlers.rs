@@ -20,7 +20,7 @@ use crate::inference::{
     scheduler::{
         validate_session_id, CachePolicy, ChatCompletionRequest, ChatCompletionResponse,
         CompletionRequest, CompletionUsage, DeviceInfo, EmbeddingInput, EmbeddingRequest,
-        ModelInfo, SessionRouteOutcome, SessionRouting, SophnetEmbeddingRequest,
+        ModelInfo, P2PResponseInfo, SessionRouteOutcome, SessionRouting, SophnetEmbeddingRequest,
         SophnetEmbeddingResponse, SophnetEmbeddingUsage, StreamEvent,
     },
 };
@@ -199,6 +199,33 @@ fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    optional_header(headers, "request-id")
+        .or_else(|| optional_header(headers, "x-request-id"))
+        .map(str::to_string)
+}
+
+fn chat_usage_endpoint_for_request(request: &ChatCompletionRequest) -> &'static str {
+    let multimodal = request
+        .messages
+        .iter()
+        .any(|message| message.content.is_multimodal());
+    if !multimodal {
+        return "chat.completion";
+    }
+
+    let model = request
+        .model
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if model.contains("ocr") {
+        "ocr.image"
+    } else {
+        "multimodal.chat"
+    }
 }
 
 fn parse_session_id(
@@ -509,6 +536,22 @@ fn apply_chat_route_metadata(response: &mut ChatCompletionResponse, outcome: &Se
     response.cache_status = outcome.cache_status;
 }
 
+fn normalize_completion_usage_for_response(usage: &mut CompletionUsage) {
+    if usage.completion_tokens == 0 {
+        return;
+    }
+
+    if matches!(usage.final_tokens, Some(value) if value > 0) {
+        return;
+    }
+
+    let analysis_tokens = usage
+        .analysis_tokens
+        .unwrap_or(0)
+        .min(usage.completion_tokens);
+    usage.final_tokens = Some(usage.completion_tokens.saturating_sub(analysis_tokens));
+}
+
 async fn record_token_usage(
     gateway: &InferenceGateway,
     auth: &AuthContext,
@@ -555,11 +598,7 @@ pub async fn handle_completion(
         request.prompt.len()
     );
 
-    // Extract Request-ID header
-    let request_id = headers
-        .get("request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let request_id = request_id_from_headers(&headers);
 
     debug!("Request-ID present: {}", request_id.is_some());
 
@@ -847,11 +886,7 @@ pub async fn handle_chat_completion(
         request.messages.len()
     );
 
-    // Extract Request-ID header
-    let request_id = headers
-        .get("request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let request_id = request_id_from_headers(&headers);
 
     debug!("Request-ID present: {}", request_id.is_some());
 
@@ -902,6 +937,7 @@ pub async fn handle_chat_completion(
     }
 
     let model_name = request.model.clone().unwrap_or_else(|| "gpuf".to_string());
+    let usage_endpoint = chat_usage_endpoint_for_request(&request);
     let session_routing = match session_routing_for_request(
         &headers,
         request.session_id.as_deref(),
@@ -1009,6 +1045,12 @@ pub async fn handle_chat_completion(
                                         "object": "chat.completion.chunk",
                                         "created": created,
                                         "model": model_name,
+                                        "client_id": usage_outcome.client_id,
+                                        "p2p": {
+                                            "enabled": false,
+                                            "transport": "gateway",
+                                            "fallback": false
+                                        },
                                         "choices": [{
                                             "index": 0,
                                             "delta": delta,
@@ -1018,6 +1060,10 @@ pub async fn handle_chat_completion(
                                     payload.to_string()
                                 }
                                 StreamEvent::Finish(usage) => {
+                                    let usage = usage.map(|mut usage| {
+                                        normalize_completion_usage_for_response(&mut usage);
+                                        usage
+                                    });
                                     if let Some(usage_value) = usage.as_ref() {
                                         record_token_usage(
                                             &usage_gateway,
@@ -1025,7 +1071,7 @@ pub async fn handle_chat_completion(
                                             usage_request_id.clone(),
                                             &usage_outcome,
                                             model_name.clone(),
-                                            "chat.completion",
+                                            usage_endpoint,
                                             usage_value,
                                             true,
                                         )
@@ -1055,6 +1101,12 @@ pub async fn handle_chat_completion(
                                         "object": "chat.completion.chunk",
                                         "created": created,
                                         "model": model_name,
+                                        "client_id": usage_outcome.client_id,
+                                        "p2p": {
+                                            "enabled": false,
+                                            "transport": "gateway",
+                                            "fallback": false
+                                        },
                                         "choices": [{
                                             "index": 0,
                                             "delta": delta,
@@ -1196,13 +1248,14 @@ pub async fn handle_chat_completion(
                 return (StatusCode::BAD_GATEWAY, Json(error_response)).into_response();
             }
 
-            let usage = usage_final.unwrap_or(crate::inference::scheduler::CompletionUsage {
+            let mut usage = usage_final.unwrap_or(crate::inference::scheduler::CompletionUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
                 analysis_tokens: None,
                 final_tokens: None,
             });
+            normalize_completion_usage_for_response(&mut usage);
             let max_tokens_effective: u32 = request.max_tokens.unwrap_or(1024);
             let finish_reason = if usage.completion_tokens >= max_tokens_effective {
                 "length"
@@ -1218,6 +1271,7 @@ pub async fn handle_chat_completion(
                 session_id: None,
                 client_id: None,
                 cache_status: None,
+                p2p: P2PResponseInfo::gateway(),
                 choices: vec![crate::inference::scheduler::ChatCompletionChoice {
                     index: 0,
                     message: crate::inference::scheduler::ChatMessage {
@@ -1235,7 +1289,7 @@ pub async fn handle_chat_completion(
                 request_id.clone(),
                 &route_outcome,
                 chat_response.model.clone(),
-                "chat.completion",
+                usage_endpoint,
                 &chat_response.usage,
                 false,
             )
@@ -1260,10 +1314,7 @@ pub async fn handle_embeddings(
 ) -> Response {
     info!("Received embedding request for model {}", request.model);
 
-    let request_id = headers
-        .get("request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let request_id = request_id_from_headers(&headers);
 
     let target_client_id = match target_client_id_for_request(&headers, &auth) {
         Ok(target_client_id) => target_client_id,
@@ -1338,10 +1389,7 @@ pub async fn handle_sophnet_embeddings(
         project_id, request.easyllm_id
     );
 
-    let request_id = headers
-        .get("request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let request_id = request_id_from_headers(&headers);
 
     let request = match sophnet_embedding_to_gpuf_request(request) {
         Ok(request) => request,
@@ -1473,5 +1521,96 @@ pub async fn get_device_status(
         Ok(Json(status))
     } else {
         Err(StatusCode::NOT_FOUND)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{ChatContentPart, ChatMessageContent, ImageUrlValue};
+
+    fn chat_request(model: &str, content: ChatMessageContent) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: Some(model.to_string()),
+            messages: vec![crate::inference::scheduler::ChatMessage {
+                role: "user".to_string(),
+                content,
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_k: None,
+            top_p: None,
+            repeat_penalty: None,
+            repeat_last_n: None,
+            min_keep: None,
+            stream: None,
+            session_id: None,
+            cache_policy: None,
+        }
+    }
+
+    fn image_content() -> ChatMessageContent {
+        ChatMessageContent::Parts(vec![
+            ChatContentPart {
+                r#type: "text".to_string(),
+                text: Some("extract text".to_string()),
+                image_url: None,
+                image: None,
+            },
+            ChatContentPart {
+                r#type: "image_url".to_string(),
+                text: None,
+                image_url: Some(ImageUrlValue::Url("data:image/png;base64,AAAA".to_string())),
+                image: None,
+            },
+        ])
+    }
+
+    #[test]
+    fn chat_usage_endpoint_keeps_text_chat_completion() {
+        let request = chat_request("gpuf", ChatMessageContent::Text("hello".to_string()));
+        assert_eq!(chat_usage_endpoint_for_request(&request), "chat.completion");
+    }
+
+    #[test]
+    fn chat_usage_endpoint_detects_ocr_image() {
+        let request = chat_request("PaddleOCR-VL-1.6-GGUF", image_content());
+        assert_eq!(chat_usage_endpoint_for_request(&request), "ocr.image");
+    }
+
+    #[test]
+    fn chat_usage_endpoint_detects_generic_multimodal() {
+        let request = chat_request("qwen-vl", image_content());
+        assert_eq!(chat_usage_endpoint_for_request(&request), "multimodal.chat");
+    }
+
+    #[test]
+    fn normalize_completion_usage_fills_missing_final_tokens() {
+        let mut usage = CompletionUsage {
+            prompt_tokens: 405,
+            completion_tokens: 60,
+            total_tokens: 465,
+            analysis_tokens: Some(0),
+            final_tokens: Some(0),
+        };
+
+        normalize_completion_usage_for_response(&mut usage);
+
+        assert_eq!(usage.final_tokens, Some(60));
+    }
+
+    #[test]
+    fn gateway_p2p_response_info_is_explicitly_disabled() {
+        let value =
+            serde_json::to_value(crate::inference::scheduler::P2PResponseInfo::gateway()).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "enabled": false,
+                "transport": "gateway",
+                "fallback": false
+            })
+        );
     }
 }

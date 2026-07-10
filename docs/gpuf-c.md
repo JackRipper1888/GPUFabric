@@ -22,6 +22,22 @@ If an older integration relied on a hidden public-IP fallback, update configurat
 ## Architecture
 ![gpuf-c_code_map](svg/gpuf-c_code_map.svg)
 
+## Roadmap
+
+- [gpuf-c multi-model sharing plan](gpuf-c-multi-model-sharing-plan.md)
+
+## P2P API Proxy
+
+- [gpuf-p2p-proxy lightweight forwarding client](gpuf-p2p-proxy.md)
+
+### P2P Usage Receipt
+
+When `gpuf-c` serves a P2P inference request, it sends a `P2PUsageReceipt` to `gpuf-s` before `P2PInferenceDone`. `gpuf-s` records consumer P2P token usage only after this target-side receipt matches the proxy-side report. This prevents a consumer/proxy from unilaterally forging successful P2P usage for an arbitrary token or client.
+
+## Build And Release
+
+- [Linux gpuf-c build flow](linux-gpuf-c-build-flow.md)
+
 ## Configuration
 Create a config.toml file:
 

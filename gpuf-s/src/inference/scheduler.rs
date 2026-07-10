@@ -138,8 +138,26 @@ pub struct ChatCompletionResponse {
     pub client_id: Option<ClientId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_status: Option<SessionCacheStatus>,
+    pub p2p: P2PResponseInfo,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: CompletionUsage,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct P2PResponseInfo {
+    pub enabled: bool,
+    pub transport: String,
+    pub fallback: bool,
+}
+
+impl P2PResponseInfo {
+    pub fn gateway() -> Self {
+        Self {
+            enabled: false,
+            transport: "gateway".to_string(),
+            fallback: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

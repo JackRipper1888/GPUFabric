@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 use futures_util::StreamExt;
 
 use bytes::BytesMut;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::HashSet;
 #[cfg(not(target_os = "android"))]
@@ -113,6 +114,7 @@ use tracing::{debug, error, info, warn};
 use url::Url;
 
 const DEFAULT_TURNS_PORT: u16 = 5349;
+const P2P_UDP_IDLE_TIMEOUT_SECS: u64 = 300;
 
 // Filter internal GGUF control tokens from streaming output
 fn filter_control_tokens(text: &str) -> String {
@@ -948,6 +950,88 @@ impl ClientWorker {
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn run_chat_v2_multimodal_once_with_engine(
+        engine: Arc<Mutex<Option<AnyEngine>>>,
+        messages: Vec<common::ChatMessageV2>,
+        max_tokens: u32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        repeat_penalty: f32,
+        repeat_last_n: i32,
+        min_keep: u32,
+    ) -> Result<(String, u32, u32)> {
+        let messages = messages
+            .into_iter()
+            .map(Self::convert_chat_message_v2)
+            .collect::<Vec<_>>();
+        let prepared = crate::llm_engine::llama_server::prepare_chat_messages(&messages)
+            .map_err(|e| anyhow!("Failed to prepare P2P chat messages: {:?}", e))?;
+        let fallback_prompt =
+            crate::llm_engine::llama_server::build_chat_prompt_from_prepared(&prepared.messages);
+        let role_content = prepared
+            .messages
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect::<Vec<_>>();
+
+        let llama = {
+            let engine_guard = engine.lock().await;
+            let engine_ref = engine_guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("Engine not initialized"))?;
+            let AnyEngine::Llama(llama) = engine_ref else {
+                return Err(anyhow!(
+                    "P2P multimodal chat task is only supported for LLAMA engine"
+                ));
+            };
+            llama.clone()
+        };
+
+        let prompt = llama
+            .render_chat_prompt(&role_content, true)
+            .await
+            .unwrap_or_else(|err| {
+                info!("Falling back to built-in P2P chat prompt template: {}", err);
+                fallback_prompt
+            });
+        let image_data = crate::llm_engine::llama_server::load_chat_images(&prepared.image_urls)
+            .await
+            .map_err(|e| anyhow!("Failed to load P2P chat images: {:?}", e))?;
+        if image_data.is_empty() {
+            return Err(anyhow!(
+                "P2P ChatInferenceTask requires image content; use P2PInferenceRequest for text"
+            ));
+        }
+
+        let sampling = crate::llm_engine::llama_engine::SamplingParams {
+            temperature,
+            top_k: top_k as i32,
+            top_p,
+            repeat_penalty,
+            repeat_last_n,
+            seed: 0,
+            min_keep: min_keep as usize,
+            thinking_budget_tokens: None,
+        };
+
+        let (response_text, prompt_tokens, completion_tokens) = llama
+            .generate_multimodal_with_cached_model_sampling(
+                &prompt,
+                image_data,
+                max_tokens as usize,
+                &sampling,
+            )
+            .await?;
+        Ok((
+            response_text,
+            prompt_tokens.min(u32::MAX as usize) as u32,
+            completion_tokens.min(u32::MAX as usize) as u32,
+        ))
+    }
+
     fn build_chat_prompt_fallback(&self, messages: &[common::ChatMessage]) -> String {
         let template = std::env::var("CHAT_TEMPLATE").unwrap_or_else(|_| "simple".to_string());
         match template.to_ascii_lowercase().as_str() {
@@ -1008,6 +1092,47 @@ impl ClientWorker {
         write_command(&mut *w, &command).await?;
         w.flush().await?;
         Ok(())
+    }
+
+    fn estimate_p2p_token_count(text: &str) -> u32 {
+        text.split_whitespace().count().max(1) as u32
+    }
+
+    fn p2p_output_sha256(text: &str) -> [u8; 32] {
+        Sha256::digest(text.as_bytes()).into()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_p2p_usage_receipt_on_writer(
+        writer: Arc<Mutex<ControlWriter>>,
+        source_client_id: [u8; 16],
+        target_client_id: [u8; 16],
+        connection_id: [u8; 16],
+        task_id: String,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        analysis_tokens: u32,
+        final_tokens: u32,
+        output_sha256: [u8; 32],
+    ) -> Result<()> {
+        Self::send_command_v2_on_writer(
+            writer,
+            CommandV2::P2PUsageReceipt {
+                source_client_id,
+                target_client_id,
+                connection_id,
+                task_id,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens.saturating_add(completion_tokens),
+                analysis_tokens,
+                final_tokens,
+                success: true,
+                error: None,
+                output_sha256: Some(output_sha256),
+            },
+        )
+        .await
     }
 
     fn parse_turns_url(url: &str) -> Result<(String, u16)> {
@@ -3305,27 +3430,70 @@ impl WorkerHandle for ClientWorker {
                                         bind_addr
                                     ));
                                 }
-                                let socket =
-                                    Arc::new(UdpSocket::bind(&bind_addr).await.map_err(|e| {
-                                        anyhow!("P2P UDP bind failed on {}: {}", bind_addr, e)
-                                    })?);
+                                let socket = match UdpSocket::bind(&bind_addr).await {
+                                    Ok(socket) => Arc::new(socket),
+                                    Err(bind_err) if self.args.p2p_udp_port != 0 => {
+                                        let fallback_bind_addr =
+                                            format!("{}:0", self.args.p2p_bind_addr);
+                                        warn!(
+                                            "P2P UDP bind failed on {}; falling back to {}: {}",
+                                            bind_addr, fallback_bind_addr, bind_err
+                                        );
+                                        Arc::new(
+                                            UdpSocket::bind(&fallback_bind_addr)
+                                                .await
+                                                .map_err(|fallback_err| {
+                                                    anyhow!(
+                                                        "P2P UDP bind failed on {}: {}; fallback {} failed: {}",
+                                                        bind_addr,
+                                                        bind_err,
+                                                        fallback_bind_addr,
+                                                        fallback_err
+                                                    )
+                                                })?,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        return Err(anyhow!(
+                                            "P2P UDP bind failed on {}: {}",
+                                            bind_addr,
+                                            e
+                                        ));
+                                    }
+                                };
                                 let local_port = socket.local_addr()?.port();
                                 let advertise_ip = self.get_advertise_ip().await?;
 
                                 #[cfg(not(target_os = "android"))]
                                 {
                                     let engine = Arc::clone(&self.engine);
+                                    let writer = Arc::clone(&self.writer);
+                                    let source_client_id_copy = peer_id;
+                                    let target_client_id_copy = self.client_id;
                                     let socket = Arc::clone(&socket);
+                                    let listener_addr = socket.local_addr().ok();
                                     let data_plane_secret_copy = data_plane_secret;
                                     tokio::spawn(async move {
                                         let mut next_msg_id: u32 = 1;
                                         let mut reassembly = P2PUdpReassemblyState::new();
                                         let mut buf = vec![0u8; 64 * 1024];
                                         loop {
-                                            let (n, from) = match socket.recv_from(&mut buf).await {
-                                                Ok(v) => v,
-                                                Err(e) => {
+                                            let recv_result = timeout(
+                                                Duration::from_secs(P2P_UDP_IDLE_TIMEOUT_SECS),
+                                                socket.recv_from(&mut buf),
+                                            )
+                                            .await;
+                                            let (n, from) = match recv_result {
+                                                Ok(Ok(v)) => v,
+                                                Ok(Err(e)) => {
                                                     error!("P2P UDP recv error: {}", e);
+                                                    return;
+                                                }
+                                                Err(_) => {
+                                                    info!(
+                                                        "P2P UDP listener idle timeout on {:?}",
+                                                        listener_addr
+                                                    );
                                                     return;
                                                 }
                                             };
@@ -3396,6 +3564,170 @@ impl WorkerHandle for ClientWorker {
                                                     warn!("P2P UDP decode failed: {}", e);
                                                     continue;
                                                 }
+                                            };
+
+                                            let cmd = match cmd {
+                                                Command::V2(CommandV2::ChatInferenceTask {
+                                                    task_id,
+                                                    session_id: _,
+                                                    cache_policy: _,
+                                                    model: _model,
+                                                    messages,
+                                                    max_tokens,
+                                                    temperature,
+                                                    top_k,
+                                                    top_p,
+                                                    repeat_penalty,
+                                                    repeat_last_n,
+                                                    min_keep,
+                                                }) => {
+                                                    let result =
+                                                        Self::run_chat_v2_multimodal_once_with_engine(
+                                                            Arc::clone(&engine),
+                                                            messages,
+                                                            max_tokens,
+                                                            temperature,
+                                                            top_k,
+                                                            top_p,
+                                                            repeat_penalty,
+                                                            repeat_last_n,
+                                                            min_keep,
+                                                        )
+                                                        .await;
+
+                                                    match result {
+                                                        Ok((
+                                                            response_text,
+                                                            prompt_tokens,
+                                                            completion_tokens,
+                                                        )) => {
+                                                            if !response_text.is_empty() {
+                                                                let chunk = Command::V2(
+                                                                    CommandV2::P2PInferenceChunk {
+                                                                        connection_id,
+                                                                        task_id: task_id.clone(),
+                                                                        seq: 0,
+                                                                        delta: response_text
+                                                                            .clone(),
+                                                                        phase: OutputPhase::Unknown,
+                                                                        done: false,
+                                                                        error: None,
+                                                                        analysis_tokens: 0,
+                                                                        final_tokens:
+                                                                            completion_tokens,
+                                                                    },
+                                                                );
+                                                                if let Ok(pkt) = Self::p2p_udp_encode_command_payload(&chunk) {
+                                                                let msg_id = next_msg_id;
+                                                                next_msg_id = next_msg_id.wrapping_add(1);
+                                                                let _ = Self::p2p_udp_send_reliable(
+                                                                    &socket,
+                                                                    from,
+                                                                    connection_id,
+                                                                    data_plane_secret_copy,
+                                                                    msg_id,
+                                                                    &pkt,
+                                                                )
+                                                                .await;
+                                                            }
+                                                            }
+
+                                                            let total_tokens = prompt_tokens
+                                                                .saturating_add(completion_tokens);
+                                                            let output_sha256 =
+                                                                Self::p2p_output_sha256(
+                                                                    &response_text,
+                                                                );
+                                                            if let Err(e) =
+                                                            Self::send_p2p_usage_receipt_on_writer(
+                                                                Arc::clone(&writer),
+                                                                source_client_id_copy,
+                                                                target_client_id_copy,
+                                                                connection_id,
+                                                                task_id.clone(),
+                                                                prompt_tokens,
+                                                                completion_tokens,
+                                                                0,
+                                                                completion_tokens,
+                                                                output_sha256,
+                                                            )
+                                                            .await
+                                                        {
+                                                            warn!(
+                                                                "Failed to report P2P UDP multimodal usage receipt: {}",
+                                                                e
+                                                            );
+                                                        }
+
+                                                            let done = Command::V2(
+                                                                CommandV2::P2PInferenceDone {
+                                                                    connection_id,
+                                                                    task_id,
+                                                                    prompt_tokens,
+                                                                    completion_tokens,
+                                                                    total_tokens,
+                                                                    analysis_tokens: 0,
+                                                                    final_tokens: completion_tokens,
+                                                                },
+                                                            );
+                                                            if let Ok(pkt) =
+                                                                Self::p2p_udp_encode_command_payload(
+                                                                    &done,
+                                                                )
+                                                            {
+                                                                let msg_id = next_msg_id;
+                                                                next_msg_id =
+                                                                    next_msg_id.wrapping_add(1);
+                                                                let _ =
+                                                                    Self::p2p_udp_send_reliable(
+                                                                        &socket,
+                                                                        from,
+                                                                        connection_id,
+                                                                        data_plane_secret_copy,
+                                                                        msg_id,
+                                                                        &pkt,
+                                                                    )
+                                                                    .await;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            let chunk = Command::V2(
+                                                                CommandV2::P2PInferenceChunk {
+                                                                    connection_id,
+                                                                    task_id,
+                                                                    seq: 0,
+                                                                    delta: String::new(),
+                                                                    phase: OutputPhase::Unknown,
+                                                                    done: true,
+                                                                    error: Some(e.to_string()),
+                                                                    analysis_tokens: 0,
+                                                                    final_tokens: 0,
+                                                                },
+                                                            );
+                                                            if let Ok(pkt) =
+                                                                Self::p2p_udp_encode_command_payload(
+                                                                    &chunk,
+                                                                )
+                                                            {
+                                                                let msg_id = next_msg_id;
+                                                                next_msg_id =
+                                                                    next_msg_id.wrapping_add(1);
+                                                                let _ =
+                                                                    Self::p2p_udp_send_reliable(
+                                                                        &socket,
+                                                                        from,
+                                                                        connection_id,
+                                                                        data_plane_secret_copy,
+                                                                        msg_id,
+                                                                        &pkt,
+                                                                    )
+                                                                    .await;
+                                                            }
+                                                        }
+                                                    }
+                                                    continue;
+                                                }
+                                                other => other,
                                             };
 
                                             let Command::V2(CommandV2::P2PInferenceRequest {
@@ -3550,11 +3882,16 @@ impl WorkerHandle for ClientWorker {
 
                                             let mut token_stream = Box::pin(token_stream);
                                             let mut seq: u32 = 0;
+                                            let prompt_tokens =
+                                                Self::estimate_p2p_token_count(&prompt);
+                                            let mut output_text = String::new();
+                                            let mut stream_failed = false;
 
                                             while let Some(piece_res) = token_stream.next().await {
                                                 let piece = match piece_res {
                                                     Ok(p) => p,
                                                     Err(e) => {
+                                                        stream_failed = true;
                                                         let chunk = Command::V2(
                                                             CommandV2::P2PInferenceChunk {
                                                                 connection_id,
@@ -3613,6 +3950,7 @@ impl WorkerHandle for ClientWorker {
                                                     }
                                                     let delta = filtered[start..end].to_string();
                                                     start = end;
+                                                    output_text.push_str(&delta);
 
                                                     let chunk =
                                                         Command::V2(CommandV2::P2PInferenceChunk {
@@ -3645,14 +3983,45 @@ impl WorkerHandle for ClientWorker {
                                                 }
                                             }
 
+                                            if stream_failed {
+                                                continue;
+                                            }
+
+                                            let completion_tokens =
+                                                Self::estimate_p2p_token_count(&output_text);
+                                            let total_tokens =
+                                                prompt_tokens.saturating_add(completion_tokens);
+                                            let final_tokens = completion_tokens;
+                                            let output_sha256 =
+                                                Self::p2p_output_sha256(&output_text);
+                                            if let Err(e) = Self::send_p2p_usage_receipt_on_writer(
+                                                Arc::clone(&writer),
+                                                source_client_id_copy,
+                                                target_client_id_copy,
+                                                connection_id,
+                                                task_id.clone(),
+                                                prompt_tokens,
+                                                completion_tokens,
+                                                0,
+                                                final_tokens,
+                                                output_sha256,
+                                            )
+                                            .await
+                                            {
+                                                warn!(
+                                                    "Failed to report P2P UDP usage receipt: {}",
+                                                    e
+                                                );
+                                            }
+
                                             let done = Command::V2(CommandV2::P2PInferenceDone {
                                                 connection_id,
                                                 task_id,
-                                                prompt_tokens: 0,
-                                                completion_tokens: 0,
-                                                total_tokens: 0,
+                                                prompt_tokens,
+                                                completion_tokens,
+                                                total_tokens,
                                                 analysis_tokens: 0,
-                                                final_tokens: 0,
+                                                final_tokens,
                                             });
                                             if let Ok(pkt) =
                                                 Self::p2p_udp_encode_command_payload(&done)
@@ -3728,9 +4097,11 @@ impl WorkerHandle for ClientWorker {
                                                     connection_id: connection_id_copy,
                                                     candidates: vec![relay_candidate],
                                                 };
-                                                if let Err(e) =
-                                                    Self::send_command_v2_on_writer(writer, cmd)
-                                                        .await
+                                                if let Err(e) = Self::send_command_v2_on_writer(
+                                                    Arc::clone(&writer),
+                                                    cmd,
+                                                )
+                                                .await
                                                 {
                                                     error!(
                                                         "Failed to send TURN relay candidate: {}",
@@ -4027,6 +4398,10 @@ impl WorkerHandle for ClientWorker {
                                                         let mut token_stream =
                                                             Box::pin(token_stream);
                                                         let mut seq: u32 = 0;
+                                                        let prompt_tokens =
+                                                            Self::estimate_p2p_token_count(&prompt);
+                                                        let mut output_text = String::new();
+                                                        let mut stream_failed = false;
 
                                                         while let Some(piece_res) =
                                                             token_stream.next().await
@@ -4034,6 +4409,7 @@ impl WorkerHandle for ClientWorker {
                                                             let piece = match piece_res {
                                                                 Ok(p) => p,
                                                                 Err(e) => {
+                                                                    stream_failed = true;
                                                                     let chunk = Command::V2(CommandV2::P2PInferenceChunk {
                                                                         connection_id: connection_id_copy,
                                                                         task_id: task_id.clone(),
@@ -4091,6 +4467,7 @@ impl WorkerHandle for ClientWorker {
                                                                 let delta = filtered[start..end]
                                                                     .to_string();
                                                                 start = end;
+                                                                output_text.push_str(&delta);
 
                                                                 let chunk = Command::V2(
                                                                     CommandV2::P2PInferenceChunk {
@@ -4126,15 +4503,49 @@ impl WorkerHandle for ClientWorker {
                                                             }
                                                         }
 
+                                                        if stream_failed {
+                                                            continue;
+                                                        }
+
+                                                        let completion_tokens =
+                                                            Self::estimate_p2p_token_count(
+                                                                &output_text,
+                                                            );
+                                                        let total_tokens = prompt_tokens
+                                                            .saturating_add(completion_tokens);
+                                                        let final_tokens = completion_tokens;
+                                                        let output_sha256 =
+                                                            Self::p2p_output_sha256(&output_text);
+                                                        if let Err(e) =
+                                                            Self::send_p2p_usage_receipt_on_writer(
+                                                                Arc::clone(&writer),
+                                                                peer_id_copy,
+                                                                source_client_id_copy,
+                                                                connection_id_copy,
+                                                                task_id.clone(),
+                                                                prompt_tokens,
+                                                                completion_tokens,
+                                                                0,
+                                                                final_tokens,
+                                                                output_sha256,
+                                                            )
+                                                            .await
+                                                        {
+                                                            warn!(
+                                                                "Failed to report P2P TURN/UDP usage receipt: {}",
+                                                                e
+                                                            );
+                                                        }
+
                                                         let done = Command::V2(
                                                             CommandV2::P2PInferenceDone {
                                                                 connection_id: connection_id_copy,
                                                                 task_id,
-                                                                prompt_tokens: 0,
-                                                                completion_tokens: 0,
-                                                                total_tokens: 0,
+                                                                prompt_tokens,
+                                                                completion_tokens,
+                                                                total_tokens,
                                                                 analysis_tokens: 0,
-                                                                final_tokens: 0,
+                                                                final_tokens,
                                                             },
                                                         );
                                                         if let Ok(pkt) =
