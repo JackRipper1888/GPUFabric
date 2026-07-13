@@ -23,6 +23,8 @@ use futures_util::StreamExt;
 
 use bytes::BytesMut;
 use sha2::{Digest, Sha256};
+#[cfg(all(not(target_os = "android"), unix))]
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::HashMap;
 use std::collections::HashSet;
 #[cfg(not(target_os = "android"))]
@@ -56,21 +58,42 @@ impl Drop for ConnectionTaskGuard {
     }
 }
 
+#[cfg(all(not(target_os = "android"), unix))]
+fn set_control_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+    let socket = SockRef::from(stream);
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(30))
+        .with_retries(5);
+
+    socket.set_tcp_keepalive(&keepalive)
+}
+
+#[cfg(all(not(target_os = "android"), not(unix)))]
+fn set_control_keepalive(_stream: &TcpStream) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "android"))]
 fn start_llama_http_server_once(
     engine: &AnyEngine,
     local_addr: String,
     local_port: u16,
 ) -> Result<()> {
-    info!(
-        "Starting LLAMA HTTP API server on {}:{}",
-        local_addr, local_port
-    );
-
-    if !HTTP_SERVER_STARTED.swap(true, Ordering::SeqCst) {
+    if HTTP_SERVER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        info!(
+            "Starting LLAMA HTTP API server on {}:{}",
+            local_addr, local_port
+        );
         let server_engine = match engine {
             AnyEngine::Llama(e) => e.clone(),
-            _ => anyhow::bail!("LLAMA HTTP server requires a LLAMA engine"),
+            _ => {
+                HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+                anyhow::bail!("LLAMA HTTP server requires a LLAMA engine");
+            }
         };
         let engine_arc = Arc::new(tokio::sync::RwLock::new(server_engine));
         let local_addr_clone = local_addr.clone();
@@ -83,13 +106,22 @@ fn start_llama_http_server_once(
             )
             .await
             {
-                error!("LLAMA HTTP server error: {}", e);
-                HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::AddrInUse)
+                {
+                    warn!(
+                        "LLAMA HTTP API address {}:{} is already in use; assuming an existing local server owns it",
+                        local_addr_clone, local_port
+                    );
+                } else {
+                    error!("LLAMA HTTP server error: {}", e);
+                    HTTP_SERVER_STARTED.store(false, Ordering::SeqCst);
+                }
             }
         });
 
         info!(
-            "LLAMA HTTP API server started successfully on {}:{}",
+            "LLAMA HTTP API server startup scheduled on {}:{}",
             local_addr, local_port
         );
     } else {
@@ -4771,6 +4803,17 @@ async fn connect_control_stream(
     addr: std::net::SocketAddr,
 ) -> Result<(ControlReader, ControlWriter)> {
     let tcp_stream = TcpStream::connect(addr).await?;
+    if let Err(e) = tcp_stream.set_nodelay(true) {
+        warn!("Failed to set nodelay on control connection: {}", e);
+    }
+    if let Err(e) = set_control_keepalive(&tcp_stream) {
+        warn!(
+            "Failed to configure TCP keepalive on control connection: {}",
+            e
+        );
+    } else {
+        debug!("Configured TCP keepalive on control connection");
+    }
 
     if !args.control_tls {
         if !addr.ip().is_loopback() {

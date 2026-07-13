@@ -36,11 +36,8 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
-use socket2::{Socket, TcpKeepalive};
-#[cfg(unix)]
-use std::mem;
-#[cfg(unix)]
-use std::os::fd::FromRawFd;
+use socket2::{SockRef, TcpKeepalive};
+
 use tokio::net::TcpStream;
 
 impl ServerState {
@@ -62,9 +59,11 @@ impl ServerState {
                 addr,
                 acceptor.is_some()
             );
-            if let Err(_e) = set_keepalive(&stream) {
-                error!("handle_single_client set_keepalive err");
-                continue;
+            if let Err(e) = set_keepalive(&stream) {
+                warn!(
+                    "Failed to configure TCP keepalive for control connection {}: {}",
+                    addr, e
+                );
             }
 
             let active_clients_clone = self.active_clients.clone();
@@ -123,21 +122,13 @@ impl ServerState {
 
 #[cfg(unix)]
 fn set_keepalive(stream: &TcpStream) -> std::io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = stream.as_raw_fd();
-    let socket = unsafe { Socket::from_raw_fd(fd) };
-
+    let socket = SockRef::from(stream);
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(30))
-        .with_interval(Duration::from_secs(10))
-        .with_retries(3);
+        .with_time(Duration::from_secs(90))
+        .with_interval(Duration::from_secs(30))
+        .with_retries(5);
 
-    let result = socket.set_tcp_keepalive(&keepalive);
-    // Prevent socket from being automatically closed
-    mem::forget(socket);
-
-    result
+    socket.set_tcp_keepalive(&keepalive)
 }
 
 #[cfg(not(unix))]

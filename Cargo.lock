@@ -1275,7 +1275,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gpuf-c"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -1316,6 +1316,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "socket2 0.6.1",
  "sysinfo",
  "tar",
  "tempfile",
