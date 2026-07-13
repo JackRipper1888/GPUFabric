@@ -6,14 +6,14 @@
 
 - 代码库路径：`/home/jack/codedir/GPUFabric`
 - Cargo package：`gpuf-c`
-- 当前版本：`gpuf-c/Cargo.toml` 中 `version = "1.0.4"`
+- 当前版本：`gpuf-c/Cargo.toml` 中 `version = "1.0.6"`
 - Linux 构建目标：`x86_64-unknown-linux-gnu`
 - CUDA Toolkit：`/usr/local/cuda-13.0`
 - CUDA 产物：`target/release/gpuf-c-cuda`
 - Vulkan 产物：`target/release/gpuf-c-vulkan`
 - 建议 CUDA target 目录：`/tmp/gpuf-target-linux-cuda13`
 - 建议 Vulkan target 目录：`/tmp/gpuf-target-linux-vulkan`
-- Linux 线上包目录：`/home/jack/桌面/working/client-pack/v1.0.4-linux-gpuf-c`
+- Linux 线上包目录：`/home/jack/桌面/working/client-pack/v1.0.6-linux-gpuf-c`
 
 `gpuf-c` 的 `cuda` 和 `vulkan` feature 当前都会自动启用 `multimodal`，所以 CUDA/Vulkan 产物都支持 PaddleOCR-VL 这类需要 `--llama-mmproj-path` 的 OCR 多模态模型。
 
@@ -338,7 +338,7 @@ export GPUF_MODEL_PATH=/models/model.gguf
 准备包目录：
 
 ```bash
-PACK=/home/jack/桌面/working/client-pack/v1.0.4-linux-gpuf-c
+PACK=/home/jack/桌面/working/client-pack/v1.0.6-linux-gpuf-c
 mkdir -p "$PACK"
 ```
 
@@ -369,15 +369,15 @@ sha256sum * > SHA256SUMS
 
 ```bash
 cd /home/jack/桌面/working/client-pack
-tar -czf v1.0.4-linux-gpuf-c.tar.gz v1.0.4-linux-gpuf-c
-sha256sum v1.0.4-linux-gpuf-c.tar.gz
+tar -czf v1.0.6-linux-gpuf-c.tar.gz v1.0.6-linux-gpuf-c
+sha256sum v1.0.6-linux-gpuf-c.tar.gz
 ```
 
 上传 OSS 前检查：
 
 ```bash
-tar -tf /home/jack/桌面/working/client-pack/v1.0.4-linux-gpuf-c.tar.gz
-cat /home/jack/桌面/working/client-pack/v1.0.4-linux-gpuf-c/SHA256SUMS
+tar -tf /home/jack/桌面/working/client-pack/v1.0.6-linux-gpuf-c.tar.gz
+cat /home/jack/桌面/working/client-pack/v1.0.6-linux-gpuf-c/SHA256SUMS
 ```
 
 ## 常见问题
@@ -442,7 +442,7 @@ PaddleOCR-VL 等视觉模型必须在启动 `gpuf-c` 时传入匹配的：
 当前已有 Linux 包目录：
 
 ```text
-/home/jack/桌面/working/client-pack/v1.0.4-linux-gpuf-c
+/home/jack/桌面/working/client-pack/v1.0.6-linux-gpuf-c
 ```
 
 包内当前形态：
