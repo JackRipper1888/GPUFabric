@@ -15,6 +15,14 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
+#ifndef GPUF_API
+#if defined(__GNUC__) || defined(__clang__)
+#define GPUF_API __attribute__((visibility("default")))
+#else
+#define GPUF_API
+#endif
+#endif
+
 // Basic type definitions
 typedef void (*gpuf_status_callback)(const char* message, void* user_data);
 
@@ -25,7 +33,7 @@ typedef void (*gpuf_status_callback)(const char* message, void* user_data);
  * @param model_path Path to the model file (.gguf)
  * @return 0 on success, negative error code on failure
  */
-int set_remote_worker_model(const char* model_path);
+GPUF_API int set_remote_worker_model(const char* model_path);
 
 /**
  * Start remote worker connection
@@ -36,14 +44,14 @@ int set_remote_worker_model(const char* model_path);
  * @param client_id Client ID (32 hex characters)
  * @return 0 on success, negative error code on failure
  */
-int start_remote_worker(const char* server_addr, int control_port, int proxy_port,
-                       const char* worker_type, const char* client_id);
+GPUF_API int start_remote_worker(const char* server_addr, int control_port, int proxy_port,
+                                 const char* worker_type, const char* client_id);
 
 /**
  * Start remote worker background tasks
  * @return 0 on success, negative error code on failure
  */
-int start_remote_worker_tasks(void);
+GPUF_API int start_remote_worker_tasks(void);
 
 /**
  * Start remote worker background tasks with callback support
@@ -61,7 +69,7 @@ int start_remote_worker_tasks(void);
  * - "INFERENCE_SUCCESS - Task: xxx-xxx-xxx in XXXms"
  * - "INFERENCE_FAILED - Task: xxx-xxx-xxx - error message"
  */
-int start_remote_worker_tasks_with_callback_ptr(gpuf_status_callback callback);
+GPUF_API int start_remote_worker_tasks_with_callback_ptr(gpuf_status_callback callback);
 
 /**
  * Register remote worker status callback.
@@ -72,13 +80,13 @@ int start_remote_worker_tasks_with_callback_ptr(gpuf_status_callback callback);
  * @param user_data Opaque pointer passed back to the callback
  * @return 0 on success, negative error code on failure
  */
-int gpuf_register_remote_worker_callback(gpuf_status_callback callback, void* user_data);
+GPUF_API int gpuf_register_remote_worker_callback(gpuf_status_callback callback, void* user_data);
 
 /**
  * Stop remote worker
  * @return 0 on success, negative error code on failure
  */
-int stop_remote_worker(void);
+GPUF_API int stop_remote_worker(void);
 
 /**
  * Get remote worker status
@@ -86,7 +94,7 @@ int stop_remote_worker(void);
  * @param buffer_size Size of the status buffer
  * @return 0 on success, negative error code on failure
  */
-int get_remote_worker_status(char* status_buffer, size_t buffer_size);
+GPUF_API int get_remote_worker_status(char* status_buffer, size_t buffer_size);
 
 #ifdef __cplusplus
 }

@@ -1465,6 +1465,22 @@ pub extern "C" fn gpuf_create_context(model: *mut llama_model) -> *mut llama_con
     result
 }
 
+#[no_mangle]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub extern "C" fn gpuf_free_model(model: *mut llama_model) {
+    if !model.is_null() {
+        unsafe { llama_model_free(model) };
+    }
+}
+
+#[no_mangle]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub extern "C" fn gpuf_free_context(context: *mut llama_context) {
+    if !context.is_null() {
+        unsafe { llama_free(context) };
+    }
+}
+
 // Async Model Loading and Context Creation Functions
 // ============================================================================
 

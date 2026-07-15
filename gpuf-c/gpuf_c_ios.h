@@ -7,6 +7,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef GPUF_API
+#if defined(__GNUC__) || defined(__clang__)
+#define GPUF_API __attribute__((visibility("default")))
+#else
+#define GPUF_API
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -17,15 +25,17 @@ struct llama_model;
 struct llama_context;
 struct gpuf_multimodal_model;
 
-int gpuf_init(void);
-int gpuf_cleanup(void);
-const char *gpuf_version(void);
-const char *gpuf_system_info(void);
+GPUF_API int gpuf_init(void);
+GPUF_API int gpuf_cleanup(void);
+GPUF_API const char *gpuf_version(void);
+GPUF_API const char *gpuf_system_info(void);
 
-struct llama_model *gpuf_load_model(const char *model_path);
-struct llama_context *gpuf_create_context(struct llama_model *model);
+GPUF_API struct llama_model *gpuf_load_model(const char *model_path);
+GPUF_API struct llama_context *gpuf_create_context(struct llama_model *model);
+GPUF_API void gpuf_free_model(struct llama_model *model);
+GPUF_API void gpuf_free_context(struct llama_context *context);
 
-int gpuf_generate_final_solution_text(
+GPUF_API int gpuf_generate_final_solution_text(
     const struct llama_model *model,
     struct llama_context *context,
     const char *prompt,
@@ -34,7 +44,7 @@ int gpuf_generate_final_solution_text(
     int output_buffer_size
 );
 
-int gpuf_generate_with_sampling(
+GPUF_API int gpuf_generate_with_sampling(
     const struct llama_model *model,
     struct llama_context *context,
     const char *prompt,
@@ -49,12 +59,9 @@ int gpuf_generate_with_sampling(
     int token_buffer_size
 );
 
-void llama_model_free(struct llama_model *model);
-void llama_free(struct llama_context *context);
+GPUF_API int set_remote_worker_model(const char *model_path);
 
-int set_remote_worker_model(const char *model_path);
-
-int start_remote_worker(
+GPUF_API int start_remote_worker(
     const char *server_addr,
     int control_port,
     int proxy_port,
@@ -62,7 +69,7 @@ int start_remote_worker(
     const char *client_id
 );
 
-int start_remote_worker_with_tls(
+GPUF_API int start_remote_worker_with_tls(
     const char *server_addr,
     int control_port,
     int proxy_port,
@@ -73,34 +80,34 @@ int start_remote_worker_with_tls(
     const char *cert_sha256_pin
 );
 
-int gpuf_validate_mobile_tls_policy(
+GPUF_API int gpuf_validate_mobile_tls_policy(
     const char *ca_cert_path,
     const char *control_tls_server_name,
     const char *cert_sha256_pin
 );
 
-int gpuf_configure_remote_worker_proxy_tls(
+GPUF_API int gpuf_configure_remote_worker_proxy_tls(
     const char *ca_cert_path,
     const char *proxy_tls_server_name,
     const char *cert_sha256_pin
 );
 
-int start_remote_worker_tasks(void);
-int start_remote_worker_tasks_with_callback_ptr(gpuf_status_callback callback);
-int gpuf_register_remote_worker_callback(gpuf_status_callback callback, void *user_data);
-int get_remote_worker_status(char *buffer, size_t buffer_size);
-int stop_remote_worker(void);
+GPUF_API int start_remote_worker_tasks(void);
+GPUF_API int start_remote_worker_tasks_with_callback_ptr(gpuf_status_callback callback);
+GPUF_API int gpuf_register_remote_worker_callback(gpuf_status_callback callback, void *user_data);
+GPUF_API int get_remote_worker_status(char *buffer, size_t buffer_size);
+GPUF_API int stop_remote_worker(void);
 
-struct gpuf_multimodal_model *gpuf_load_multimodal_model(
+GPUF_API struct gpuf_multimodal_model *gpuf_load_multimodal_model(
     const char *text_model_path,
     const char *mmproj_path
 );
 
-struct llama_context *gpuf_create_multimodal_context(
+GPUF_API struct llama_context *gpuf_create_multimodal_context(
     struct gpuf_multimodal_model *multimodal_model
 );
 
-int gpuf_generate_multimodal(
+GPUF_API int gpuf_generate_multimodal(
     struct gpuf_multimodal_model *multimodal_model,
     struct llama_context *context,
     const char *text_prompt,
@@ -115,10 +122,10 @@ int gpuf_generate_multimodal(
     int output_buffer_size
 );
 
-void gpuf_free_multimodal_model(struct gpuf_multimodal_model *multimodal_model);
-bool gpuf_multimodal_supports_vision(struct gpuf_multimodal_model *multimodal_model);
-int gpuf_get_multimodal_info(struct gpuf_multimodal_model *multimodal_model, bool *has_vision);
-int gpuf_get_vision_tokens(
+GPUF_API void gpuf_free_multimodal_model(struct gpuf_multimodal_model *multimodal_model);
+GPUF_API bool gpuf_multimodal_supports_vision(struct gpuf_multimodal_model *multimodal_model);
+GPUF_API int gpuf_get_multimodal_info(struct gpuf_multimodal_model *multimodal_model, bool *has_vision);
+GPUF_API int gpuf_get_vision_tokens(
     struct gpuf_multimodal_model *multimodal_model,
     char *start_token,
     char *end_token,

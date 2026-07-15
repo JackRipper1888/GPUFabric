@@ -108,6 +108,9 @@ build_one() {
     cmake -S "$LLAMA_CPP_ROOT" -B "$build_dir" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_C_VISIBILITY_PRESET=hidden \
+        -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
+        -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
         -DLLAMA_BUILD_COMMON=OFF \
         -DLLAMA_BUILD_TESTS=OFF \
         -DLLAMA_BUILD_EXAMPLES=OFF \

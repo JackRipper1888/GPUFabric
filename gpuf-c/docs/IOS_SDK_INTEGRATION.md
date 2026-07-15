@@ -65,6 +65,8 @@ const char *gpuf_system_info(void);
 
 struct llama_model *gpuf_load_model(const char *model_path);
 struct llama_context *gpuf_create_context(struct llama_model *model);
+void gpuf_free_model(struct llama_model *model);
+void gpuf_free_context(struct llama_context *context);
 
 int gpuf_generate_final_solution_text(
     const struct llama_model *model,
@@ -75,8 +77,6 @@ int gpuf_generate_final_solution_text(
     int output_buffer_size
 );
 
-void llama_model_free(struct llama_model *model);
-void llama_free(struct llama_context *context);
 ```
 
 Recommended order:
@@ -86,10 +86,14 @@ gpuf_init();
 struct llama_model *model = gpuf_load_model(model_path);
 struct llama_context *ctx = gpuf_create_context(model);
 gpuf_generate_final_solution_text(model, ctx, prompt, max_tokens, output, output_size);
-llama_free(ctx);
-llama_model_free(model);
+gpuf_free_context(ctx);
+gpuf_free_model(model);
 gpuf_cleanup();
 ```
+
+The XCFramework builds its private llama.cpp/ggml copy with hidden symbol visibility.
+Applications that also embed llama.cpp, including through `llama.rn`, must use the
+`gpuf_free_*` wrappers rather than linking directly to the SDK's private `llama_free` symbols.
 
 ## Remote Worker API
 

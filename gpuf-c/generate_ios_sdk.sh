@@ -259,6 +259,26 @@ merge_one() {
     "$LIBTOOL_BIN" -static -o "$out_a" "${libs[@]}"
 }
 
+verify_no_llama_symbol_leaks() {
+    local archive="$1"
+    local slice_name="$2"
+    local leaked_symbols
+
+    leaked_symbols="$({ xcrun nm -gU "$archive" 2>/dev/null || xcrun nm -g "$archive"; } \
+        | awk '{print $NF}' \
+        | grep -E '^_(ggml_|llama_|mtmd_|common_)|^__ZN.*(llama|ggml|mtmd|common)' \
+        | sort -u || true)"
+
+    if [ -n "$leaked_symbols" ]; then
+        echo "❌ Internal llama.cpp/ggml symbols are globally visible in $slice_name:"
+        printf '%s\n' "$leaked_symbols" | sed -n '1,40p'
+        echo "   Rebuild llama.cpp with hidden visibility before publishing the SDK."
+        exit 1
+    fi
+
+    echo "🔒 $slice_name: no global llama.cpp/ggml symbol leaks"
+}
+
 LLAMA_DEVICE_DIR="$WORKSPACE_ROOT/target/llama-ios/$IOS_DEVICE_TARGET"
 LLAMA_SIM_ARM64_DIR="$WORKSPACE_ROOT/target/llama-ios/$IOS_SIM_ARM64_TARGET"
 
@@ -271,6 +291,9 @@ MERGED_SIM_LIB="$SIM_SLICE_DIR/libgpuf_c_sdk.a"
 
 merge_one "$DEVICE_LIB" "$LLAMA_DEVICE_DIR" "$MERGED_DEVICE_LIB"
 merge_one "$SIM_UNIVERSAL_LIB" "$LLAMA_SIM_ARM64_DIR" "$MERGED_SIM_LIB"
+
+verify_no_llama_symbol_leaks "$MERGED_DEVICE_LIB" "ios-arm64"
+verify_no_llama_symbol_leaks "$MERGED_SIM_LIB" "ios-arm64-simulator"
 
 XCFRAMEWORK_OUT="$DIST_DIR/gpuf_c_sdk.xcframework"
 rm -rf "$XCFRAMEWORK_OUT"

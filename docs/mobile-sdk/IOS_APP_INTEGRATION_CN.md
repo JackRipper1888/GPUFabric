@@ -335,10 +335,14 @@ if rc > 0 {
     print(String(cString: output))
 }
 
-llama_free(context)
-llama_model_free(model)
+gpuf_free_context(context)
+gpuf_free_model(model)
 _ = gpuf_cleanup()
 ```
+
+SDK 内置的 llama.cpp/ggml 使用 hidden 符号可见性打包。若 App 同时集成
+`llama.rn` 或另一套 llama.cpp，请只调用 `gpuf_free_context` 和
+`gpuf_free_model`，不要直接依赖 SDK 内部的 `llama_free` 符号。
 
 模型文件必须是 App 可访问的本地 `.gguf` 路径，例如 bundle resource 或 Documents 目录。
 
