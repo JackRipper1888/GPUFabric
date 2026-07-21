@@ -623,3 +623,169 @@ curl "http://<host>:18081/api/banking/admin/token-throughput?windowSeconds=180&i
 - 地图页如果要切换在线/离线/全部，调用 `network-map?nodeStatus=<value>`。
 - 地图页不传 `nodeStatus` 时就是全部节点。
 - Token 卡片不要和当前在线/离线状态做强行对账。
+
+## 算力资产预评估
+
+预评估接口将在线节点数据或离线硬件证据转换为统一的
+`gpuf.pre_evaluation.v1` 草稿快照。所有接口要求管理令牌：
+
+```http
+Authorization: Bearer <GPUF_BANKING_API_TOKEN>
+```
+
+服务端未配置至少 32 字符的令牌时，接口返回 HTTP `503`。令牌错误返回 HTTP `401`。
+该令牌是服务间管理凭据，只能保存在后端或受控运维环境，不能下发到浏览器前端。
+生产部署可使用逗号分隔的 `GPUF_BANKING_API_TOKENS` 同时配置新旧 Token 完成轮换；
+`GPUF_BANKING_API_TOKEN` 作为单 Token 兼容配置保留。
+当前阶段不接受调用方直接提交确权、基准数值、估值、质押率或手工硬件规格；旧客户端可以省略 `supplements` 或发送空对象，非空值返回 HTTP `422`。
+
+在线和离线创建接口可携带 `Idempotency-Key`。作用域为经过 SHA-256 脱敏的服务主体、租户和操作；相同键与相同请求返回首次生成的报告，相同键与不同请求返回 HTTP `409`。不提供该请求头时保持旧客户端行为。`GPUF_BANKING_SERVICE_SUBJECT` 用于定义调用服务主体，数据库不保存原始主体或租户标识。
+
+new-api 等内部编排服务可以使用以下等价路径：
+
+```text
+POST /internal/v1/technical-pre-evaluations/from-client
+POST /internal/v1/technical-pre-evaluations/challenge
+POST /internal/v1/technical-pre-evaluations/from-evidence
+```
+
+internal 路径与现有 banking 路径共用鉴权、请求体限制、证据校验、幂等存储和报告生成逻辑。internal 请求可以使用 `gpufUserRef`、`gpufClientRef`、`tenantRef` 和 `clientRequestId`；前两个字段分别是旧 `userId`、`clientId` 的别名。body 中的 `clientRequestId` 可以直接启用幂等；同时提供 `Idempotency-Key` 时二者必须完全一致，否则返回 HTTP `400`。显式租户引用必须通过格式校验，数据库只保存其 SHA-256 派生作用域。
+
+### POST `/api/banking/provider/benchmark-evidence`
+
+可信基准由受控 Benchmark Runner 先注册，再由预评估请求通过 `benchmarkEvidenceIds` 引用。注册接口使用独立 `GPUF_BENCHMARK_PRODUCER_TOKEN`，并按 `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` 中的 `keyId` 对 `payloadJson` 原始 UTF-8 字节执行 Ed25519 验签。Payload 必须绑定 64 位十六进制 `sourceRef`、参数 SHA-256、测试时间和不超过 30 天的有效期；证据表 INSERT-only。
+
+`benchmarkEvidenceIds` 非空时严格加载指定证据；为空时服务端按当前技术 `sourceRef` 自动选择每个 metric 最新且未过期的一条已验签证据。`scripts/run_signed_ollama_benchmark.sh` 一次运行会分别登记 `tokens_per_second` 和 `sustained_throughput_percent`，用于满足 T2 的 LLM 类别和 T1/T2 的稳定性类别。自动选择不会跨设备、接受过期证据或执行任意调用方命令。
+
+报告请求不能直接提交任意性能数值、命令、脚本或镜像地址。不存在、过期或 `sourceRef` 与设备技术来源不一致的证据返回 HTTP `422`。
+
+### POST `/api/banking/provider/pre-evaluations/from-client`
+
+使用现有 `gpu_assets`、`system_info`、`device_info` 和最近 30 天
+`device_daily_stats` 生成在线节点草稿。
+未提供 `assetName` 时使用 GPU 型号，不把客户端名称或主机名写入报告；报告中的在线
+来源引用使用 SHA-256，不直接暴露原始 `clientId`。
+
+```json
+{
+  "userId": "1",
+  "clientId": "00112233445566778899aabbccddeeff",
+  "assetName": "GPU节点-A01",
+  "benchmarkEvidenceIds": ["BENCH-2026-07-A01-TPS"]
+}
+```
+
+### POST `/api/banking/provider/pre-evaluations/challenge`
+
+签发一个 5 分钟有效且只能消费一次的离线采集 challenge。调用采集器时传入：
+
+```bash
+hw-asset-collector --challenge "$CHALLENGE" > report.json
+```
+
+### POST `/api/banking/provider/pre-evaluations/from-evidence`
+
+`hardwareEvidenceJson` 必须是 `report.json` 的原始文本。前端应使用 `File.text()` 读取，
+不能先解析再重新序列化。服务端重新计算采集器 SHA-256，并原子消费 challenge；哈希错误、
+challenge 过期或重放均返回 HTTP `422`。最大 4 MiB。
+只接受采集器默认的 `serials_redacted` 模式；包含非空序列号、UUID、WWN 或资产标签的
+报告返回 HTTP `422`。
+
+```json
+{
+  "userId": "1",
+  "assetName": "离线GPU节点-01",
+  "offlineAssetRef": "offline-asset:hmac:v1:<opaque>",
+  "hardwareEvidenceJson": "<report.json 原始文本>",
+  "benchmarkEvidenceIds": []
+}
+```
+
+内部编排服务应提供稳定、脱敏且租户绑定的 `offlineAssetRef`。GPUFabric 使用固定协议
+`gpuf.offline_asset_source.v1` 将它转换为 64 位 `sourceRef`；collector 的
+`payloadSha256` 继续只证明本次 challenge 报告完整性。旧调用方省略该字段时保持原来的
+单次 payload Hash 来源语义。可信 Runner 必须在提交同一份 collector JSON 前，使用会话
+返回的稳定 `sourceRef` 登记 Benchmark；提交时空 `benchmarkEvidenceIds` 会自动关联。
+
+使用 `jq -Rs` 构造请求，只转义外层字符串，不重新序列化采集报告：
+
+```bash
+jq -Rs --arg userId "1" --arg assetName "离线GPU节点-01" \
+  '{userId: $userId, assetName: $assetName, hardwareEvidenceJson: .}' \
+  report.json > request.json
+```
+
+### GET `/api/banking/provider/pre-evaluations/{reportId}`
+
+按报告编号读取保存的 JSON 快照。报告不存在返回 HTTP `404`；完整性哈希不匹配时返回
+HTTP `500`，不会返回被修改的数据。
+
+### GET `/api/banking/provider/pre-evaluations/{reportId}/html`
+
+返回创建时冻结的技术预评估 HTML 字节，`Content-Type` 为 `text/html; charset=utf-8`，`ETag` 和 `X-Content-SHA256` 声明 `gpuf.report-html-bytes.v1` 字节 Hash。读取时重新计算 Hash，不一致返回 HTTP `500`。HTML 只展示技术事实、可信基准和结构化缺失项，不展示估值、质押率、贷款额或授信资格。
+
+### GET `/internal/v1/technical-pre-evaluations/{reportId}`
+
+以原始字节完整性信封返回不可变 v1 报告，包含 `reportJson`、`reportSha256` 和
+`hashProfile: gpuf.report-json-bytes.v1`。新报告同时返回可选 `reportHtmlSha256` 与 `htmlHashProfile: gpuf.report-html-bytes.v1`，并新增可选 `technicalSnapshot` 引用；旧客户端可以忽略这些字段。
+
+### GET `/internal/v2/technical-snapshots/{snapshotId}`
+
+返回 `snapshotJson`、`snapshotSha256`、`hashProfile: gpuf.snapshot-json-bytes.v2` 和解析后的
+技术快照。每个非空技术叶子字段都带 provenance，质量限定为 `measured`、`observed`、
+`collected`、`catalog` 或 `derived`。快照不包含确权结论、市场金额、质押率、贷款额或银行结论。
+
+完整、同构且命中服务端规格目录的 GPU 清单还会返回 `assetConfiguration`：
+
+```json
+{
+  "schemaVersion": "gpuf.asset_configuration.v1",
+  "hashProfile": "gpuf.asset-configuration-lines.v1",
+  "canonicalModelId": "nvidia-a100-pcie-80gb",
+  "deviceForm": "pcie_card",
+  "gpuCount": 2,
+  "memoryPerGpuBytes": 80,
+  "configurationHash": "e60efc858d6231954cec34c58acd34d3ffbb59c44d73b8639f4a92d9afb8e9df"
+}
+```
+
+Hash 输入是以下固定 UTF-8 字节（末尾包含换行），不是重新序列化后的 JSON：
+
+```text
+gpuf.asset_configuration.v1
+canonicalModelId=<canonicalModelId>
+deviceForm=<deviceForm>
+gpuCount=<十进制整数>
+memoryPerGpuBytes=<十进制整数>
+```
+
+型号 ID 或设备形态缺失、逐卡清单不完整、型号/形态/逐卡显存不一致时省略该对象，不猜测市场可比配置。
+
+### DELETE `/api/banking/provider/pre-evaluations/{reportId}/evidence`
+
+清除该报告临时保留的原始离线 JSON，但保留证据 SHA-256、报告快照和清除时间。
+接口是幂等的；原文未保存或已清除时返回 `rawEvidencePurged: false`。
+
+默认不保存原始离线 JSON，只保存完整文档 SHA-256。仅当
+`GPUF_PRE_EVALUATION_STORE_RAW_EVIDENCE=true` 时临时保存原文，并要求
+`GPUF_PRE_EVALUATION_RAW_EVIDENCE_TTL_DAYS` 为 1–90 天，缺省为 30 天。API 进程每小时
+清理到期原文。未提供 `assetName` 时使用 GPU 型号，不把采集器主机名复制到报告快照。
+
+### 结构化技术结论
+
+新报告在保留 `missingEvidence` 和 `warnings` 兼容文本的同时，提供稳定的 `missingCodes`、`warningCodes` 和 `nextActions`。`evidenceScore` 与等级仅衡量技术证据质量；`valuation` 固定为 `null`，`eligibleForListing` 和 `eligibleForCreditPrecheck` 固定为 `false`。
+
+### 安全和聚合边界
+
+- `evidenceScore` 只是证据完整度，不是性能评分或银行信用评分。
+- 在线来源标记为 `authenticated_client_telemetry`，表示数据来自已认证 gpuf-c 遥测，不等同于服务端硬件证明。
+- 报告编号使用随机 UUID；快照 INSERT-only，并保存独立 SHA-256。
+- 离线哈希证明报告在 challenge 生成后未被传输篡改，但不等同于 TPM/TEE 厂商硬件证明；响应标记为 `self_reported_challenge_bound`。
+- v3 哈希只覆盖 collector、challenge 和 hardware；未被哈希覆盖的 `attestation.evidence_sources/warnings/missing_evidence` 不进入预评估结果。
+- 报告快照不可修改；原始离线 JSON 默认不落库，显式临时留存时可按 TTL 或清除接口删除。
+- GPU 规格按 `vendorId + deviceId` 优先匹配，不修改 `gpuf-c/common` 协议。
+- 多 GPU 规格保留在逐卡结构中；异构节点不生成单一架构/TDP/带宽。
+- 旧协议只有总显存时，多卡逐卡显存保持为空，不做平均猜测。
+- 上报 GPU 数量与逐卡清单不一致时，不根据部分逐卡数据生成节点汇总，也不标记为可挂牌。
+- 多卡互联拓扑未经探针验证时，不生成节点级互联带宽。
+- 当前报告固定为 `draft`，不构成正式估值或授信承诺。

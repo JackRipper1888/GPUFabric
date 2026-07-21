@@ -1,9 +1,13 @@
 pub mod apk;
 pub mod banking_admin;
+pub mod benchmark_evidence;
 pub mod client;
 pub mod compute_map;
+pub mod gpu_model_specs;
 pub mod models;
+pub mod pre_evaluation;
 pub mod stats;
+pub mod technical_snapshot;
 pub mod token_usage;
 
 const GPU_ASSETS_TABLE: &str = "gpu_assets";

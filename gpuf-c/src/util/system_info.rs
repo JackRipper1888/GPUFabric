@@ -23,6 +23,23 @@ use std::time::Duration;
 #[cfg(all(not(target_os = "macos"), not(target_os = "android"), feature = "nvml"))]
 use nvml_wrapper::NVML;
 
+#[cfg(any(feature = "cuda", test))]
+fn split_nvml_pci_device_id(pci_device_id: u32) -> Option<(u16, u16)> {
+    let vendor_id = (pci_device_id & 0xffff) as u16;
+    let device_id = (pci_device_id >> 16) as u16;
+    if vendor_id == 0 || vendor_id == u16::MAX || device_id == 0 || device_id == u16::MAX {
+        return None;
+    }
+    Some((vendor_id, device_id))
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn bytes_to_nearest_gib(bytes: u64) -> u16 {
+    const BYTES_PER_GIB: u64 = 1 << 30;
+    let rounded = bytes.saturating_add(BYTES_PER_GIB / 2) / BYTES_PER_GIB;
+    rounded.min(u16::MAX as u64) as u16
+}
+
 //TODO: pci not support sxm
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
@@ -720,51 +737,13 @@ pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(Dev
                     //get vendor_id and device_id from pci_info
                     let device_index = device.index().unwrap();
                     let (vendor_id, device_id) = if let Ok(pci_info) = device.pci_info() {
-                        //parse "0000:01:00.0" bus_id style
                         debug!(
                             "Device {} {} bus_id {}",
                             i,
                             device.name().unwrap_or("".to_string()),
                             pci_info.bus_id
                         );
-                        let parts: Vec<&str> =
-                            pci_info.bus_id.split(|c| c == ':' || c == '.').collect();
-                        if parts.len() >= 4 {
-                            let _domain = u32::from_str_radix(parts[0], 16).unwrap_or(0);
-
-                            #[cfg(all(
-                                target_os = "linux",
-                                any(target_arch = "x86", target_arch = "x86_64")
-                            ))]
-                            {
-                                let bus = u32::from_str_radix(parts[1], 16).unwrap_or(0);
-                                let device_num = u32::from_str_radix(parts[2], 16).unwrap_or(0);
-                                let function = u32::from_str_radix(parts[3], 16).unwrap_or(0);
-                                if let Some((vendor_id, device_id)) =
-                                    get_pci_ids(bus as u8, device_num as u8, function as u8)
-                                {
-                                    (vendor_id, device_id)
-                                } else {
-                                    (0, 0)
-                                }
-                            }
-                            #[cfg(target_os = "windows")]
-                            {
-                                get_pci_ids(device_index).unwrap_or((0, 0))
-                            }
-                            #[cfg(not(any(
-                                all(
-                                    target_os = "linux",
-                                    any(target_arch = "x86", target_arch = "x86_64")
-                                ),
-                                target_os = "windows"
-                            )))]
-                            {
-                                (0, 0)
-                            }
-                        } else {
-                            (0, 0)
-                        }
+                        split_nvml_pci_device_id(pci_info.pci_device_id).unwrap_or((0, 0))
                     } else {
                         (0, 0)
                     };
@@ -817,7 +796,7 @@ pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(Dev
                         set_u16_to_u128(
                             &mut device_info.memsize_gb,
                             index as usize,
-                            (meminfo.total >> 30) as u16,
+                            bytes_to_nearest_gib(meminfo.total),
                         );
                         //TODO: power_limit   watts unit
                         //TODO: total_memory  gb unit
@@ -828,7 +807,7 @@ pub async fn collect_device_info(engine_type: common::EngineType) -> Result<(Dev
                         );
 
                         total_tflops += to_tflops(device_id).unwrap_or(0.0);
-                        total_memory += meminfo.total >> 30;
+                        total_memory += u64::from(bytes_to_nearest_gib(meminfo.total));
                     }
                 }
             }
@@ -1170,6 +1149,23 @@ fn test_get_device_id() {
     let device_id = get_device_id();
     println!("device_id: {:?}", device_id);
     assert!(device_id.is_some());
+}
+
+#[test]
+fn test_split_nvml_pci_device_id() {
+    assert_eq!(
+        split_nvml_pci_device_id(0x2783_10de),
+        Some((0x10de, 0x2783))
+    );
+    assert_eq!(split_nvml_pci_device_id(0), None);
+    assert_eq!(split_nvml_pci_device_id(u32::MAX), None);
+}
+
+#[test]
+fn test_bytes_to_nearest_gib() {
+    assert_eq!(bytes_to_nearest_gib(12_282 * 1024 * 1024), 12);
+    assert_eq!(bytes_to_nearest_gib(80 * (1 << 30)), 80);
+    assert_eq!(bytes_to_nearest_gib(0), 0);
 }
 
 #[tokio::test]

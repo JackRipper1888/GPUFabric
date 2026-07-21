@@ -30,6 +30,7 @@ gpuf-android-sdk
 config/
 ./config/
 /target
+/dist/
 agent_artifacts/
 agent_flow.yaml
 analysis_flow.mmd

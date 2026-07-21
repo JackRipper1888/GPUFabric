@@ -2,11 +2,15 @@ use super::*;
 
 use anyhow::Result;
 use axum::{
-    routing::{get, post},
+    extract::DefaultBodyLimit,
+    routing::{delete, get, post},
     Router,
 };
 
-use crate::api_server::{apk, banking_admin, client, compute_map, models, points};
+use crate::api_server::{
+    apk, banking_admin, benchmark_evidence, client, compute_map, models, points, pre_evaluation,
+    technical_snapshot,
+};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
@@ -14,6 +18,7 @@ use tracing::{info, warn};
 #[allow(dead_code)] // API server utility methods
 impl ApiServer {
     pub async fn run_api_server(self: Arc<Self>, bind_addr: &str, port: u16) -> Result<()> {
+        pre_evaluation::start_evidence_retention_worker(self.db_pool.clone());
         let app = self.create_api_router().await;
         let bind = format!("{bind_addr}:{port}");
         if matches!(bind_addr, "0.0.0.0" | "::") {
@@ -32,6 +37,58 @@ impl ApiServer {
     // Create API Router
     pub async fn create_api_router(self: Arc<Self>) -> Router {
         let state = Arc::clone(&self);
+        let pre_evaluation_routes = Router::new()
+            .route(
+                "/api/banking/provider/benchmark-evidence",
+                post(benchmark_evidence::register),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/from-client",
+                post(pre_evaluation::create_from_client),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/challenge",
+                post(pre_evaluation::issue_challenge),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/from-evidence",
+                post(pre_evaluation::create_from_evidence)
+                    .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            )
+            .route(
+                "/internal/v1/technical-pre-evaluations/from-client",
+                post(pre_evaluation::create_from_client),
+            )
+            .route(
+                "/internal/v1/technical-pre-evaluations/challenge",
+                post(pre_evaluation::issue_challenge),
+            )
+            .route(
+                "/internal/v1/technical-pre-evaluations/from-evidence",
+                post(pre_evaluation::create_from_evidence)
+                    .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/:report_id",
+                get(pre_evaluation::get_report),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/:report_id/html",
+                get(pre_evaluation::get_report_html),
+            )
+            .route(
+                "/api/banking/provider/pre-evaluations/:report_id/evidence",
+                delete(pre_evaluation::purge_report_evidence),
+            )
+            .route(
+                "/internal/v1/technical-pre-evaluations/:report_id",
+                get(pre_evaluation::get_internal_report),
+            )
+            .route(
+                "/internal/v2/technical-snapshots/:snapshot_id",
+                get(technical_snapshot::get_internal_snapshot),
+            );
+
         Router::new()
             //user APIs
             // .route("/api/users", get(client::get_users))
@@ -86,6 +143,64 @@ impl ApiServer {
             .route("/api/apk/get", get(apk::get_apk))
             .route("/api/apk/list", get(apk::list_apk))
             .layer(CorsLayer::permissive())
+            .merge(pre_evaluation_routes)
             .with_state(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use redis::Client as RedisClient;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::Service;
+
+    fn test_server() -> Arc<ApiServer> {
+        let db_pool = PgPoolOptions::new()
+            .connect_lazy("postgres://assessment:assessment@127.0.0.1:1/assessment")
+            .unwrap();
+        let redis_client = Arc::new(RedisClient::open("redis://127.0.0.1:1/").unwrap());
+        Arc::new(ApiServer {
+            db_pool,
+            redis_client,
+        })
+    }
+
+    #[tokio::test]
+    async fn internal_pre_evaluation_create_routes_are_registered() {
+        let mut router = test_server().create_api_router().await;
+        let cases = [
+            (
+                "/internal/v1/technical-pre-evaluations/from-client",
+                r#"{"gpufUserRef":"user-1","gpufClientRef":"00112233445566778899aabbccddeeff"}"#,
+            ),
+            ("/internal/v1/technical-pre-evaluations/challenge", ""),
+            (
+                "/internal/v1/technical-pre-evaluations/from-evidence",
+                r#"{"hardwareEvidenceJson":"{}"}"#,
+            ),
+        ];
+
+        for (path, body) in cases {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let response = router.call(request).await.unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::SERVICE_UNAVAILABLE
+                ),
+                "{path}: {}",
+                response.status()
+            );
+        }
     }
 }

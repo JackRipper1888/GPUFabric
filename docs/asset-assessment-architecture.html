@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>算力资产评估系统技术架构 v2.3</title>
+  <style>
+    :root {
+      --ink: #17202a;
+      --muted: #5c6875;
+      --line: #d5dce3;
+      --surface: #ffffff;
+      --canvas: #f4f6f8;
+      --blue: #2563eb;
+      --green: #0f766e;
+      --amber: #b96508;
+      --red: #b42318;
+      --blue-soft: #edf4fc;
+      --green-soft: #edf7f2;
+      --amber-soft: #fff5e7;
+      --red-soft: #fff0ee;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: Inter, "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      letter-spacing: 0;
+    }
+
+    a { color: #1759bb; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 7px; font-size: 30px; line-height: 1.25; letter-spacing: 0; }
+    h2 { margin-bottom: 14px; font-size: 20px; line-height: 1.35; letter-spacing: 0; }
+    h3 { margin-bottom: 7px; font-size: 16px; line-height: 1.4; letter-spacing: 0; }
+    code { overflow-wrap: anywhere; color: #174f98; background: #eef4fa; padding: 1px 4px; border-radius: 2px; font-size: 12px; }
+
+    header { background: #fff; border-bottom: 1px solid var(--line); }
+    .header-inner, main, .footer-inner { width: min(1480px, calc(100% - 40px)); margin: 0 auto; }
+    .header-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px; align-items: end; padding: 28px 0 22px; }
+    .subtitle, .muted { color: var(--muted); }
+    .subtitle { margin: 0; }
+    .meta { display: grid; grid-template-columns: auto auto; gap: 3px 16px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .meta strong { color: var(--ink); font-weight: 700; }
+
+    nav { position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid var(--line); }
+    .nav-inner { width: min(1480px, calc(100% - 40px)); margin: 0 auto; display: flex; gap: 25px; overflow-x: auto; scrollbar-width: thin; }
+    .nav-inner a { flex: 0 0 auto; padding: 12px 0 10px; color: #394553; font-size: 13px; font-weight: 700; text-decoration: none; border-bottom: 2px solid transparent; }
+    .nav-inner a:hover { color: var(--blue); border-bottom-color: var(--blue); }
+
+    main { padding: 26px 0 54px; }
+    section { padding: 28px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 52px; }
+
+    .tag { display: inline-block; margin-bottom: 7px; padding: 2px 7px; border-radius: 3px; font-size: 11px; font-weight: 750; }
+    .tag.blue { color: #154da4; background: var(--blue-soft); }
+    .tag.green { color: #0b665e; background: var(--green-soft); }
+    .tag.amber { color: #8b4a06; background: var(--amber-soft); }
+    .tag.red { color: #9c2018; background: var(--red-soft); }
+    .tag.gray { color: #4b5563; background: #eef1f4; }
+
+    .summary-grid, .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--surface); }
+    .summary-item, .status-item { min-width: 0; padding: 17px 18px; border-right: 1px solid var(--line); }
+    .summary-item:last-child, .status-item:last-child { border-right: 0; }
+    .summary-item p, .status-item p { margin: 0; color: var(--muted); font-size: 13px; }
+    .status-line { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+    .status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--green); }
+    .status-dot.amber { background: var(--amber); }
+    .status-dot.blue { background: var(--blue); }
+    .status-dot.gray { background: #7b8794; }
+
+    .figure-shell { overflow-x: auto; margin-top: 16px; padding: 12px; background: #fff; border: 1px solid var(--line); }
+    .figure-shell img { display: block; width: 100%; min-width: 1120px; height: auto; }
+    .figure-caption { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); background: #fff; }
+    table { width: 100%; min-width: 980px; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 13px 15px; text-align: left; vertical-align: top; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    th:last-child, td:last-child { border-right: 0; }
+    tbody tr:last-child td { border-bottom: 0; }
+    th { background: #eef1f4; font-weight: 750; white-space: nowrap; }
+    .owner { font-weight: 700; white-space: nowrap; }
+
+    .source-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+    .source-item { min-width: 0; padding: 16px; border: 1px solid var(--line); border-top: 4px solid var(--green); border-radius: 6px; background: #fff; }
+    .source-item:nth-child(2) { border-top-color: var(--blue); }
+    .source-item:nth-child(3) { border-top-color: var(--amber); }
+    .source-item:nth-child(4) { border-top-color: var(--red); }
+    .source-item p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .flow-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; counter-reset: flow; }
+    .flow-step { counter-increment: flow; min-width: 0; min-height: 164px; padding: 16px; background: #fff; border: 1px solid var(--line); border-top: 4px solid var(--green); border-radius: 6px; }
+    .flow-step::before { content: counter(flow, decimal-leading-zero); display: block; margin-bottom: 8px; color: var(--green); font-size: 13px; font-weight: 800; }
+    .flow-step p { margin: 0; color: var(--muted); font-size: 13px; }
+    .flow-step.pending { border-top-color: #7b8794; }
+    .flow-step.pending::before { color: #687482; }
+    .flow-step.external { border-top-color: var(--amber); }
+    .flow-step.external::before { color: var(--amber); }
+
+    .state-track { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 16px; border: 1px solid var(--line); background: #fff; }
+    .state { position: relative; min-width: 0; padding: 13px 22px 13px 14px; border-right: 1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+    .state:last-child { border-right: 0; color: #0b665e; background: var(--green-soft); }
+    .state::after { content: "→"; position: absolute; right: 7px; color: #8b96a3; }
+    .state:last-child::after { content: ""; }
+    .branch-note { margin: 9px 0 0; color: var(--muted); font-size: 12px; }
+
+    .contract-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .contract { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .contract ul, .rule ul { margin: 10px 0 0; padding-left: 19px; }
+    .contract li, .rule li { margin: 5px 0; }
+
+    .callout { margin-top: 14px; padding: 14px 16px; border-left: 4px solid var(--amber); background: var(--amber-soft); color: #654109; font-size: 13px; }
+    .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .rule { padding: 18px; border: 1px solid var(--line); border-left: 4px solid var(--blue); background: #fff; }
+    .rule.danger { border-left-color: var(--red); }
+
+    .deployment { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .deployment-stage { min-width: 0; padding: 19px; border: 1px solid var(--line); background: #fff; }
+    .deployment-stage p { margin-bottom: 12px; color: var(--muted); }
+    .lane { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+    .lane span { min-width: 0; padding: 9px 8px; text-align: center; border: 1px solid #cbd4dc; background: #f7f9fb; font-size: 12px; overflow-wrap: anywhere; }
+
+    footer { border-top: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 12px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 20px; padding: 18px 0; }
+
+    @media (max-width: 980px) {
+      .header-inner { grid-template-columns: 1fr; align-items: start; }
+      .meta { justify-content: start; }
+      .summary-grid, .status-grid { grid-template-columns: 1fr 1fr; }
+      .summary-item:nth-child(2), .status-item:nth-child(2) { border-right: 0; }
+      .summary-item:nth-child(-n+2), .status-item:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .flow-list, .source-grid { grid-template-columns: 1fr 1fr; }
+      .contract-grid, .deployment { grid-template-columns: 1fr; }
+      .state-track { grid-template-columns: 1fr; }
+      .state { border-right: 0; border-bottom: 1px solid var(--line); }
+      .state:last-child { border-bottom: 0; }
+      .state::after { content: "↓"; }
+    }
+
+    @media (max-width: 620px) {
+      .header-inner, main, .footer-inner, .nav-inner { width: min(100% - 24px, 1480px); }
+      h1 { font-size: 24px; }
+      .summary-grid, .status-grid, .flow-list, .source-grid, .rules { grid-template-columns: 1fr; }
+      .summary-item, .status-item { border-right: 0; border-bottom: 1px solid var(--line); }
+      .summary-item:last-child, .status-item:last-child { border-bottom: 0; }
+      .lane { grid-template-columns: 1fr; }
+      .footer-inner { flex-direction: column; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      nav { display: none; }
+      main { width: 100%; padding: 0; }
+      section { break-inside: avoid; }
+      .figure-shell { overflow: visible; border: 0; padding: 0; }
+      .figure-shell img { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>算力资产评估系统技术架构</h1>
+        <p class="subtitle">区分已实现能力、对接中依赖与目标态，覆盖预评估、证据闭环、估值和正式报告链路。</p>
+      </div>
+      <div class="meta" aria-label="文档元信息">
+        <span>文档版本</span><strong>v2.3</strong>
+        <span>基线</span><strong>GPUFabric 预评估闭环 · Assessment 服务端核心闭环</strong>
+        <span>更新时间</span><strong>2026-07-20</strong>
+      </div>
+    </div>
+  </header>
+
+  <nav aria-label="文档目录">
+    <div class="nav-inner">
+      <a href="#overview">总体架构</a>
+      <a href="#delivery">实施状态</a>
+      <a href="#ownership">业务归属</a>
+      <a href="#pre-evaluation">预评估报告</a>
+      <a href="#gpufabric-convergence">GPUFabric 收敛</a>
+      <a href="#evidence">证据闭环</a>
+      <a href="#contracts">接口与身份</a>
+      <a href="#boundaries">安全边界</a>
+      <a href="#deployment">部署路线</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="overview">
+      <h2>总体架构</h2>
+      <div class="summary-grid" aria-label="核心组件摘要">
+        <div class="summary-item">
+          <span class="tag green">开源技术域</span>
+          <h3>GPUFabric</h3>
+          <p>采集、规范化、技术快照和可缺项预评估；不做确权、定价、质押率或授信判断。</p>
+        </div>
+        <div class="summary-item">
+          <span class="tag blue">业务入口域</span>
+          <h3>new-api</h3>
+          <p>承接用户、资产映射、任务、展示与下载授权；当前仅完成接口契约，代码尚未对接。</p>
+        </div>
+        <div class="summary-item">
+          <span class="tag amber">私有评估域</span>
+          <h3>asset-assessment-service</h3>
+          <p>已具备申请、补证、市场快照、估值、双人审核和报告冻结；真实依赖与签发仍待接入。</p>
+        </div>
+        <div class="summary-item">
+          <span class="tag red">受控依赖域</span>
+          <h3>受控内部依赖</h3>
+          <p>由 assessment-service 编排 Storage、Scanner、Reviewer 与 HSM；各组件使用独立身份，不能被 new-api 直接调用。</p>
+        </div>
+      </div>
+      <div class="figure-shell">
+        <img src="svg/asset-assessment-architecture.svg" width="1600" height="1700" alt="算力资产评估系统技术架构、证据闭环和实施状态图">
+      </div>
+      <p class="figure-caption">主图中的实线绿色节点表示当前代码已具备，蓝色表示外部业务入口，橙色表示私有依赖，灰色虚线表示下一阶段能力。</p>
+    </section>
+
+    <section id="delivery">
+      <h2>当前实施状态</h2>
+      <div class="status-grid" aria-label="实施状态摘要">
+        <div class="status-item">
+          <div class="status-line"><span class="status-dot"></span>代码与本地链路已验证</div>
+          <h3>Assessment Core</h3>
+          <p>AS-001 至 AS-005、AS-007 至 AS-011、AS-013，含评估、估值、双审、冻结、审计和 Docker 链路。</p>
+        </div>
+        <div class="status-item">
+          <div class="status-line"><span class="status-dot"></span>预评估代码闭环已完成</div>
+          <h3>GPUFabric</h3>
+          <p>兼容既有 clientId 协议；在线/离线、租户幂等、结构化码、JSON/HTML/v2 三 Hash 与签名基准证据均已完成本地端到端验证。</p>
+        </div>
+        <div class="status-item">
+          <div class="status-line"><span class="status-dot amber"></span>契约完成，真实依赖待接入</div>
+          <h3>Evidence Providers</h3>
+          <p>上传完成、扫描结果、人工复核接口已定义；对象存储网关、扫描器与审核工作台未联调。</p>
+        </div>
+        <div class="status-item">
+          <div class="status-line"><span class="status-dot amber"></span>服务端完成，生产依赖待接入</div>
+          <h3>Business &amp; Valuation</h3>
+          <p>市场、估值、双审和 JSON/HTML 冻结已有服务端闭环；new-api、真实供应商、PDF 签发和 HSM 仍待接入。</p>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin-top: 16px;">
+        <table>
+          <thead><tr><th>能力包</th><th>当前状态</th><th>已具备结果</th><th>下一验收点</th></tr></thead>
+          <tbody>
+            <tr><td class="owner">GF-001 至 011 / GF-015</td><td><span class="tag green">已完成</span></td><td>在线/离线归一化、来源质量、不可变 v1/v2、租户幂等、结构化码、JSON/HTML/v2 三 Hash、签名基准、防重放和隐私过滤。</td><td>冻结代码基线并在裸金属与真实离线节点完成发布回归。</td></tr>
+            <tr><td class="owner">GF-012 / 013</td><td><span class="tag amber">发布加固</span></td><td>静态服务 Token 和独立 benchmark producer Token 已按 subject 分权。</td><td>mTLS/OAuth audience/scope、密钥轮换、可靠事件、重试和死信验收。</td></tr>
+            <tr><td class="owner">GF-014</td><td><span class="tag gray">持续扩充</span></td><td>GPU 规格目录已有首批有来源、带版本的数据。</td><td>覆盖目标型号、异构/多卡场景并建立目录复核和发布流程。</td></tr>
+            <tr><td class="owner">AS-001 / 002</td><td><span class="tag green">已完成</span></td><td>服务骨架、PostgreSQL 迁移、服务身份、审计框架和独立本地 Git 回滚基线。</td><td>由管理员创建内部私有远端并推送 commit/tag。</td></tr>
+            <tr><td class="owner">AS-003</td><td><span class="tag green">已完成</span></td><td>assessment 创建、查询、幂等、租户隔离和状态骨架。</td><td>由 new-api 按用户资产映射发起真实请求。</td></tr>
+            <tr><td class="owner">AS-004</td><td><span class="tag green">已完成</span></td><td>GPUFabric v1 JSON、HTML 和 v2 快照客户端、DTO 适配与三 Hash 验证。</td><td>真实三 Hash 验证已通过；下一步由 new-api 保存并传递技术引用。</td></tr>
+            <tr><td class="owner">AS-005</td><td><span class="tag green">已完成</span></td><td>上传完成、扫描、复核、过期与拒绝状态迁移。</td><td>真实文件完成一次 gateway → scanner → reviewer 联调。</td></tr>
+            <tr><td class="owner">AS-011</td><td><span class="tag green">已完成</span></td><td>事务 Outbox、回调重试与投递审计。</td><td>new-api 实现回调接收、幂等和验签。</td></tr>
+            <tr><td class="owner">AS-006</td><td><span class="tag amber">部分完成</span></td><td>GPUFabric 已完成签名基准证据登记、验签、设备绑定、时效和跨设备拒绝。</td><td>部署生产 benchmark runner，接入业务评估策略和密钥生命周期。</td></tr>
+            <tr><td class="owner">AS-007 至 010 / 013</td><td><span class="tag amber">服务端完成</span></td><td>授权样本、独立核验、不可变市场快照、版本化估值、职责分离双审和 JSON/HTML 冻结已实现。</td><td>真实市场许可与样本、Reviewer 联合身份、PDF 签发/撤销/下载生命周期。</td></tr>
+            <tr><td class="owner">AS-012</td><td><span class="tag gray">待开发</span></td><td>Signing Service / HSM 边界已定义。</td><td>不可导出密钥、证书链、签名和可信时间戳联调。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="ownership">
+      <h2>业务与数据归属</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>组件</th><th>主要职责</th><th>允许保存</th><th>禁止保存或决策</th><th>输出</th></tr></thead>
+          <tbody>
+            <tr><td class="owner">gpuf-c / collector</td><td>采集硬件库存、运行遥测，执行受控基准任务。</td><td>本机短期任务状态；发送前完成隐私过滤。</td><td>客户身份、权属材料、价格、贷款额和银行结论。</td><td>challenge 绑定的设备技术证据。</td></tr>
+            <tr><td class="owner">GPUFabric</td><td>验证来源、规范化数据、匹配规格，生成技术快照和可缺项预评估。</td><td>技术快照、证据哈希、规格来源与版本。</td><td>权属判断、原始业务材料、市场价格、估值/质押/授信规则、审批意见和签章私钥。</td><td><code>technical_snapshot.v2</code>、<code>pre_evaluation_report.v1</code></td></tr>
+            <tr><td class="owner">new-api</td><td>用户认证、资产映射、任务编排、状态展示、通知和下载授权。</td><td>用户与资产关系、任务状态、报告引用、下载审计。</td><td>原始证据文件、对象存储内部键、完整风控解释。</td><td>用户侧评估任务与报告摘要 API。</td></tr>
+            <tr><td class="owner">asset-assessment-service</td><td>管理申请、证据要求、状态机、可信评估、审批、报告生命周期和回调。</td><td>证据元数据、策略版本、结论、审批、审计和 Outbox。</td><td>设备任意命令执行；不直接暴露私有对象。</td><td><code>banking.asset_assessment.v1</code></td></tr>
+            <tr><td class="owner">Storage / Scanner / Reviewer</td><td>保存原始证据、执行恶意内容扫描、完成受权人工复核。</td><td>各自职责所需的最少数据和审计记录。</td><td>绕过状态机修改评估结论；跨租户访问。</td><td>受身份绑定的完成、扫描和复核事件。</td></tr>
+            <tr><td class="owner">Signing / HSM</td><td>对冻结报告签章，提供证书链和可信时间戳。</td><td>密钥句柄、签名记录、证书状态。</td><td>用户业务、评估规则、原始设备遥测。</td><td>签章 PDF、签名摘要、时间戳凭证。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="pre-evaluation">
+      <h2>自动预评估报告</h2>
+      <p class="muted">GPUFabric 只根据采集值、可信实测值和版本化公开规格生成技术预评估。字段允许缺失，每个结论必须携带来源与质量等级；市场价格、确权、质押率、贷款额和银行结论不进入 v2 技术快照。v1 如需兼容旧客户端，只保留已废弃的空字段，不再执行金融计算。</p>
+      <p class="muted">字段模型见 <a href="pre-evaluation-data-model-and-roadmap.md">《算力资产预评估数据模型与开发路线》</a>，跨服务任务见 <a href="pre-evaluation-cross-service-integration.md">《预评估与正式评估跨服务业务对接文档》</a>。</p>
+      <div class="source-grid" aria-label="预评估数据优先级">
+        <article class="source-item"><span class="tag green">优先级 1</span><h3>实测与长期观测</h3><p>签名基准、运行历史、温度、利用率、功耗、错误与稳定性。</p></article>
+        <article class="source-item"><span class="tag blue">优先级 2</span><h3>探针采集库存</h3><p>GPU、CPU、内存、驱动、显存、PCIe、功率限制和操作系统。</p></article>
+        <article class="source-item"><span class="tag amber">优先级 3</span><h3>版本化规格目录</h3><p>架构、制程、理论算力、带宽、TDP、支持精度及资料来源。</p></article>
+        <article class="source-item"><span class="tag red">私有业务证据</span><h3>不能由硬件推断</h3><p>权属、市场价格、折旧、质押率、贷款额和正式授信结论。</p></article>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>报告章节</th><th>已有数据可生成内容</th><th>缺少的真实支撑</th><th>处理原则</th></tr></thead>
+          <tbody>
+            <tr><td class="owner">01 基础备案</td><td>资产别名、型号、数量、采集时间、来源类型、完整性等级。</td><td>客户、权属、资产登记号。</td><td>hostname 和序列号默认不进入公开报告。</td></tr>
+            <tr><td class="owner">02 硬件台账</td><td>CPU、内存、逐卡 GPU、显存、驱动、PCIe、功率和规格目录。</td><td>采购时间、维保和发票。</td><td>旧协议多卡总显存不得平均伪造成逐卡值。</td></tr>
+            <tr><td class="owner">03 运行状态</td><td>在线、利用率、温度、显存使用、功耗、错误与观测窗口。</td><td>足够长的连续运行历史。</td><td>单点采集不解释为长期稳定性。</td></tr>
+            <tr><td class="owner">04 技术性能</td><td>理论 FP16/FP32/INT8、带宽，以及已接入的实测吞吐和时延。</td><td>统一套件下的签名实测。</td><td>理论规格与实测结果分栏，不能互相替代。</td></tr>
+            <tr><td class="owner">05 技术评分</td><td>硬件完整度、运行证据、基准覆盖和数据可信等级。</td><td>业务风险和市场流动性。</td><td>明确标记为技术分，不解释为银行信用评分。</td></tr>
+            <tr><td class="owner">06 推荐用途</td><td>根据型号、显存、精度和实测性能推荐推理、训练或图像任务。</td><td>真实租赁订单和收益记录。</td><td>只给条件式用途建议，不承诺收益。</td></tr>
+            <tr><td class="owner">07 估值与可贷</td><td>v2 技术快照不包含该章节；v1 兼容字段固定为空。</td><td>市场价格源、折旧、成色、权属、风控与审批。</td><td>由 asset-assessment-service 在业务证据齐备后计算，GPUFabric 不生成金额或授信资格。</td></tr>
+            <tr><td class="owner">08 结论与缺失项</td><td>技术能力、证据完整度、风险提示和下一步补证建议。</td><td>正式审核、机构签章。</td><td>预评估不构成正式估值或授信承诺。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="gpufabric-convergence">
+      <h2>GPUFabric 完成项与发布前工作</h2>
+      <p class="muted">现有硬件采集已经足以生成 T0 技术预评估，不需要修改 gpuf-c / gpuf-s 的 clientId 生成、存储或查询协议。预评估代码闭环已经完成；以下区分已验收能力与生产发布加固，不扩张到市场与信贷业务。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>顺序</th><th>优先级</th><th>修改项</th><th>完成标准</th><th>明确不做</th></tr></thead>
+          <tbody>
+            <tr><td class="owner">1</td><td><span class="tag green">已完成</span></td><td>清理 v1 中估值、质押率、可贷额度和授信资格的计算逻辑。</td><td>v1 兼容字段固定为 <code>null/false</code>；v2 不含业务字段；相关计算已移除并通过兼容测试。</td><td>不接收市场价格、权属结论或正式授信输入。</td></tr>
+            <tr><td class="owner">2</td><td><span class="tag green">已完成</span></td><td>增加主体、租户与操作范围的 <code>Idempotency-Key</code> 和请求摘要。</td><td>同键同请求复用报告；同键不同请求返回 409；租户和服务主体只保存 SHA-256 引用。</td><td>不改变现有 clientId，也不把 clientId 写入报告。</td></tr>
+            <tr><td class="owner">3</td><td><span class="tag green">已完成</span></td><td>接入可信 <code>BenchmarkEvidence</code>。</td><td>Ed25519 签名、设备绑定、参数版本、有效期、不可变存储、伪造/过期/跨设备拒绝均已验证。</td><td>不允许报告请求携带任意命令、脚本、镜像或未签名性能数字。</td></tr>
+            <tr><td class="owner">4</td><td><span class="tag green">已完成</span></td><td>稳定 <code>missingCodes</code>、<code>warningCodes</code>、<code>nextActions</code> 和冻结 HTML。</td><td>JSON、HTML 与 v2 技术快照均有内容 Hash；调用方不依赖自由文本判断流程。</td><td>不输出银行风险等级或信用评分代码。</td></tr>
+            <tr><td class="owner">5</td><td><span class="tag amber">发布前</span></td><td>完成离线 collector、裸金属部署和服务身份回归。</td><td>challenge 过期/重放、Hash、隐私模式、请求大小、TTL 清理、mTLS/OAuth scope 与 Token 轮换全部通过。</td><td>不保存不必要的 hostname、序列号、UUID、WWN 和资产标签。</td></tr>
+            <tr><td class="owner">6</td><td><span class="tag gray">后续</span></td><td>扩充有来源版本的 GPU 规格目录并发布可靠快照事件。</td><td>目标型号、异构/多卡场景和目录来源可复核；事件支持重试、去重和死信处理。</td><td>不根据不完整逐卡数据猜测节点级规格。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">完成结论：GPUFabric 的 T0 技术预评估后端已闭环，asset-assessment-service 已验证 JSON/HTML/v2 三 Hash；市场、权属、估值、正式报告和授信仍属于私有业务域，new-api 仍是尚待开发的用户入口与任务编排层。</div>
+    </section>
+
+    <section id="evidence">
+      <h2>AS-005 证据闭环</h2>
+      <p class="muted">服务端状态机已实现；步骤 04 至 07 需要真实对象存储网关、扫描器、审核端和 new-api 回调接收方完成生产联调。</p>
+      <div class="flow-list">
+        <article class="flow-step pending"><span class="tag blue">new-api 待对接</span><h3>创建评估申请</h3><p>new-api 生成幂等请求并调用 AS-001，assessment-service 返回评估编号与当前状态。</p></article>
+        <article class="flow-step"><span class="tag green">服务端已实现</span><h3>读取补证要求</h3><p>按评估类型和当前状态返回证据类型、必填性、格式、大小和过期规则。</p></article>
+        <article class="flow-step"><span class="tag green">服务端已实现</span><h3>创建上传会话</h3><p>生成短时上传凭证；客户端只获得上传目标，不获得内部对象键和长期读取权限。</p></article>
+        <article class="flow-step external"><span class="tag amber">真实依赖待接入</span><h3>直传私有存储</h3><p>浏览器或受控客户端直接上传，文件内容不经过 new-api 和 GPUFabric。</p></article>
+        <article class="flow-step external"><span class="tag amber">gateway 身份</span><h3>确认上传完成</h3><p><code>object-storage-gateway</code> 以限定 scope 提交对象摘要、大小和完成时间。</p></article>
+        <article class="flow-step external"><span class="tag amber">scanner 身份</span><h3>提交扫描结果</h3><p><code>evidence-scanner</code> 只可提交扫描结论，不能代替审核人批准证据。</p></article>
+        <article class="flow-step external"><span class="tag amber">reviewer 身份</span><h3>人工复核</h3><p><code>assessment-reviewer</code> 执行通过、拒绝或要求重传；意见保留在私有审计域。</p></article>
+        <article class="flow-step"><span class="tag green">状态机已实现</span><h3>进入估值就绪</h3><p>全部必需证据为 verified 后转为 <code>ready_for_valuation</code>，并通过 Outbox 发出回调事件。</p></article>
+      </div>
+      <div class="state-track" aria-label="证据主状态机">
+        <div class="state">pending_upload</div>
+        <div class="state">scanning</div>
+        <div class="state">pending_review</div>
+        <div class="state">verified</div>
+        <div class="state">ready_for_valuation</div>
+      </div>
+      <p class="branch-note">异常分支：上传会话超时进入 <code>expired</code>；扫描或人工复核失败进入 <code>rejected</code>；重传必须创建新会话并保留旧记录审计链。</p>
+      <h3 style="margin-top: 18px;">受控依赖调用关系</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>依赖</th><th>业务触发者</th><th>实际调用主体</th><th>允许动作</th><th>主要限制</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td class="owner">Private Storage</td><td>用户经 new-api 申请补证；assessment-service 创建上传会话。</td><td>浏览器/受控客户端直传；<code>object-storage-gateway</code> 回调完成。</td><td>写入一个绑定 assessment/evidence 的对象，回传长度与 SHA-256。</td><td>短时凭证；禁止 list、跨租户读写、长期读取和暴露内部对象键。</td><td><span class="tag amber">待接入</span></td></tr>
+            <tr><td class="owner">Evidence Scanner</td><td>上传完成后的存储事件或 assessment workflow。</td><td><code>evidence-scanner</code></td><td>临时只读指定对象，提交 <code>clean/infected</code>、MIME 与 SHA-256。</td><td>不能批准证据、执行估值、读取其他租户对象或修改原文件。</td><td><span class="tag amber">待接入</span></td></tr>
+            <tr><td class="owner">Reviewer Workbench</td><td>assessment-service 根据 <code>pending_review</code> 分配审核任务。</td><td>人工审核员通过 <code>assessment-reviewer</code> 后端身份调用。</td><td>对受派发证据执行 <code>verify/reject</code>。</td><td>不能修改文件摘要、价格、估值和系统审计；完整意见不进入通用回调。</td><td><span class="tag amber">待接入</span></td></tr>
+            <tr><td class="owner">Signing Service / HSM</td><td>正式审核通过后，由内部签发身份请求 <code>issue</code>。</td><td>Report Freezer / Signing Worker</td><td>仅对已冻结报告摘要签名并返回证书链与时间戳。</td><td>私钥不可导出；new-api 不可调用；HSM 不处理原始证据、估值规则或用户业务。</td><td><span class="tag gray">AS-012</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="contracts">
+      <h2>接口契约与服务身份</h2>
+      <p class="muted">接口按提供方归属。new-api 面向用户，asset-assessment-service 面向内部业务与受控依赖，GPUFabric 只提供技术事实。</p>
+      <div class="contract-grid">
+        <article class="contract">
+          <span class="tag green">GPUFabric · 已有代码</span>
+          <h3>技术事实接口</h3>
+          <ul>
+            <li><code>POST /api/banking/provider/pre-evaluations/from-client</code></li>
+            <li><code>POST /api/banking/provider/pre-evaluations/challenge</code></li>
+            <li><code>POST /api/banking/provider/pre-evaluations/from-evidence</code></li>
+            <li><code>GET /api/banking/provider/pre-evaluations/{reportId}</code></li>
+            <li><code>DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence</code></li>
+            <li><code>GET /internal/v1/technical-pre-evaluations/{reportId}</code></li>
+            <li><code>GET /internal/v2/technical-snapshots/{snapshotId}</code> <span class="tag green">已实现</span></li>
+          </ul>
+          <p class="muted"><a href="api/gpufabric-assessment-api.md">GPUFabric API 契约</a></p>
+        </article>
+        <article class="contract">
+          <span class="tag amber">assessment-service · AS-005</span>
+          <h3>评估与证据接口</h3>
+          <ul>
+            <li><code>POST /internal/v1/asset-assessments</code></li>
+            <li><code>GET /internal/v1/asset-assessments/{assessmentId}</code></li>
+            <li><code>GET .../{assessmentId}/evidence-requirements</code></li>
+            <li><code>POST .../{assessmentId}/evidence-sessions</code></li>
+            <li><code>POST .../{evidenceId}/upload-completions</code></li>
+            <li><code>POST .../{evidenceId}/scan-results</code></li>
+            <li><code>POST .../{evidenceId}/review-actions</code></li>
+          </ul>
+          <p class="muted"><a href="api/asset-assessment-service-api.md">Assessment Service API 契约</a></p>
+        </article>
+        <article class="contract">
+          <span class="tag gray">new-api · 契约完成 / 代码待开发</span>
+          <h3>用户业务接口</h3>
+          <ul>
+            <li><code>POST /api/asset-assessments</code></li>
+            <li><code>GET /api/asset-assessments/{assessmentId}</code></li>
+            <li><code>GET .../{assessmentId}/evidence-requirements</code></li>
+            <li><code>POST .../{assessmentId}/evidence-sessions</code></li>
+            <li><code>GET .../{assessmentId}/download</code></li>
+            <li><code>POST /api/banking/callback/assessment</code></li>
+          </ul>
+          <p class="muted"><a href="api/new-api-asset-assessment-api.md">new-api API 契约</a></p>
+        </article>
+      </div>
+      <div class="callout">GPUFabric 当前使用可轮换的长随机 Bearer Token 作为过渡服务凭据；生产发布前必须增加独立 audience/scope 的 mTLS 或 OAuth2 服务身份。浏览器不得直接持有或调用该凭据。</div>
+      <div class="table-wrap" style="margin-top: 16px;">
+        <table>
+          <thead><tr><th>调用主体</th><th>最小权限</th><th>允许调用</th><th>禁止行为</th></tr></thead>
+          <tbody>
+            <tr><td class="owner"><code>new-api</code></td><td>申请、查询、补证会话、下载授权</td><td>用户业务所需的 assessment API。</td><td>冒充 scanner/reviewer，读取原始私有对象。</td></tr>
+            <tr><td class="owner"><code>object-storage-gateway</code></td><td><code>assessment:evidence:complete</code></td><td>仅上传完成回调。</td><td>提交扫描、复核或估值结果。</td></tr>
+            <tr><td class="owner"><code>evidence-scanner</code></td><td><code>assessment:evidence:scan</code></td><td>仅扫描结果接口。</td><td>批准证据、读取其他租户任务。</td></tr>
+            <tr><td class="owner"><code>assessment-reviewer</code></td><td><code>assessment:review</code></td><td>仅受派发证据的复核动作。</td><td>修改原始证据摘要或系统审计记录。</td></tr>
+            <tr><td class="owner"><code>report-signing-worker</code></td><td><code>assessment:issue</code> + HSM 签名策略</td><td>仅在 approved 状态冻结并签发报告。</td><td>由 new-api 代调用、签署未冻结内容或导出私钥。</td></tr>
+            <tr><td class="owner"><code>assessment-callback</code></td><td>目标端点级投递权限</td><td>向 new-api 投递签名、幂等事件。</td><td>回传原始证据、内部对象键和私有审核意见。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">兼容原则：旧的 <code>ASSESSMENT_SERVICE_TOKEN</code> 只映射为 <code>new-api</code> 主体；新增依赖必须使用 <code>ASSESSMENT_SERVICE_CREDENTIALS_JSON</code> 配置独立 subject 与 scope，不能共用万能 Token。</div>
+    </section>
+
+    <section id="boundaries">
+      <h2>安全与开源边界</h2>
+      <div class="rules">
+        <article class="rule">
+          <h3>可以进入开源仓库</h3>
+          <ul>
+            <li>Schema、OpenAPI、状态机、迁移、验签框架、Mock Provider 和通用审计结构。</li>
+            <li>硬件采集、隐私过滤、规格目录、技术预评估、受控基准和来源追踪。</li>
+            <li>通用报告模板、签名验签和 HSM 适配接口，不包含机构素材与生产密钥。</li>
+            <li>示例数据必须合成，日志默认遮蔽 Token、对象键、序列号和客户标识。</li>
+          </ul>
+        </article>
+        <article class="rule danger">
+          <h3>必须保持私有</h3>
+          <ul>
+            <li>客户身份、合同、发票、设备序列号、原始证据文件、完整报告和审批意见。</li>
+            <li>真实价格源授权、市场聚合规则、风险权重、质押策略和授信结果。</li>
+            <li>生产端点、数据库凭据、服务 Token、签章证书、HSM 密钥和密钥句柄映射。</li>
+            <li>对象存储内部键不得经 new-api、GPUFabric、通用错误信息或回调载荷泄露。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="deployment">
+      <h2>部署与联调路线</h2>
+      <div class="deployment">
+        <article class="deployment-stage">
+          <span class="tag green">已验证</span>
+          <h3>本地完整基础链路</h3>
+          <p>GPUFabric 与 asset-assessment-service 已完成在线/离线、签名基准、幂等、迁移、三 Hash、健康检查和服务身份负例验证。</p>
+          <div class="lane"><span>GPUFabric</span><span>Assessment Core</span><span>Triple Hash</span></div>
+        </article>
+        <article class="deployment-stage">
+          <span class="tag amber">下一步</span>
+          <h3>裸金属集成环境</h3>
+          <p>冻结并发布当前代码基线，在裸金属和真实离线节点复验迁移、隐私模式、Token 轮换、三 Hash 与依赖降级。</p>
+          <div class="lane"><span>Release Baseline</span><span>Bare Metal</span><span>Offline Regression</span></div>
+        </article>
+        <article class="deployment-stage">
+          <span class="tag red">生产目标</span>
+          <h3>独立信任域</h3>
+          <p>业务入口、评估服务、证据存储和 HSM 分区部署，服务间使用 mTLS 或短时凭证并执行最小权限。</p>
+          <div class="lane"><span>Public / BFF</span><span>Assessment VPC</span><span>Signing / HSM</span></div>
+        </article>
+      </div>
+      <div class="callout">当前执行顺序：完成非 new-api 本地回归与代码归档 → new-api 用户预评估和正式申请 → 真实证据链与生产 benchmark runner → 市场许可及生产样本治理 → PDF/签发/撤销/下载与 HSM。详细依赖和验收标准见 <a href="asset-assessment-remaining-work.md">《算力资产评估剩余任务执行顺序》</a>。</div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <span>GPUFabric · Compute Asset Assessment Architecture v2.3</span>
+      <span>代码可开源，客户数据、业务规则、生产凭据、私钥与正式决策保持私有。</span>
+    </div>
+  </footer>
+</body>
+</html>

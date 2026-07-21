@@ -1,10 +1,14 @@
 pub mod apk;
 pub mod banking_admin;
+pub mod benchmark_evidence;
 pub mod client;
 pub mod compute_map;
 pub mod handle_api;
 pub mod models;
 pub mod points;
+pub mod pre_evaluation;
+pub mod report_html;
+pub mod technical_snapshot;
 
 use anyhow::Result;
 use redis::Client as RedisClient;

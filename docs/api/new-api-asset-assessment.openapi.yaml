@@ -1,0 +1,937 @@
+openapi: 3.0.3
+info:
+  title: new-api Asset Pre-evaluation and Assessment API
+  version: 1.0.0
+  description: |
+    Browser-facing contract implemented by new-api. Downstream GPUFabric and
+    asset-assessment-service internal APIs are documented separately.
+servers:
+  - url: /
+tags:
+  - name: Banking Assets
+  - name: Banking Pre-evaluations
+  - name: Banking Assessments
+  - name: Assessment Callback
+
+paths:
+  /api/banking/provider/assets:
+    post:
+      tags: [Banking Assets]
+      summary: Create an online or offline asset binding
+      operationId: createBankingAsset
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssetRequest'
+      responses:
+        '201':
+          description: Created or replayed idempotent result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Asset'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    get:
+      tags: [Banking Assets]
+      summary: List assets owned by the authenticated user
+      operationId: listBankingAssets
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Asset page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetListEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/banking/provider/assets/{assetRef}:
+    parameters:
+      - $ref: '#/components/parameters/AssetRef'
+    get:
+      tags: [Banking Assets]
+      summary: Get one owned asset
+      operationId: getBankingAsset
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Asset
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/Asset'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Banking Assets]
+      summary: Disable an asset binding
+      operationId: disableBankingAsset
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '204': {description: Disabled}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /api/banking/provider/pre-evaluations:
+    post:
+      tags: [Banking Pre-evaluations]
+      summary: Start an online technical pre-evaluation
+      operationId: createOnlinePreEvaluation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOnlinePreEvaluationRequest'
+      responses:
+        '202':
+          description: Task accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreEvaluationEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    get:
+      tags: [Banking Pre-evaluations]
+      summary: List pre-evaluation tasks
+      operationId: listPreEvaluations
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/PreEvaluationStatus'}
+      responses:
+        '200':
+          description: Task page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreEvaluationListEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/banking/provider/pre-evaluations/offline-sessions:
+    post:
+      tags: [Banking Pre-evaluations]
+      summary: Create an offline collector challenge
+      operationId: createOfflinePreEvaluationSession
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOfflineSessionRequest'
+      responses:
+        '201':
+          description: Challenge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OfflineSessionEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/pre-evaluations/{taskRef}:
+    parameters:
+      - $ref: '#/components/parameters/TaskRef'
+    get:
+      tags: [Banking Pre-evaluations]
+      summary: Get a pre-evaluation task
+      operationId: getPreEvaluation
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Task projection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreEvaluationEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/banking/provider/pre-evaluations/{taskRef}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/TaskRef'
+    post:
+      tags: [Banking Pre-evaluations]
+      summary: Submit raw offline collector JSON
+      description: |
+        The body is limited to 4 MiB and is forwarded without reserialization.
+        It must never be persisted or logged by new-api.
+      operationId: submitOfflineCollectorEvidence
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '202':
+          description: Evidence accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreEvaluationEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/pre-evaluations/{taskRef}/html:
+    parameters:
+      - $ref: '#/components/parameters/TaskRef'
+    get:
+      tags: [Banking Pre-evaluations]
+      summary: Get integrity-checked frozen HTML
+      operationId: getPreEvaluationHtml
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Frozen report HTML
+          headers:
+            Cache-Control:
+              schema: {type: string, example: 'private, no-store'}
+            Content-Security-Policy:
+              schema: {type: string}
+          content:
+            text/html:
+              schema: {type: string}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/asset-assessments:
+    post:
+      tags: [Banking Assessments]
+      summary: Start a formal T1 or T2 assessment
+      operationId: createAssetAssessment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssessmentRequest'
+      responses:
+        '202':
+          description: Assessment accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    get:
+      tags: [Banking Assessments]
+      summary: List formal assessments
+      operationId: listAssetAssessments
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/AssessmentDisplayStatus'}
+      responses:
+        '200':
+          description: Assessment page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentListEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/banking/provider/asset-assessments/{assessmentId}:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    get:
+      tags: [Banking Assessments]
+      summary: Get assessment progress and report projection
+      operationId: getAssetAssessment
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Assessment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/banking/provider/asset-assessments/{assessmentId}/evidence-requirements:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    get:
+      tags: [Banking Assessments]
+      summary: Get current evidence requirements
+      operationId: getAssessmentEvidenceRequirements
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Requirements
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceRequirementsEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/asset-assessments/{assessmentId}/evidence-sessions:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    post:
+      tags: [Banking Assessments]
+      summary: Create a direct evidence upload grant
+      operationId: createAssessmentEvidenceSession
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEvidenceSessionRequest'
+      responses:
+        '201':
+          description: Sensitive short-lived upload grant; do not cache
+          headers:
+            Cache-Control:
+              schema: {type: string, example: no-store}
+            Referrer-Policy:
+              schema: {type: string, example: no-referrer}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceSessionEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/asset-assessments/{assessmentId}/downloads:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    post:
+      tags: [Banking Assessments]
+      summary: Create a short-lived formal report download grant
+      description: Uses the assessment report projection implemented by AS-EXT-001.
+      operationId: createAssessmentReportDownload
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/NewApiUser'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDownloadRequest'
+      responses:
+        '201':
+          description: Sensitive grant valid for at most 120 seconds
+          headers:
+            Cache-Control:
+              schema: {type: string, example: no-store}
+            Referrer-Policy:
+              schema: {type: string, example: no-referrer}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadEnvelope'
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '410': {$ref: '#/components/responses/Gone'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/callback/assessment:
+    post:
+      tags: [Assessment Callback]
+      summary: Receive an assessment-service status event
+      operationId: receiveAssessmentCallback
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - $ref: '#/components/parameters/EventTimestamp'
+        - $ref: '#/components/parameters/EventSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssessmentEvent'
+      responses:
+        '200':
+          description: Accepted, including an exact duplicate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+security:
+  - UserBearer: []
+  - UserSession: []
+
+components:
+  securitySchemes:
+    UserBearer:
+      type: http
+      scheme: bearer
+      description: Existing new-api user access token. New-Api-User is also required.
+    UserSession:
+      type: apiKey
+      in: cookie
+      name: session
+      description: Existing new-api authenticated session cookie.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]+$'
+    NewApiUser:
+      name: New-Api-User
+      in: header
+      required: true
+      description: Required by existing new-api UserAuth middleware for both session and Bearer authentication.
+      schema: {type: string}
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: {type: string, maxLength: 128}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 1, default: 1}
+    PageSize:
+      name: pageSize
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    AssetRef:
+      name: assetRef
+      in: path
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 64}
+    TaskRef:
+      name: taskRef
+      in: path
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 64}
+    AssessmentId:
+      name: assessmentId
+      in: path
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 128}
+    EventId:
+      name: X-Event-ID
+      in: header
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 128}
+    EventTimestamp:
+      name: X-Event-Timestamp
+      in: header
+      required: true
+      schema: {type: string, pattern: '^[0-9]{10}$'}
+    EventSignature:
+      name: X-Event-Signature
+      in: header
+      required: true
+      schema: {type: string, pattern: '^v1=[0-9a-f]{64}$'}
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success, code, message, data, requestId]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: string}
+        message: {type: string}
+        data: {}
+        requestId: {type: string}
+    ErrorEnvelope:
+      type: object
+      required: [success, code, message, retryable, requestId]
+      properties:
+        success: {type: boolean, enum: [false]}
+        code: {type: string}
+        message: {type: string}
+        retryable: {type: boolean}
+        details: {type: object, additionalProperties: true}
+        requestId: {type: string}
+    CreateAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, displayName, source]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        displayName: {type: string, minLength: 1, maxLength: 100}
+        source:
+          type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [gpuf_online, offline_collector]
+            gpufUserRef: {type: string, minLength: 1, maxLength: 512}
+            gpufClientRef: {type: string, minLength: 1, maxLength: 512}
+    Asset:
+      type: object
+      required: [assetRef, displayName, sourceType, status, createdAt]
+      properties:
+        assetRef: {type: string}
+        displayName: {type: string}
+        sourceType: {type: string, enum: [gpuf_online, offline_collector]}
+        status: {type: string, enum: [active, disabled]}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    AssetListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [items, page, pageSize, total]
+              properties:
+                items: {type: array, items: {$ref: '#/components/schemas/Asset'}}
+                page: {type: integer}
+                pageSize: {type: integer}
+                total: {type: integer, format: int64}
+    ClientRequestId:
+      type: string
+      minLength: 16
+      maxLength: 128
+      pattern: '^[A-Za-z0-9._:-]+$'
+    CreateOnlinePreEvaluationRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, assetRef]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        assetRef: {type: string}
+        supplement:
+          type: object
+          additionalProperties: false
+          properties:
+            assetName: {type: string, minLength: 1, maxLength: 100}
+    CreateOfflineSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, assetRef, assetName]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        assetRef: {type: string}
+        assetName: {type: string, minLength: 1, maxLength: 100}
+    PreEvaluationStatus:
+      type: string
+      enum: [requested, collecting, generating, generated, failed, expired]
+    PreEvaluationReport:
+      type: object
+      required: [reportId, schemaVersion, reportSha256, hashProfile]
+      properties:
+        reportId: {type: string}
+        schemaVersion: {type: string, enum: [gpuf.pre_evaluation.v1]}
+        reportSha256: {$ref: '#/components/schemas/Sha256'}
+        reportHtmlSha256: {$ref: '#/components/schemas/Sha256'}
+        hashProfile: {type: string}
+        technicalSnapshotId: {type: string}
+        technicalSnapshotSha256: {$ref: '#/components/schemas/Sha256'}
+        technicalSnapshotSchemaVersion: {type: string}
+    PreEvaluation:
+      type: object
+      required: [taskRef, assetRef, sourceType, status, createdAt]
+      properties:
+        taskRef: {type: string}
+        assetRef: {type: string}
+        sourceType: {type: string, enum: [gpuf_online, offline_collector]}
+        status: {$ref: '#/components/schemas/PreEvaluationStatus'}
+        report:
+          allOf: [{$ref: '#/components/schemas/PreEvaluationReport'}]
+          nullable: true
+        summary: {type: object, additionalProperties: true}
+        error:
+          allOf: [{$ref: '#/components/schemas/SafeError'}]
+          nullable: true
+        createdAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time, nullable: true}
+    PreEvaluationEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/PreEvaluation'}
+    PreEvaluationListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items: {type: array, items: {$ref: '#/components/schemas/PreEvaluation'}}
+                page: {type: integer}
+                pageSize: {type: integer}
+                total: {type: integer, format: int64}
+    OfflineSessionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [taskRef, status, collectorChallenge, benchmarkSourceRef, expiresAt]
+              properties:
+                taskRef: {type: string}
+                status: {type: string, enum: [collecting]}
+                collectorChallenge: {type: string}
+                benchmarkSourceRef: {$ref: '#/components/schemas/Sha256'}
+                expiresAt: {type: string, format: date-time}
+    CreateAssessmentRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, assetRef, preEvaluationTaskRef, requestedTier, purpose]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        assetRef: {type: string}
+        preEvaluationTaskRef: {type: string}
+        requestedTier: {type: string, enum: [T1, T2]}
+        purpose:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 64}
+    AssessmentDisplayStatus:
+      type: string
+      enum: [processing, action_required, completed, failed, revoked, expired]
+    AssessmentStage:
+      type: string
+      enum:
+        - created
+        - technical_fetching
+        - technical_verified
+        - technical_rejected
+        - evidence_pending
+        - evidence_reviewing
+        - ready_for_valuation
+        - valuating
+        - valuation_ready
+        - review_pending
+        - reviewing
+        - changes_requested
+        - approved
+        - issuing
+        - issued
+        - rejected
+        - revoked
+        - expired
+        - failed
+    ReportProjection:
+      type: object
+      required: [reportId, reportStatus, reportJsonSha256, reportHtmlSha256, reportPdfSha256, issuedAt, validUntil, downloadAvailable]
+      properties:
+        reportId: {type: string}
+        reportStatus: {type: string, enum: [issued, revoked, expired]}
+        reportJsonSha256: {$ref: '#/components/schemas/Sha256'}
+        reportHtmlSha256: {$ref: '#/components/schemas/Sha256'}
+        reportPdfSha256: {$ref: '#/components/schemas/Sha256'}
+        issuedAt: {type: string, format: date-time}
+        validUntil: {type: string, format: date-time}
+        revokedAt: {type: string, format: date-time}
+        expiredAt: {type: string, format: date-time}
+        downloadAvailable: {type: boolean}
+    Assessment:
+      type: object
+      required:
+        [taskRef, assessmentId, assetRef, requestedTier, status, stage, progress, createdAt, updatedAt]
+      properties:
+        taskRef: {type: string}
+        assessmentId: {type: string}
+        assetRef: {type: string}
+        requestedTier: {type: string, enum: [T1, T2]}
+        status: {$ref: '#/components/schemas/AssessmentDisplayStatus'}
+        stage: {$ref: '#/components/schemas/AssessmentStage'}
+        progress: {type: integer, minimum: 0, maximum: 100}
+        requiredEvidenceCodes: {type: array, items: {type: string}}
+        report:
+          allOf: [{$ref: '#/components/schemas/ReportProjection'}]
+          nullable: true
+        error:
+          allOf: [{$ref: '#/components/schemas/SafeError'}]
+          nullable: true
+        stale: {type: boolean, default: false}
+        upstreamSyncedAt: {type: string, format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    AssessmentEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data: {$ref: '#/components/schemas/Assessment'}
+    AssessmentListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items: {type: array, items: {$ref: '#/components/schemas/Assessment'}}
+                page: {type: integer}
+                pageSize: {type: integer}
+                total: {type: integer, format: int64}
+    EvidenceRequirement:
+      type: object
+      required:
+        [code, reason, required, allowedContentTypes, maximumBytes, status]
+      properties:
+        code: {type: string}
+        reason: {type: string}
+        required: {type: boolean}
+        allowedContentTypes: {type: array, items: {type: string}}
+        maximumBytes: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [missing, uploaded, accepted, rejected]}
+    EvidenceRequirementsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [assessmentId, items]
+              properties:
+                assessmentId: {type: string}
+                items:
+                  type: array
+                  items: {$ref: '#/components/schemas/EvidenceRequirement'}
+    CreateEvidenceSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, evidenceType, contentType, contentLength, fileName, sha256]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        evidenceType: {type: string, minLength: 1, maxLength: 128}
+        contentType: {type: string, minLength: 1, maxLength: 128}
+        contentLength: {type: integer, format: int64, minimum: 1}
+        fileName: {type: string, minLength: 1, maxLength: 200}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+    EvidenceSessionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required:
+                [evidenceId, uploadMethod, uploadUrl, expiresAt, requiredHeaders, maximumBytes]
+              properties:
+                evidenceId: {type: string}
+                uploadMethod: {type: string, enum: [PUT]}
+                uploadUrl: {type: string, format: uri}
+                expiresAt: {type: string, format: date-time}
+                requiredHeaders:
+                  type: object
+                  additionalProperties: {type: string}
+                maximumBytes: {type: integer, format: int64}
+    CreateDownloadRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, purpose]
+      properties:
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        purpose: {type: string, enum: [customer_download]}
+    DownloadEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [downloadGrantId, method, url, expiresAt]
+              properties:
+                downloadGrantId: {type: string}
+                method: {type: string, enum: [GET]}
+                url: {type: string, format: uri}
+                expiresAt: {type: string, format: date-time}
+    AssessmentEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - eventType
+        - schemaVersion
+        - occurredAt
+        - correlationId
+        - assessmentId
+        - clientRequestId
+        - assetRef
+        - status
+        - progress
+        - requiredEvidenceCodes
+      properties:
+        eventId: {type: string}
+        eventType: {type: string, enum: [asset_assessment.status_changed]}
+        schemaVersion: {type: string, enum: [asset_assessment_event.v1]}
+        occurredAt: {type: string, format: date-time}
+        correlationId: {type: string}
+        assessmentId: {type: string}
+        clientRequestId: {$ref: '#/components/schemas/ClientRequestId'}
+        assetRef: {type: string}
+        status: {$ref: '#/components/schemas/AssessmentStage'}
+        progress: {type: integer, minimum: 0, maximum: 100}
+        requiredEvidenceCodes: {type: array, items: {type: string}}
+        report:
+          allOf: [{$ref: '#/components/schemas/ReportProjection'}]
+          nullable: true
+        error:
+          allOf: [{$ref: '#/components/schemas/SafeError'}]
+          nullable: true
+    CallbackEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [duplicate]
+              properties:
+                duplicate: {type: boolean}
+    SafeError:
+      type: object
+      properties:
+        code: {type: string}
+        message: {type: string}
+    Sha256:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unauthorized:
+      description: Authentication or callback signature is missing
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Forbidden:
+      description: Insufficient role or invalid callback signature
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    NotFound:
+      description: Resource does not exist or is not owned by the caller
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Conflict:
+      description: Idempotency, state, ownership binding, or event conflict
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Gone:
+      description: Report is revoked, expired, or unavailable for download
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    PayloadTooLarge:
+      description: Request body is too large
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unprocessable:
+      description: Valid JSON that cannot be processed in the current business state
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    BadGateway:
+      description: Upstream response or integrity validation failed
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    Unavailable:
+      description: Required upstream or security configuration is unavailable
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+    InternalError:
+      description: Sanitized internal error
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}

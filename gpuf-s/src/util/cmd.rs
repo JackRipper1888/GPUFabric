@@ -33,6 +33,7 @@ pub struct Args {
     /// Database URL for PostgreSQL connection
     #[arg(
         long,
+        env = "DATABASE_URL",
         default_value = "postgres://username:password@localhost/database"
     )]
     pub database_url: String,

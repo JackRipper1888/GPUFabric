@@ -1,0 +1,74 @@
+{
+  "snapshotId": "TAS-2026-07-EXAMPLE01",
+  "schemaVersion": "technical_asset_snapshot.v2",
+  "reportId": "PRE-2026-07-EXAMPLE01",
+  "capturedAt": "2026-07-16T00:00:00Z",
+  "source": {
+    "sourceType": "offline_collector",
+    "sourceId": "sha256-source-reference",
+    "payloadSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "integrityLevel": "self_reported_challenge_bound"
+  },
+  "asset": {
+    "displayName": "NVIDIA A100 80GB",
+    "gpuModel": "NVIDIA A100 80GB",
+    "gpuCount": 1,
+    "gpuMemoryBytesTotal": 85899345920,
+    "memoryBytesPerGpu": 85899345920
+  },
+  "assetConfiguration": {
+    "schemaVersion": "gpuf.asset_configuration.v1",
+    "hashProfile": "gpuf.asset-configuration-lines.v1",
+    "canonicalModelId": "nvidia-a100-pcie-80gb",
+    "deviceForm": "pcie_card",
+    "gpuCount": 1,
+    "memoryPerGpuBytes": 85899345920,
+    "configurationHash": "4193527c64c8292550cd8ae250546f33daf2969ca122bcbdb8dbeea5634b70b9"
+  },
+  "hardware": {
+    "os": "Linux",
+    "gpus": [
+      {
+        "index": 0,
+        "model": "NVIDIA A100 80GB",
+        "canonicalModelId": "nvidia-a100-pcie-80gb",
+        "deviceForm": "pcie_card",
+        "memoryBytes": 85899345920
+      }
+    ]
+  },
+  "runtime": null,
+  "theoreticalPerformance": {
+    "theoreticalFp16Tflops": 312.0,
+    "benchmarkCount": 0
+  },
+  "benchmarks": [],
+  "fieldProvenance": {
+    "/asset/gpuModel": {
+      "sourceRef": "sha256-source-reference",
+      "quality": "collected",
+      "observedAt": "2026-07-16T00:00:00Z"
+    },
+    "/assetConfiguration/canonicalModelId": {
+      "sourceRef": "sha256-source-reference",
+      "quality": "catalog",
+      "observedAt": "2026-07-16T00:00:00Z"
+    },
+    "/assetConfiguration/configurationHash": {
+      "sourceRef": "sha256-source-reference",
+      "quality": "derived",
+      "observedAt": "2026-07-16T00:00:00Z"
+    },
+    "/theoreticalPerformance/theoreticalFp16Tflops": {
+      "sourceRef": "sha256-source-reference",
+      "quality": "catalog",
+      "observedAt": "2026-07-16T00:00:00Z"
+    }
+  },
+  "missingFields": ["BENCHMARK_MISSING", "RUNTIME_HISTORY_MISSING"],
+  "warningCodes": [],
+  "quality": {
+    "completeness": 0.6,
+    "confidence": 0.675
+  }
+}

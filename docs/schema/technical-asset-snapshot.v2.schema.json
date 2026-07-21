@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gpunexus.com/schemas/technical-asset-snapshot.v2.schema.json",
+  "title": "GPUFabric Technical Asset Snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "snapshotId",
+    "schemaVersion",
+    "reportId",
+    "capturedAt",
+    "source",
+    "asset",
+    "hardware",
+    "runtime",
+    "theoreticalPerformance",
+    "benchmarks",
+    "fieldProvenance",
+    "missingFields",
+    "warningCodes",
+    "quality"
+  ],
+  "properties": {
+    "snapshotId": { "type": "string", "pattern": "^TAS-[A-Za-z0-9_-]+$", "maxLength": 64 },
+    "schemaVersion": { "const": "technical_asset_snapshot.v2" },
+    "reportId": { "type": "string", "maxLength": 64 },
+    "capturedAt": { "type": "string", "format": "date-time" },
+    "source": { "type": "object" },
+    "asset": { "type": "object" },
+    "assetConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "hashProfile",
+        "canonicalModelId",
+        "deviceForm",
+        "gpuCount",
+        "memoryPerGpuBytes",
+        "configurationHash"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "gpuf.asset_configuration.v1" },
+        "hashProfile": { "const": "gpuf.asset-configuration-lines.v1" },
+        "canonicalModelId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+        "deviceForm": { "enum": ["pcie_card", "sxm", "server", "appliance"] },
+        "gpuCount": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "memoryPerGpuBytes": { "type": "integer", "minimum": 1 },
+        "configurationHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "hardware": { "type": "object" },
+    "runtime": { "type": ["object", "null"] },
+    "theoreticalPerformance": { "type": "object" },
+    "benchmarks": { "type": "array" },
+    "fieldProvenance": {
+      "type": "object",
+      "propertyNames": { "pattern": "^/" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceRef", "quality", "observedAt"],
+        "properties": {
+          "sourceRef": { "type": "string", "maxLength": 128 },
+          "quality": { "enum": ["measured", "observed", "collected", "catalog", "derived", "unavailable"] },
+          "observedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "missingFields": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z0-9_]+$" }, "uniqueItems": true },
+    "warningCodes": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z0-9_]+$" }, "uniqueItems": true },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completeness", "confidence"],
+      "properties": {
+        "completeness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

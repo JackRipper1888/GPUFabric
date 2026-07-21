@@ -1,0 +1,354 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1700" viewBox="0 0 1600 1700" role="img" aria-labelledby="title desc">
+  <title id="title">算力资产评估系统技术架构 v2.3</title>
+  <desc id="desc">展示 GPUFabric、new-api、asset-assessment-service、受控证据依赖的信任边界，以及预评估、正式申请、证据、估值、审核、报告冻结和外部签发门禁。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#4b5563"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#0f766e"/>
+    </marker>
+    <style>
+      text { font-family: Inter, "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif; letter-spacing: 0; fill: #17202a; }
+      .page-title { font-size: 30px; font-weight: 700; }
+      .page-subtitle { font-size: 15px; fill: #52606d; }
+      .section-title { font-size: 17px; font-weight: 750; }
+      .zone-title { font-size: 15px; font-weight: 750; }
+      .zone-note { font-size: 12px; fill: #647180; }
+      .node-title { font-size: 17px; font-weight: 750; }
+      .node-subtitle { font-size: 12px; font-weight: 750; }
+      .body { font-size: 12px; fill: #354250; }
+      .small { font-size: 11px; fill: #5f6c79; }
+      .tiny { font-size: 10px; fill: #667382; }
+      .status-title { font-size: 14px; font-weight: 750; }
+      .status-body { font-size: 11px; fill: #5f6c79; }
+      .arrow-label { font-size: 10px; font-weight: 700; fill: #475569; }
+      .step-number { font-size: 16px; font-weight: 800; fill: #ffffff; }
+      .step-title { font-size: 13px; font-weight: 750; }
+      .step-body { font-size: 10px; fill: #566270; }
+      .zone { stroke-width: 1.5; }
+      .node { fill: #ffffff; stroke: #c8d1da; stroke-width: 1.5; }
+      .node-implemented { fill: #ffffff; stroke: #69a48e; stroke-width: 1.8; }
+      .node-entry { fill: #ffffff; stroke: #7aa2d6; stroke-width: 1.8; }
+      .node-external { fill: #ffffff; stroke: #d69a42; stroke-width: 1.8; }
+      .node-planned { fill: #f8fafc; stroke: #9aa5b1; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .store { fill: #f8fafc; stroke: #aeb9c4; stroke-width: 1.2; }
+      .arrow { fill: none; stroke: #4b5563; stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-trusted { fill: none; stroke: #0f766e; stroke-width: 2.3; marker-end: url(#arrow-green); }
+      .dash { stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1700" fill="#f6f7f9"/>
+  <rect x="0" y="0" width="1600" height="92" fill="#ffffff"/>
+  <line x1="0" y1="91" x2="1600" y2="91" stroke="#d8dee5"/>
+  <text class="page-title" x="42" y="43">算力资产评估系统技术架构</text>
+  <text class="page-subtitle" x="42" y="70">当前实现、外部生产门禁与目标态 · GPUFabric / new-api / asset-assessment-service</text>
+  <text class="small" x="1558" y="43" text-anchor="end">Architecture v2.3</text>
+  <text class="small" x="1558" y="66" text-anchor="end">2026-07-20</text>
+
+  <!-- Delivery status -->
+  <rect x="34" y="112" width="1532" height="118" rx="7" fill="#ffffff" stroke="#d1d8df" stroke-width="1.5"/>
+  <line x1="417" y1="112" x2="417" y2="230" stroke="#d8dee5"/>
+  <line x1="800" y1="112" x2="800" y2="230" stroke="#d8dee5"/>
+  <line x1="1183" y1="112" x2="1183" y2="230" stroke="#d8dee5"/>
+
+  <circle cx="58" cy="140" r="6" fill="#0f766e"/>
+  <text class="status-title" x="74" y="145">Assessment Core · 已实现</text>
+  <text class="status-body" x="58" y="172">AS-001 至 005、007 至 011、013</text>
+  <text class="status-body" x="58" y="194">证据、估值、双审、冻结、Outbox 已验证</text>
+  <text class="status-body" x="58" y="214">真实依赖与签发仍受生产门禁约束</text>
+
+  <circle cx="441" cy="140" r="6" fill="#2563eb"/>
+  <text class="status-title" x="457" y="145">GPUFabric · 预评估已闭环</text>
+  <text class="status-body" x="441" y="172">兼容既有 gpuf-c / collector 协议</text>
+  <text class="status-body" x="441" y="194">输出技术事实、结构化码与冻结 HTML</text>
+  <text class="status-body" x="441" y="214">JSON/HTML/v2 三 Hash 与签名基准已验证</text>
+
+  <circle cx="824" cy="140" r="6" fill="#b96508"/>
+  <text class="status-title" x="840" y="145">受控内部依赖 · 契约完成</text>
+  <text class="status-body" x="824" y="172">upload-completion / scan-result / review-action</text>
+  <text class="status-body" x="824" y="194">独立 subject 与最小 scope 已落地</text>
+  <text class="status-body" x="824" y="214">Assessment Workflow 编排；真实服务待部署</text>
+
+  <circle cx="1207" cy="140" r="6" fill="#b96508"/>
+  <text class="status-title" x="1223" y="145">业务估值链 · 服务端完成</text>
+  <text class="status-body" x="1207" y="172">市场快照、估值、双审、JSON/HTML 冻结</text>
+  <text class="status-body" x="1207" y="194">new-api、真实依赖、PDF / AS-012 待接入</text>
+  <text class="status-body" x="1207" y="214">仍受外部生产门禁约束</text>
+
+  <!-- Trust domains -->
+  <rect class="zone" x="34" y="258" width="200" height="654" rx="7" fill="#f2f4f7" stroke="#aab4bf"/>
+  <rect class="zone" x="252" y="258" width="260" height="654" rx="7" fill="#edf4fc" stroke="#7aa2d6"/>
+  <rect class="zone" x="530" y="258" width="700" height="654" rx="7" fill="#fff5e7" stroke="#d69a42"/>
+  <rect class="zone" x="1248" y="258" width="318" height="654" rx="7" fill="#edf7f2" stroke="#69a48e"/>
+
+  <text class="zone-title" x="52" y="288">用户与设备域</text>
+  <text class="zone-note" x="52" y="309">最小采集，不持有业务规则</text>
+  <text class="zone-title" x="270" y="288">业务入口域 · new-api</text>
+  <text class="zone-note" x="270" y="309">接口契约完成，仓库代码待开发</text>
+  <text class="zone-title" x="548" y="288">私有评估域 · asset-assessment-service</text>
+  <text class="zone-note" x="548" y="309">服务端核心已实现；统一编排外部依赖</text>
+  <text class="zone-title" x="1266" y="288">开源技术域 · GPUFabric</text>
+  <text class="zone-note" x="1266" y="309">技术事实与可缺项预评估</text>
+
+  <!-- User/device -->
+  <rect class="node" x="52" y="332" width="164" height="116" rx="6"/>
+  <text class="node-title" x="70" y="363">用户 / 运营</text>
+  <text class="body" x="70" y="392">• 申请评估</text>
+  <text class="body" x="70" y="416">• 补证、查看、下载</text>
+
+  <rect class="node-implemented" x="52" y="482" width="164" height="188" rx="6"/>
+  <text class="node-title" x="70" y="515">设备端</text>
+  <text class="node-subtitle" x="70" y="541">gpuf-c / collector</text>
+  <text class="body" x="70" y="570">• 硬件库存</text>
+  <text class="body" x="70" y="594">• 运行遥测</text>
+  <text class="body" x="70" y="618">• challenge 绑定</text>
+  <text class="body" x="70" y="642">• 受控基准任务</text>
+
+  <rect class="store" x="52" y="704" width="164" height="108" rx="6"/>
+  <text class="node-subtitle" x="70" y="735">本地隐私过滤</text>
+  <text class="small" x="70" y="762">默认遮蔽 hostname</text>
+  <text class="small" x="70" y="783">序列号与敏感标识</text>
+
+  <!-- new-api -->
+  <rect class="node-entry" x="270" y="332" width="224" height="250" rx="6"/>
+  <rect x="288" y="351" width="31" height="31" rx="4" fill="#2563eb"/>
+  <text class="node-title" x="333" y="374">new-api</text>
+  <text class="node-subtitle" x="288" y="411">用户与交易编排层</text>
+  <text class="body" x="288" y="441">• 用户认证与资产映射</text>
+  <text class="body" x="288" y="466">• 订单、任务与进度</text>
+  <text class="body" x="288" y="491">• 补证会话代理</text>
+  <text class="body" x="288" y="516">• 报告展示与下载授权</text>
+  <text class="body" x="288" y="541">• 幂等回调与用户通知</text>
+  <text class="tiny" x="288" y="566">状态：契约完成，仓库代码未修改</text>
+
+  <rect class="store" x="290" y="616" width="184" height="112" rx="6"/>
+  <text class="node-subtitle" x="308" y="647">new-api DB</text>
+  <text class="small" x="308" y="675">用户、资产映射、任务</text>
+  <text class="small" x="308" y="696">报告引用、下载审计</text>
+  <text class="tiny" x="308" y="716">不保存原始证据和对象键</text>
+
+  <rect class="node-planned" x="290" y="762" width="184" height="82" rx="6"/>
+  <text class="node-subtitle" x="308" y="793">回调接收器 · 待开发</text>
+  <text class="small" x="308" y="818">验签、幂等、状态映射</text>
+
+  <!-- Assessment service core -->
+  <rect class="node-implemented" x="550" y="332" width="660" height="202" rx="6"/>
+  <rect x="570" y="351" width="31" height="31" rx="4" fill="#d97706"/>
+  <text class="node-title" x="615" y="374">asset-assessment-service</text>
+  <text class="node-subtitle" x="570" y="411">已实现：AS-001 至 005、007 至 011、013</text>
+  <text class="body" x="570" y="441">• 幂等申请、三 Hash 验证、证据要求与私有上传会话</text>
+  <text class="body" x="570" y="466">• 证据状态机、市场快照、版本化估值与职责分离审批</text>
+  <text class="body" x="570" y="491">• 双人正式审核、JSON/HTML 冻结、审计与事务 Outbox</text>
+  <line x1="570" y1="508" x2="1190" y2="508" stroke="#e1c28f"/>
+  <text class="tiny" x="570" y="525">不执行设备命令 · 不向 new-api 暴露对象键 · 不把审核意见写入通用回调</text>
+
+  <rect class="node-implemented" x="550" y="564" width="200" height="105" rx="6"/>
+  <text class="node-subtitle" x="568" y="595">PostgreSQL + Outbox</text>
+  <text class="small" x="568" y="622">证据元数据、状态、审计</text>
+  <text class="small" x="568" y="644">事务事件与投递重试</text>
+
+  <rect class="node-external" x="765" y="564" width="200" height="105" rx="6"/>
+  <text class="node-subtitle" x="783" y="595">私有对象存储</text>
+  <text class="small" x="783" y="622">Uploader 直传、短时凭证</text>
+  <text class="small" x="783" y="644">Gateway 限权完成回调 · 待接入</text>
+
+  <rect class="node-external" x="980" y="564" width="230" height="105" rx="6"/>
+  <text class="node-subtitle" x="998" y="595">Evidence Scanner</text>
+  <text class="small" x="998" y="622">恶意内容、格式与完整性检查</text>
+  <text class="small" x="998" y="644">Storage 事件触发；scanner subject</text>
+
+  <rect class="node-external" x="550" y="700" width="200" height="105" rx="6"/>
+  <text class="node-subtitle" x="568" y="731">Reviewer Workbench</text>
+  <text class="small" x="568" y="758">Workflow 分配；人工复核</text>
+  <text class="small" x="568" y="780">reviewer subject · 待接入</text>
+
+  <rect class="node-implemented" x="765" y="700" width="200" height="105" rx="6"/>
+  <text class="node-subtitle" x="783" y="731">Valuation / Risk</text>
+  <text class="small" x="783" y="758">市场价格、折旧、质押策略</text>
+  <text class="small" x="783" y="780">AS-007/008/009 · 已实现</text>
+
+  <rect class="node-planned" x="980" y="700" width="230" height="105" rx="6"/>
+  <text class="node-subtitle" x="998" y="731">Signing Service / HSM</text>
+  <text class="small" x="998" y="758">签发 Worker 请求冻结报告摘要</text>
+  <text class="small" x="998" y="780">冻结已完成 · PDF/HSM 待接入</text>
+
+  <rect class="store" x="550" y="838" width="660" height="48" rx="6"/>
+  <text class="small" x="570" y="867">私有数据边界：原始证据、客户身份、真实价格源、风险权重、审批意见、签章材料与正式报告</text>
+
+  <!-- GPUFabric -->
+  <rect class="node-implemented" x="1266" y="332" width="282" height="290" rx="6"/>
+  <rect x="1284" y="351" width="31" height="31" rx="4" fill="#0f766e"/>
+  <text class="node-title" x="1329" y="374">GPUFabric</text>
+  <text class="node-subtitle" x="1284" y="411">api_server / gpuf-s</text>
+  <text class="body" x="1284" y="441">• 在线遥测归一化</text>
+  <text class="body" x="1284" y="466">• 离线 challenge 与防重放</text>
+  <text class="body" x="1284" y="491">• 规格匹配与来源版本</text>
+  <text class="body" x="1284" y="516">• 字段质量、缺失项、风险提示</text>
+  <text class="body" x="1284" y="541">• 可缺项技术预评估</text>
+  <line x1="1284" y1="562" x2="1530" y2="562" stroke="#a9cfbf"/>
+  <text class="tiny" x="1284" y="583">不负责确权、估值、贷款额、授信</text>
+  <text class="tiny" x="1284" y="602">v1 兼容字段为空；不执行金融计算</text>
+
+  <rect class="store" x="1266" y="654" width="282" height="102" rx="6"/>
+  <text class="node-subtitle" x="1284" y="684">技术事实存储</text>
+  <text class="small" x="1284" y="711">快照、哈希、规格目录、采集来源</text>
+  <text class="small" x="1284" y="733">pre_evaluation_report.v1 + snapshot.v2 已实现</text>
+
+  <rect class="node-implemented" x="1266" y="790" width="282" height="72" rx="6"/>
+  <text class="node-subtitle" x="1284" y="820">预评估完整性与可信证据</text>
+  <text class="small" x="1284" y="843">租户幂等、三 Hash、Ed25519 基准已完成</text>
+
+  <!-- Main arrows -->
+  <path class="arrow" d="M216 390 H270"/>
+  <text class="arrow-label" x="243" y="378" text-anchor="middle">申请</text>
+  <path class="arrow-trusted" d="M494 409 H550"/>
+  <text class="arrow-label" x="522" y="397" text-anchor="middle">内部 API</text>
+  <path class="arrow-trusted" d="M1210 432 H1266"/>
+  <text class="arrow-label" x="1238" y="420" text-anchor="middle">v1 报告 / v2 技术快照</text>
+  <path class="arrow dash" d="M550 790 H494"/>
+  <text class="arrow-label" x="522" y="778" text-anchor="middle">Outbox 回调</text>
+  <path class="arrow-trusted" d="M650 534 V564"/>
+  <path class="arrow" d="M865 534 V564"/>
+  <path class="arrow" d="M1095 534 V564"/>
+  <path class="arrow" d="M650 669 V700"/>
+  <path class="arrow-trusted" d="M865 669 V700"/>
+  <path class="arrow dash" d="M1095 669 V700"/>
+  <path class="arrow-trusted" d="M216 604 V878 H1407 V756"/>
+  <text class="arrow-label" x="790" y="870" text-anchor="middle">隐私过滤后的设备技术证据</text>
+
+  <!-- Evidence sequence -->
+  <rect x="34" y="942" width="1532" height="374" rx="7" fill="#ffffff" stroke="#d1d8df" stroke-width="1.5"/>
+  <text class="section-title" x="58" y="978">AS-005 证据生命周期</text>
+  <text class="zone-note" x="58" y="1000">服务端状态机已实现；橙色步骤由 Assessment Workflow 编排，蓝色步骤依赖 new-api</text>
+
+  <g transform="translate(58 1024)">
+    <rect width="352" height="112" rx="6" fill="#eef4fc" stroke="#8eacd2"/>
+    <circle cx="30" cy="30" r="18" fill="#2563eb"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">1</text>
+    <text class="step-title" x="60" y="28">创建评估申请 · new-api 待对接</text>
+    <text class="step-body" x="60" y="50">幂等 clientRequestId + 用户资产映射</text>
+    <text class="step-body" x="18" y="78">POST /internal/v1/asset-assessments</text>
+    <text class="step-body" x="18" y="96">主体：new-api</text>
+  </g>
+  <g transform="translate(432 1024)">
+    <rect width="352" height="112" rx="6" fill="#f2faf6" stroke="#8fbea9"/>
+    <circle cx="30" cy="30" r="18" fill="#0f766e"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">2</text>
+    <text class="step-title" x="60" y="28">读取证据要求 · 已实现</text>
+    <text class="step-body" x="60" y="50">类型、必填、格式、大小与过期规则</text>
+    <text class="step-body" x="18" y="78">GET .../evidence-requirements</text>
+    <text class="step-body" x="18" y="96">输出：requirementsVersion</text>
+  </g>
+  <g transform="translate(806 1024)">
+    <rect width="352" height="112" rx="6" fill="#f2faf6" stroke="#8fbea9"/>
+    <circle cx="30" cy="30" r="18" fill="#0f766e"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">3</text>
+    <text class="step-title" x="60" y="28">创建上传会话 · 已实现</text>
+    <text class="step-body" x="60" y="50">短时上传目标，不暴露内部对象键</text>
+    <text class="step-body" x="18" y="78">POST .../evidence-sessions</text>
+    <text class="step-body" x="18" y="96">状态：pending_upload</text>
+  </g>
+  <g transform="translate(1180 1024)">
+    <rect width="352" height="112" rx="6" fill="#fffaf0" stroke="#dfbd82"/>
+    <circle cx="30" cy="30" r="18" fill="#d97706"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">4</text>
+    <text class="step-title" x="60" y="28">直传私有对象存储 · 待接入</text>
+    <text class="step-body" x="60" y="50">文件不经过 new-api 与 GPUFabric</text>
+    <text class="step-body" x="18" y="78">Browser / controlled client → private storage</text>
+    <text class="step-body" x="18" y="96">短时凭证 + 内容摘要</text>
+  </g>
+
+  <g transform="translate(1180 1172)">
+    <rect width="352" height="112" rx="6" fill="#fffaf0" stroke="#dfbd82"/>
+    <circle cx="30" cy="30" r="18" fill="#d97706"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">5</text>
+    <text class="step-title" x="60" y="28">上传完成 · Gateway 待接入</text>
+    <text class="step-body" x="60" y="50">提交摘要、大小、完成时间</text>
+    <text class="step-body" x="18" y="78">scope: assessment:evidence:complete</text>
+    <text class="step-body" x="18" y="96">状态：scanning</text>
+  </g>
+  <g transform="translate(806 1172)">
+    <rect width="352" height="112" rx="6" fill="#fffaf0" stroke="#dfbd82"/>
+    <circle cx="30" cy="30" r="18" fill="#d97706"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">6</text>
+    <text class="step-title" x="60" y="28">扫描结果 · Scanner 待接入</text>
+    <text class="step-body" x="60" y="50">恶意内容、格式和完整性检查</text>
+    <text class="step-body" x="18" y="78">scope: assessment:evidence:scan</text>
+    <text class="step-body" x="18" y="96">状态：pending_review / rejected</text>
+  </g>
+  <g transform="translate(432 1172)">
+    <rect width="352" height="112" rx="6" fill="#fffaf0" stroke="#dfbd82"/>
+    <circle cx="30" cy="30" r="18" fill="#d97706"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">7</text>
+    <text class="step-title" x="60" y="28">人工复核 · Reviewer 待接入</text>
+    <text class="step-body" x="60" y="50">通过、拒绝或要求重传</text>
+    <text class="step-body" x="18" y="78">scope: assessment:review</text>
+    <text class="step-body" x="18" y="96">状态：verified / rejected</text>
+  </g>
+  <g transform="translate(58 1172)">
+    <rect width="352" height="112" rx="6" fill="#f2faf6" stroke="#8fbea9"/>
+    <circle cx="30" cy="30" r="18" fill="#0f766e"/>
+    <text class="step-number" x="30" y="36" text-anchor="middle">8</text>
+    <text class="step-title" x="60" y="28">估值就绪 + Outbox · 已实现</text>
+    <text class="step-body" x="60" y="50">全部必需证据 verified 后推进</text>
+    <text class="step-body" x="18" y="78">状态：ready_for_valuation</text>
+    <text class="step-body" x="18" y="96">输出：签名、幂等回调事件</text>
+  </g>
+
+  <path class="arrow" d="M410 1080 H432"/>
+  <path class="arrow" d="M784 1080 H806"/>
+  <path class="arrow" d="M1158 1080 H1180"/>
+  <path class="arrow" d="M1532 1136 C1532 1150 1498 1156 1498 1172"/>
+  <path class="arrow" d="M1180 1228 H1158"/>
+  <path class="arrow" d="M806 1228 H784"/>
+  <path class="arrow" d="M432 1228 H410"/>
+
+  <!-- State machine and roadmap -->
+  <rect x="34" y="1340" width="1532" height="202" rx="7" fill="#ffffff" stroke="#d1d8df" stroke-width="1.5"/>
+  <text class="section-title" x="58" y="1376">证据主状态机与异常分支</text>
+  <text class="zone-note" x="58" y="1398">重传创建新会话，旧记录保留在审计链；业务状态只能由授权主体按合法迁移推进</text>
+
+  <g transform="translate(58 1420)">
+    <rect width="275" height="58" rx="5" fill="#f8fafc" stroke="#cbd5df"/>
+    <text class="node-subtitle" x="137.5" y="34" text-anchor="middle">pending_upload</text>
+  </g>
+  <g transform="translate(359 1420)">
+    <rect width="275" height="58" rx="5" fill="#fffaf0" stroke="#dfbd82"/>
+    <text class="node-subtitle" x="137.5" y="34" text-anchor="middle">scanning</text>
+  </g>
+  <g transform="translate(660 1420)">
+    <rect width="275" height="58" rx="5" fill="#fffaf0" stroke="#dfbd82"/>
+    <text class="node-subtitle" x="137.5" y="34" text-anchor="middle">pending_review</text>
+  </g>
+  <g transform="translate(961 1420)">
+    <rect width="275" height="58" rx="5" fill="#f2faf6" stroke="#8fbea9"/>
+    <text class="node-subtitle" x="137.5" y="34" text-anchor="middle">verified</text>
+  </g>
+  <g transform="translate(1262 1420)">
+    <rect width="280" height="58" rx="5" fill="#e7f5ee" stroke="#69a48e"/>
+    <text class="node-subtitle" x="140" y="34" text-anchor="middle">ready_for_valuation</text>
+  </g>
+  <path class="arrow" d="M333 1449 H359"/>
+  <path class="arrow" d="M634 1449 H660"/>
+  <path class="arrow" d="M935 1449 H961"/>
+  <path class="arrow-trusted" d="M1236 1449 H1262"/>
+  <text class="small" x="58" y="1512">异常：expired（会话超时） · rejected（扫描或复核失败） · 所有迁移写入 evidence audit</text>
+
+  <rect x="34" y="1566" width="1532" height="92" rx="7" fill="#eef1f4" stroke="#d1d8df"/>
+  <text class="section-title" x="58" y="1598">下一阶段顺序</text>
+  <text class="body" x="58" y="1627">① 归档代码基线　→　② 裸金属与离线发布回归　→　③ new-api 用户链　→　④ 真实证据与生产基准　→　⑤ 估值、冻结与 HSM</text>
+  <text class="small" x="58" y="1648">约束：价格源和权属证据未完成治理前，不生成正式参考估值、质押率、可贷额度或银行结论。</text>
+
+  <!-- Footer legend -->
+  <circle cx="48" cy="1680" r="6" fill="#0f766e"/>
+  <text class="small" x="62" y="1684">已实现</text>
+  <circle cx="132" cy="1680" r="6" fill="#2563eb"/>
+  <text class="small" x="146" y="1684">业务入口 / 待对接</text>
+  <circle cx="276" cy="1680" r="6" fill="#d97706"/>
+  <text class="small" x="290" y="1684">真实依赖待接入</text>
+  <rect x="415" y="1674" width="18" height="12" fill="#f8fafc" stroke="#9aa5b1" stroke-dasharray="4 3"/>
+  <text class="small" x="441" y="1684">目标态</text>
+  <text class="small" x="1552" y="1684" text-anchor="end">代码可开源；客户数据、业务规则、生产凭据、私钥与正式决策保持私有</text>
+</svg>

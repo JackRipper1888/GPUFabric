@@ -1,0 +1,113 @@
+sequenceDiagram
+    autonumber
+    actor User as Provider 浏览器
+    participant N as new-api
+    participant G as GPUFabric
+    participant B as Benchmark Runner
+    participant A as assessment-service
+    participant O as 对象存储
+    participant W as scanner/reviewer/signing
+    participant M as 市场提供方/核验器
+
+    User->>N: POST /assets，绑定在线引用或选择离线采集
+    N->>N: 认证、OwnerScope、幂等、加密引用、保存 HMAC 摘要
+    N-->>User: 201 assetRef
+
+    alt 在线预评估
+        User->>N: POST /pre-evaluations，assetRef + 少量 supplement
+        N->>G: POST /internal/v1/technical-pre-evaluations/from-client
+        G-->>N: 202 reportId
+        N-->>User: 202 taskRef，status=generating
+    else 离线预评估
+        User->>N: POST /pre-evaluations/offline-sessions
+        N->>G: challenge + 稳定 offlineAssetRef
+        G-->>N: collectorChallenge + expiresAt + sourceRef
+        N->>N: 保存 challenge SHA-256，校验稳定 sourceRef
+        N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
+        User->>User: 在目标设备运行 hw-asset-collector
+        opt 提交前补齐可信 Benchmark
+            Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥
+            B->>B: 以 benchmarkSourceRef 运行至少 3 轮 workload
+            B->>G: 登记 Ed25519 签名的 LLM + 稳定性证据
+            G->>G: 按稳定 sourceRef 保存不可变 BenchmarkEvidence
+        end
+        User->>N: POST /pre-evaluations/{taskRef}/evidence，原始采集 JSON
+        N->>G: from-evidence + 相同 offlineAssetRef
+        G->>G: 自动关联该 sourceRef 的有效签名 Benchmark
+        G-->>N: 202 不可变 reportId
+        N-->>User: 202 status=generating
+    end
+
+    loop 预评估查询
+        User->>N: GET /pre-evaluations/{taskRef}
+        N->>G: GET /internal/v1/technical-pre-evaluations/{reportId}
+        G-->>N: 状态、报告摘要、reportSha256
+        N-->>User: 脱敏任务状态
+    end
+    opt 查看预评估 HTML
+        User->>N: GET /pre-evaluations/{taskRef}/html
+        N->>G: 获取冻结 HTML
+        G-->>N: HTML + X-Content-SHA256
+        N->>N: 限制大小、禁止重定向、重新计算 Hash
+        N-->>User: private, no-store HTML
+    end
+
+    User->>N: POST /asset-assessments，preEvaluationTaskRef + T1/T2
+    N->>N: 校验 generated、归属、哈希，派生 tenantRef/userRef
+    N->>A: POST /internal/v1/asset-assessments，技术报告摘要 + 幂等键
+    A->>G: 读取报告/快照，验证字节 Hash
+    A->>A: 重算 assetConfiguration Hash，复核 Benchmark 分级
+    A-->>N: 201/202 assessmentId
+    N-->>User: 202 status=processing
+
+    A-->>N: signed callback，technical_* / evidence_pending
+    N->>N: 验签、事件去重、锁任务、校验 assessmentId/clientRequestId/assetRef
+    N-->>A: 200 EVENT_ACCEPTED
+    User->>N: GET /asset-assessments/{id}
+    N-->>User: 当前 status、stage、progress、缺失项
+
+    User->>N: GET /{id}/evidence-requirements
+    N->>A: GET /internal/v1/asset-assessments/{id}/evidence-requirements
+    A-->>N: 材料类型、大小、MIME、状态
+    N-->>User: 材料要求
+    User->>N: POST /{id}/evidence-sessions
+    N->>A: POST /internal/v1/asset-assessments/{id}/evidence-sessions
+    A-->>N: evidenceId + 短时 PUT URL + requiredHeaders
+    N-->>User: 201 直传凭据，不落库
+    User->>O: PUT 文件，使用校验后的 Header 和 SHA-256
+    O->>A: upload-completed 事件
+    A->>W: 扫描、Hash/MIME 校验、人工审核
+    W-->>A: clean + verify/reject；生命周期材料附 lifecycleFacts
+    A->>A: 保存成色/制造/启用/保修事实及 evidenceId
+    A-->>N: signed callback，evidence_reviewing / ready_for_valuation / changes_requested
+    N->>N: 更新本地状态投影和审计 outbox
+    N-->>A: 200 EVENT_ACCEPTED
+
+    M->>A: 写入授权市场样本 + 可复算 assetConfiguration Hash
+    M->>A: GET 待核验队列并读取私有原始对象
+    M->>A: verify/reject 市场样本
+    A->>A: 聚合至少 3 样本/2 来源的不可变市场快照
+    A->>A: 校验技术配置 = 市场配置，审核成色 = 快照成色
+
+    loop 估值、复核、冻结、签发
+        A-->>N: signed callback，valuating / review_pending / approved / issuing
+        User->>N: GET /asset-assessments/{id}
+        N-->>User: 当前阶段和进度
+    end
+
+    A-->>N: signed callback，issued + report projection
+    N->>N: 保存 reportId 和 Hash，不保存报告 URL
+    User->>N: POST /{id}/downloads
+    N->>A: POST /internal/v1/reports/{reportId}/downloads
+    A->>O: 创建最长 120 秒 GET 授权
+    O-->>A: 短时下载 URL
+    A-->>N: URL + expiresAt
+    N->>N: 写入不含 URL 的下载审计，响应 no-store
+    N-->>User: 201 download grant
+    User->>O: GET 报告
+    O-->>User: PDF / 报告内容
+
+    opt 撤销或过期
+        A-->>N: signed callback，revoked / expired
+        N->>N: 更新终态，后续下载拒绝
+    end

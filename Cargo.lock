@@ -1388,6 +1388,7 @@ dependencies = [
  "rdkafka",
  "redis",
  "reqwest",
+ "ring",
  "rustls-pemfile",
  "serde",
  "serde_json",

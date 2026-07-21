@@ -866,6 +866,166 @@ Get one client’s system and device detail.
 curl "http://<host>:18081/api/user/client_device_detail?user_id=1&client_id=<client-id-32-hex>"
 ```
 
+## Compute Asset Pre-Evaluation
+
+These management APIs require `Authorization: Bearer <GPUF_BANKING_API_TOKEN>`.
+The configured token must contain at least 32 characters. Legacy clients may omit `supplements` or send an empty object. Non-empty ownership, direct benchmark values, valuation, pledge-rate, or manual specification input is rejected with HTTP `422`.
+
+Online and offline create requests may include `Idempotency-Key`. Its scope is the SHA-256-redacted service subject, tenant, and operation. The same key and request reuses the first report; the same key with a different request returns HTTP `409`. Omitting the header preserves legacy behavior. `GPUF_BANKING_SERVICE_SUBJECT` names the caller, while the database stores no raw subject or tenant identifier.
+This is a service-to-service management credential and must not be shipped to browser code.
+Production deployments may set comma-separated `GPUF_BANKING_API_TOKENS` during token
+rotation. `GPUF_BANKING_API_TOKEN` remains as the single-token compatibility setting.
+
+Internal orchestrators can use the equivalent aliases below. They share the same
+authorization, body limits, evidence validation, idempotency store, and report generator:
+
+```text
+POST /internal/v1/technical-pre-evaluations/from-client
+POST /internal/v1/technical-pre-evaluations/challenge
+POST /internal/v1/technical-pre-evaluations/from-evidence
+```
+
+The internal request form accepts `gpufUserRef`, `gpufClientRef`, `tenantRef`, and
+`clientRequestId`. `gpufUserRef`/`gpufClientRef` are aliases for the legacy
+`userId`/`clientId` fields. A body `clientRequestId` enables idempotency without a
+header. If both `clientRequestId` and `Idempotency-Key` are present, they must match or
+the request returns HTTP `400`. Explicit tenant references are validated and only their
+SHA-256-derived scope is persisted.
+
+### POST `/api/banking/provider/benchmark-evidence`
+
+A controlled benchmark runner registers signed evidence before a pre-evaluation references it through `benchmarkEvidenceIds`. Registration uses a separate `GPUF_BENCHMARK_PRODUCER_TOKEN`. The server selects `keyId` from `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` and verifies the exact UTF-8 `payloadJson` bytes with Ed25519. The payload binds a 64-hex technical `sourceRef`, parameter SHA-256, test time, and a maximum 30-day validity window. Evidence rows are insert-only.
+
+When `benchmarkEvidenceIds` is non-empty, the server loads exactly those evidence records. An empty list auto-selects the latest unexpired signed record for each metric under the current technical `sourceRef`. `scripts/run_signed_ollama_benchmark.sh` registers separate `tokens_per_second` and `sustained_throughput_percent` records in one run. Auto-selection never crosses devices, accepts expired evidence, or executes caller-supplied commands.
+
+Report requests cannot submit arbitrary performance values, commands, scripts, or image URLs. Missing, expired, or cross-device evidence returns HTTP `422`.
+
+### POST `/api/banking/provider/pre-evaluations/from-client`
+
+Creates and persists a draft from `gpu_assets`, `system_info`, `device_info`, and the
+latest 30 days of `device_daily_stats`.
+When `assetName` is omitted, the report uses the GPU model instead of a client name or
+host name. The report exposes a SHA-256 source reference rather than the raw client id.
+
+```json
+{
+  "userId": "1",
+  "clientId": "00112233445566778899aabbccddeeff",
+  "assetName": "GPU Node A01",
+  "benchmarkEvidenceIds": ["BENCH-2026-07-A01-TPS"]
+}
+```
+
+### POST `/api/banking/provider/pre-evaluations/challenge`
+
+Issues a single-use challenge with a five-minute TTL. Pass it to
+`hw-asset-collector --challenge "$CHALLENGE"`.
+
+### POST `/api/banking/provider/pre-evaluations/from-evidence`
+
+Creates a draft from an offline collector document. `hardwareEvidenceJson` must contain
+the original report text, normally read with `File.text()`. The server recomputes the
+collector hash and atomically consumes the challenge. Invalid hashes, expired challenges,
+and replay attempts return HTTP `422`. The raw report limit is 4 MiB.
+Only the collector's `serials_redacted` mode is accepted. Reports containing non-null
+serials, UUIDs, WWNs, or asset tags return HTTP `422`.
+
+```json
+{
+  "userId": "1",
+  "assetName": "Offline GPU Node 01",
+  "offlineAssetRef": "offline-asset:hmac:v1:<opaque>",
+  "hardwareEvidenceJson": "<original report.json text>",
+  "benchmarkEvidenceIds": []
+}
+```
+
+Internal orchestrators should provide a stable, tenant-bound, redacted
+`offlineAssetRef`. GPUFabric maps it to a 64-hex `sourceRef` with the fixed
+`gpuf.offline_asset_source.v1` profile while retaining collector
+`payloadSha256` only for the current challenge's integrity. Omitting the field
+keeps the legacy per-payload source behavior. A controlled runner must register
+benchmarks for the stable source before the same collector JSON is submitted;
+an empty `benchmarkEvidenceIds` then auto-associates the signed evidence.
+
+Build the request without reserializing the collector document:
+
+```bash
+jq -Rs --arg userId "1" --arg assetName "Offline GPU Node 01" \
+  '{userId: $userId, assetName: $assetName, hardwareEvidenceJson: .}' \
+  report.json > request.json
+```
+
+### GET `/api/banking/provider/pre-evaluations/{reportId}`
+
+Returns the insert-only JSON snapshot saved when the report was created. A separate
+SHA-256 is checked before returning the document. Missing reports return HTTP `404`.
+
+### GET `/api/banking/provider/pre-evaluations/{reportId}/html`
+
+Returns the frozen technical pre-evaluation HTML bytes. `Content-Type` is `text/html; charset=utf-8`; `ETag` and `X-Content-SHA256` declare the `gpuf.report-html-bytes.v1` byte hash. Reads recompute the hash and fail with HTTP `500` on mismatch. The HTML contains technical facts, trusted benchmarks, and structured gaps only.
+
+### GET `/internal/v1/technical-pre-evaluations/{reportId}`
+
+Returns the immutable v1 report as a byte-integrity envelope with `reportJson`,
+`reportSha256`, and `hashProfile: gpuf.report-json-bytes.v1`. New reports contain an
+optional `reportHtmlSha256`, `htmlHashProfile: gpuf.report-html-bytes.v1`, and additive `technicalSnapshot` references; older clients may ignore them.
+
+### GET `/internal/v2/technical-snapshots/{snapshotId}`
+
+Returns `snapshotJson`, `snapshotSha256`, `hashProfile: gpuf.snapshot-json-bytes.v2`,
+and the parsed snapshot. Each non-null technical leaf has provenance and one of
+`measured`, `observed`, `collected`, `catalog`, or `derived`. The snapshot excludes
+ownership conclusions, market values, pledge rates, loan amounts, and bank decisions.
+
+A complete homogeneous GPU inventory backed by the server catalog also contains an
+`assetConfiguration` using schema `gpuf.asset_configuration.v1` and hash profile
+`gpuf.asset-configuration-lines.v1`. Its SHA-256 input is the exact UTF-8 byte sequence
+below, including the final newline:
+
+```text
+gpuf.asset_configuration.v1
+canonicalModelId=<canonicalModelId>
+deviceForm=<deviceForm>
+gpuCount=<base-10 integer>
+memoryPerGpuBytes=<base-10 integer>
+```
+
+The object is omitted when catalog identity/form is unavailable, inventory is incomplete,
+or model, form, or per-GPU memory differs across devices. GPUFabric does not guess a
+market-comparable configuration.
+
+### DELETE `/api/banking/provider/pre-evaluations/{reportId}/evidence`
+
+Purges temporarily retained raw offline JSON while preserving its SHA-256, the report
+snapshot, and the purge timestamp. The operation is idempotent and returns
+`rawEvidencePurged: false` when no raw document remains.
+
+Raw offline JSON is not stored by default. Set
+`GPUF_PRE_EVALUATION_STORE_RAW_EVIDENCE=true` to opt in and configure
+`GPUF_PRE_EVALUATION_RAW_EVIDENCE_TTL_DAYS` from 1 to 90 days; the default enabled TTL
+is 30 days. The API process sweeps expired evidence hourly. When `assetName` is omitted,
+the report uses the GPU model and does not copy the collector host name into the snapshot.
+
+Offline integrity is labeled `self_reported_challenge_bound`: it detects transport-time
+tampering and replay, but is not equivalent to TPM/TEE or vendor hardware attestation.
+The v3 hash covers collector metadata, the challenge, and hardware only. Unhashed
+`attestation.evidence_sources`, `warnings`, and `missing_evidence` are not copied into
+the assessment.
+The report snapshot remains immutable. Raw collector text is omitted by default and may
+be purged after temporary retention without deleting its integrity hash.
+
+The evidence score and grade measure technical evidence quality only. They are not hardware performance or bank credit scores. New reports keep `valuation` null and both `eligibleForListing` and `eligibleForCreditPrecheck` false. Stable `missingCodes`, `warningCodes`, and `nextActions` accompany compatibility text fields.
+Online reports use `authenticated_client_telemetry`, which identifies authenticated
+`gpuf-c` telemetry and must not be interpreted as server-side hardware attestation.
+
+GPU specifications are enriched server-side without changing the legacy `gpuf-c/common`
+protocol. Per-GPU specifications remain per-GPU. Heterogeneous nodes do not receive a
+single architecture, TDP, or bandwidth value; node-level interconnect bandwidth remains
+empty until topology evidence exists. Legacy total VRAM is not divided across multiple
+GPUs. If the reported GPU count differs from the per-GPU inventory, partial per-GPU
+specifications are not treated as node totals and the asset is not listing-eligible.
+
 ---
 
 ## POST `/api/user/edit_client_info`

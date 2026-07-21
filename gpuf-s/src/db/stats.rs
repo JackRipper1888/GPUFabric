@@ -178,7 +178,7 @@ impl DeviceDailyStats {
         devices: &Vec<common::DevicesInfo>,
         timestamp: DateTime<Utc>,
     ) -> Result<i32, sqlx::Error> {
-        if devices.is_empty() {
+        if devices.is_empty() || devices.iter().all(|device| device.num == 0) {
             return Ok(0);
         }
 
@@ -591,12 +591,13 @@ pub async fn get_client_stats(
 }
 
 #[tokio::test]
+#[ignore = "requires GPUF_TEST_DATABASE_URL"]
 async fn test_device_daily_stats() {
     let database_url = std::env::var("GPUF_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres@localhost:5432/postgres".to_string());
+        .expect("GPUF_TEST_DATABASE_URL is required for this integration test");
     let pool = PgPool::connect(&database_url).await.unwrap();
     let client_id = [0; 16];
-    let device_index = 1;
+    let device_index = 0;
     let device_info = common::DevicesInfo {
         os_type: common::OsType::LINUX,
         engine_type: common::EngineType::None,
@@ -604,7 +605,7 @@ async fn test_device_daily_stats() {
         ip: 0,
         memtotal_gb: 1,
         pod_id: 0,
-        num: 0,
+        num: 1,
         vendor_id: 0,
         device_id: 0,
         usage: 1,

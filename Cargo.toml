@@ -12,7 +12,7 @@ tokio = { version = "1", default-features = false, features = ["full", "sync","i
 rustls-pemfile = "2.2.0"
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc", "raw_value"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 clap = { version = "4", features = ["derive","env"] }

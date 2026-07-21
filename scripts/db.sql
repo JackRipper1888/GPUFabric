@@ -231,6 +231,328 @@ CREATE INDEX IF NOT EXISTS idx_device_daily_stats_date ON device_daily_stats (da
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_client_id ON device_daily_stats (client_id);
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_device_index ON device_daily_stats (device_index);
 
+CREATE TABLE IF NOT EXISTS pre_evaluation_reports (
+    report_id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64),
+    source_type VARCHAR(32) NOT NULL,
+    source_id VARCHAR(128) NOT NULL,
+    report_status VARCHAR(32) NOT NULL DEFAULT 'draft',
+    schema_version VARCHAR(64) NOT NULL,
+    report_sha256 VARCHAR(64) NOT NULL,
+    report_json TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE pre_evaluation_reports
+ADD COLUMN IF NOT EXISTS report_sha256 VARCHAR(64);
+
+ALTER TABLE pre_evaluation_reports
+ADD COLUMN IF NOT EXISTS report_html_sha256 VARCHAR(64),
+ADD COLUMN IF NOT EXISTS report_html TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pre_evaluation_report_html_pair'
+          AND conrelid = 'pre_evaluation_reports'::regclass
+    ) THEN
+        ALTER TABLE pre_evaluation_reports
+        ADD CONSTRAINT chk_pre_evaluation_report_html_pair CHECK (
+            (report_html IS NULL AND report_html_sha256 IS NULL)
+            OR (
+                report_html IS NOT NULL
+                AND report_html_sha256 ~ '^[0-9a-f]{64}$'
+            )
+        );
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    snapshot_type TEXT;
+BEGIN
+    SELECT data_type INTO snapshot_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'pre_evaluation_reports'
+      AND column_name = 'report_json';
+
+    IF snapshot_type <> 'text'
+       AND EXISTS (SELECT 1 FROM pre_evaluation_reports)
+    THEN
+        RAISE EXCEPTION 'legacy pre_evaluation_reports rows must be exported and reviewed before TEXT snapshot migration';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pre_evaluation_reports WHERE report_sha256 IS NULL
+    ) THEN
+        RAISE EXCEPTION 'legacy pre_evaluation_reports rows without integrity hashes require reviewed cleanup';
+    END IF;
+END $$;
+
+ALTER TABLE pre_evaluation_reports
+ALTER COLUMN report_json TYPE TEXT USING report_json::TEXT;
+
+ALTER TABLE pre_evaluation_reports
+ALTER COLUMN report_sha256 SET NOT NULL;
+
+CREATE TABLE IF NOT EXISTS pre_evaluation_idempotency (
+    service_subject_hash VARCHAR(64) NOT NULL,
+    tenant_ref_hash VARCHAR(64) NOT NULL,
+    operation VARCHAR(32) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    request_sha256 VARCHAR(64) NOT NULL,
+    report_id VARCHAR(64) REFERENCES pre_evaluation_reports(report_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
+    PRIMARY KEY (service_subject_hash, tenant_ref_hash, operation, idempotency_key),
+    CONSTRAINT chk_pre_evaluation_idempotency_subject_hash CHECK (service_subject_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_pre_evaluation_idempotency_tenant_hash CHECK (tenant_ref_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_pre_evaluation_idempotency_request_hash CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_pre_evaluation_idempotency_completion CHECK (
+        (report_id IS NULL AND completed_at IS NULL)
+        OR (report_id IS NOT NULL AND completed_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_pre_evaluation_idempotency_expiry
+ON pre_evaluation_idempotency (expires_at);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pre_evaluation_idempotency_tenant_hash'
+          AND conrelid = 'pre_evaluation_idempotency'::regclass
+    ) THEN
+        ALTER TABLE pre_evaluation_idempotency
+        ADD CONSTRAINT chk_pre_evaluation_idempotency_tenant_hash
+        CHECK (tenant_ref_hash ~ '^[0-9a-f]{64}$');
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_pre_evaluation_reports_user_created
+ON pre_evaluation_reports (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pre_evaluation_reports_source
+ON pre_evaluation_reports (source_type, source_id);
+
+CREATE OR REPLACE FUNCTION prevent_pre_evaluation_report_mutation()
+RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'pre_evaluation_reports rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_pre_evaluation_reports_immutable ON pre_evaluation_reports;
+CREATE TRIGGER trg_pre_evaluation_reports_immutable
+BEFORE UPDATE OR DELETE ON pre_evaluation_reports
+FOR EACH ROW EXECUTE FUNCTION prevent_pre_evaluation_report_mutation();
+
+CREATE TABLE IF NOT EXISTS pre_evaluation_report_evidence (
+    report_id VARCHAR(64) PRIMARY KEY REFERENCES pre_evaluation_reports(report_id),
+    evidence_sha256 VARCHAR(64) NOT NULL,
+    evidence_json TEXT,
+    retention_expires_at TIMESTAMPTZ,
+    purged_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS trg_pre_evaluation_evidence_immutable
+ON pre_evaluation_report_evidence;
+DROP FUNCTION IF EXISTS prevent_pre_evaluation_evidence_mutation();
+
+ALTER TABLE pre_evaluation_report_evidence
+ADD COLUMN IF NOT EXISTS retention_expires_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS purged_at TIMESTAMPTZ;
+
+UPDATE pre_evaluation_report_evidence
+SET evidence_json = NULL,
+    retention_expires_at = NULL,
+    purged_at = COALESCE(purged_at, NOW())
+WHERE evidence_json IS NOT NULL
+  AND created_at <= NOW() - INTERVAL '90 days';
+
+UPDATE pre_evaluation_report_evidence
+SET retention_expires_at = LEAST(
+    COALESCE(retention_expires_at, NOW() + INTERVAL '30 days'),
+    created_at + INTERVAL '90 days'
+)
+WHERE evidence_json IS NOT NULL;
+
+ALTER TABLE pre_evaluation_report_evidence
+ALTER COLUMN evidence_json DROP NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pre_evaluation_evidence_retention'
+          AND conrelid = 'pre_evaluation_report_evidence'::regclass
+    ) THEN
+        ALTER TABLE pre_evaluation_report_evidence
+        ADD CONSTRAINT chk_pre_evaluation_evidence_retention CHECK (
+            evidence_json IS NULL OR (
+                retention_expires_at IS NOT NULL
+                AND retention_expires_at <= created_at + INTERVAL '90 days'
+            )
+        );
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_pre_evaluation_evidence_expiry
+ON pre_evaluation_report_evidence (retention_expires_at)
+WHERE evidence_json IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS technical_asset_snapshots (
+    snapshot_id VARCHAR(64) PRIMARY KEY,
+    report_id VARCHAR(64) NOT NULL UNIQUE REFERENCES pre_evaluation_reports(report_id),
+    source_type VARCHAR(32) NOT NULL,
+    source_ref VARCHAR(128) NOT NULL,
+    schema_version VARCHAR(64) NOT NULL,
+    snapshot_sha256 VARCHAR(64) NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_technical_snapshot_sha256 CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX IF NOT EXISTS idx_technical_asset_snapshots_source
+ON technical_asset_snapshots (source_type, source_ref, created_at DESC);
+
+CREATE OR REPLACE FUNCTION prevent_technical_asset_snapshot_mutation()
+RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'technical_asset_snapshots rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_technical_asset_snapshots_immutable
+ON technical_asset_snapshots;
+CREATE TRIGGER trg_technical_asset_snapshots_immutable
+BEFORE UPDATE OR DELETE ON technical_asset_snapshots
+FOR EACH ROW EXECUTE FUNCTION prevent_technical_asset_snapshot_mutation();
+
+CREATE TABLE IF NOT EXISTS benchmark_evidence (
+    evidence_id VARCHAR(64) PRIMARY KEY,
+    source_ref VARCHAR(64) NOT NULL,
+    suite VARCHAR(128) NOT NULL,
+    suite_version VARCHAR(128) NOT NULL,
+    task VARCHAR(128) NOT NULL,
+    metric VARCHAR(128) NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    unit VARCHAR(128) NOT NULL,
+    tested_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    parameters_sha256 VARCHAR(64) NOT NULL,
+    key_id VARCHAR(64) NOT NULL,
+    payload_sha256 VARCHAR(64) NOT NULL,
+    payload_json TEXT NOT NULL,
+    signature_base64 TEXT NOT NULL,
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_benchmark_source_ref CHECK (source_ref ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_benchmark_parameters_hash CHECK (parameters_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_benchmark_payload_hash CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_benchmark_value CHECK (value > 0),
+    CONSTRAINT chk_benchmark_window CHECK (expires_at > tested_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_evidence_source_time
+ON benchmark_evidence (source_ref, tested_at DESC);
+
+CREATE OR REPLACE FUNCTION prevent_benchmark_evidence_mutation()
+RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'benchmark_evidence rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_benchmark_evidence_immutable ON benchmark_evidence;
+CREATE TRIGGER trg_benchmark_evidence_immutable
+BEFORE UPDATE OR DELETE ON benchmark_evidence
+FOR EACH ROW EXECUTE FUNCTION prevent_benchmark_evidence_mutation();
+
+CREATE TABLE IF NOT EXISTS gpu_model_specs (
+    id BIGSERIAL PRIMARY KEY,
+    vendor_id INTEGER,
+    device_id INTEGER,
+    canonical_model_id VARCHAR(128),
+    canonical_model VARCHAR(255) NOT NULL,
+    device_form VARCHAR(32),
+    model_aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
+    architecture VARCHAR(128),
+    process_nm DOUBLE PRECISION,
+    tdp_w DOUBLE PRECISION,
+    fp16_tflops DOUBLE PRECISION,
+    fp32_tflops DOUBLE PRECISION,
+    int8_tops DOUBLE PRECISION,
+    int4_tops DOUBLE PRECISION,
+    memory_bandwidth_gbps DOUBLE PRECISION,
+    interconnect VARCHAR(128),
+    interconnect_bandwidth_gbps DOUBLE PRECISION,
+    supported_precisions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    supported_workloads JSONB NOT NULL DEFAULT '[]'::jsonb,
+    spec_source VARCHAR(255) NOT NULL,
+    spec_version VARCHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (vendor_id, device_id)
+);
+
+ALTER TABLE gpu_model_specs
+ADD COLUMN IF NOT EXISTS canonical_model_id VARCHAR(128),
+ADD COLUMN IF NOT EXISTS device_form VARCHAR(32);
+
+DROP INDEX IF EXISTS idx_gpu_model_specs_canonical_model;
+CREATE UNIQUE INDEX idx_gpu_model_specs_canonical_model
+ON gpu_model_specs (LOWER(canonical_model));
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gpu_model_specs_canonical_model_id
+ON gpu_model_specs (LOWER(canonical_model_id))
+WHERE canonical_model_id IS NOT NULL;
+
+INSERT INTO gpu_model_specs (
+    vendor_id, device_id, canonical_model_id, canonical_model, device_form, model_aliases,
+    architecture, process_nm, tdp_w, fp16_tflops, fp32_tflops,
+    int8_tops, memory_bandwidth_gbps, interconnect,
+    interconnect_bandwidth_gbps, supported_precisions, supported_workloads,
+    spec_source, spec_version
+) VALUES
+    (4318, 8373, 'nvidia-a100-pcie-80gb', 'NVIDIA A100 PCIe 80GB', 'pcie_card', '["NVIDIA A100 80GB", "NVIDIA A100 PCIe 80GB"]'::jsonb,
+     'Ampere', 7, 300, 312, 19.5, 624, 1935, NULL, NULL,
+     '["fp32", "fp16", "bf16", "int8"]'::jsonb, '["llm", "moe", "diffusion"]'::jsonb,
+     'https://www.nvidia.com/en-us/data-center/a100/', '2026-07-v2'),
+    (4318, 10115, 'nvidia-geforce-rtx-4070-super', 'NVIDIA GeForce RTX 4070 SUPER', 'pcie_card', '["GeForce RTX 4070 SUPER", "NVIDIA RTX 4070 SUPER"]'::jsonb,
+     'Ada Lovelace', 4, 220, NULL, 36, NULL, NULL, 'PCIe 4.0', NULL,
+     '["fp32", "fp16", "bf16", "fp8", "int8"]'::jsonb, '["llm", "diffusion", "graphics", "video"]'::jsonb,
+     'https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/rtx-4070-family/', 'nvidia-2026-07-17'),
+    (4098, 5510, 'amd-ryzen-ai-max-plus-395-radeon-8060s', 'AMD Ryzen AI Max+ 395 / Radeon 8060S Graphics', 'appliance', '["AMD Ryzen AI Max+ 395", "Radeon 8060S Graphics"]'::jsonb,
+     'RDNA 3.5', 4, NULL, 16, 8, NULL, NULL, 'Unified memory', NULL,
+     '["fp32", "fp16", "bf16", "int8"]'::jsonb, '["llm", "diffusion"]'::jsonb,
+     'GPUFabric model estimate for PCI device 0x1586', '2026-07-v2')
+ON CONFLICT (vendor_id, device_id) DO UPDATE SET
+    canonical_model_id = EXCLUDED.canonical_model_id,
+    canonical_model = EXCLUDED.canonical_model,
+    device_form = EXCLUDED.device_form,
+    model_aliases = EXCLUDED.model_aliases,
+    architecture = EXCLUDED.architecture,
+    process_nm = EXCLUDED.process_nm,
+    tdp_w = EXCLUDED.tdp_w,
+    fp16_tflops = EXCLUDED.fp16_tflops,
+    fp32_tflops = EXCLUDED.fp32_tflops,
+    int8_tops = EXCLUDED.int8_tops,
+    int4_tops = EXCLUDED.int4_tops,
+    memory_bandwidth_gbps = EXCLUDED.memory_bandwidth_gbps,
+    interconnect = EXCLUDED.interconnect,
+    interconnect_bandwidth_gbps = EXCLUDED.interconnect_bandwidth_gbps,
+    supported_precisions = EXCLUDED.supported_precisions,
+    supported_workloads = EXCLUDED.supported_workloads,
+    spec_source = EXCLUDED.spec_source,
+    spec_version = EXCLUDED.spec_version,
+    updated_at = NOW();
+
 CREATE TABLE IF NOT EXISTS heartbeat_config_daily (
     date DATE PRIMARY KEY,
     heartbeat_interval_secs INTEGER NOT NULL DEFAULT 120,

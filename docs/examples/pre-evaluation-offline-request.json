@@ -1,0 +1,5 @@
+{
+  "userId": "1",
+  "assetName": "离线GPU节点-01",
+  "hardwareEvidenceJson": "{\"schema_version\":\"gpuf.hw_asset_report.v3\",\"collected_at_unix\":1,\"collector\":{\"tool_name\":\"hw-asset-collector\",\"tool_version\":\"0.1.0\",\"privacy_mode\":\"serials_redacted\"},\"hardware\":{\"host\":{\"hostname\":\"offline-node-01\",\"os\":\"Linux\",\"architecture\":\"x86_64\"},\"gpus\":[{\"index\":0,\"vendor_id\":\"0x10de\",\"device_id\":\"0x20b5\",\"model\":\"NVIDIA A100 PCIe 80GB\"}]},\"attestation\":{\"payload_sha256\":\"REPLACE_WITH_COLLECTOR_HASH\",\"challenge\":\"REPLACE_WITH_SERVER_CHALLENGE\"}}"
+}
