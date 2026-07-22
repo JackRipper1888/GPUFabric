@@ -19,11 +19,14 @@
 - GPUFabric 与 new-api 已实现稳定离线资产引用：new-api 返回 64 位 `benchmarkSourceRef`，GPUFabric 用固定 `gpuf.offline_asset_source.v1` profile 生成同一 `sourceRef`；collector `payloadSha256` 仍只绑定单次 challenge。跨语言固定向量、普通回归和 z370 真实签名 Benchmark 自动关联验收均已通过。
 - assessment-service 已提供 `market:verify` 隔离的待核验市场样本队列；真实供应商适配器仍需在许可和对象访问方案确定后接入。
 - 2026-07-22 本地 Docker staging 已部署当前 GPUFabric 与 assessment-service；new-api live contract 已通过在线预评估、目录配置 Hash、自动 BenchmarkEvidence、T2 正式评估和 `asset.lifecycle` 材料要求。独立离线 live contract 已通过 SSH 在 z370 的 RTX 4070 SUPER 上运行带利用率/温度/功耗序列的真实 `hw-asset-collector`，经 new-api 服务层消费一次性 challenge 并生成不可变报告/快照；同一流程通过 SSH 隧道运行 Ollama workload，自动关联 LLM 与稳定性两项 Ed25519 BenchmarkEvidence。assessment-service 回调密钥边界已与 new-api 对齐为 32 至 4096 字节，配置负例、全量测试和重部署后 live contract 均已通过。
+- 2026-07-22 assessment-service Outbox 已向宿主机 `new-api` 真实回调路由投递事件；生产验签中间件、严格 JSON 控制器、任务绑定、状态投影和回执持久化均通过，最新在线设备评估的 `technical_fetching`、`evidence_pending` 事件在 0 次重试下标记 delivered。new-api 新增默认跳过的 `BANKING_LIVE_CALLBACK_E2E` 合同测试，可重复验证该边界。
+- 正式报告代码链路已通过三层回归：renderer/签名验证/私有存储失败不产生 issued 状态，签发/撤销/过期/最长 120 秒下载授权通过，独立 PostgreSQL 数据库的 issued 报告和 download grant 约束通过，new-api 回调后下载代理与不落 URL 的审计通过。
 
 ### 尚未完成或存在缺口
 
 - asset-assessment-service 的内部远端已建立，生命周期基线提交 `17429ae` 与技术配置/成色/估值一致性提交 `7fd0899` 均已推送 `main`。
-- new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与 z370 离线服务层 live contract 已通过，剩余真实 user-service/数据库部署下的浏览器链路，以及真实材料、assessment-service Outbox 到 new-api HTTP 回调和 issued 下载联合回归。
+- new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与 z370 离线服务层 live contract、assessment-service Outbox 到 new-api HTTP 签名回调均已通过。剩余真实 user-service/数据库部署下的浏览器链路、真实材料闭环，以及接入生产 renderer/签名/存储后的 issued 下载联合回归。
+- 当前常驻的 `gpuf-s-test-api-server` 容器仍是候选设备路由提交前构建的旧镜像；本次联合验收使用当前已提交源码的临时 API 实例通过。进入持久联调环境前必须重建/滚动该容器，并复验 `/internal/v1/banking/device-candidates`，避免源码与部署漂移。
 - GPUFabric T0 预评估代码闭环、collector 短期运行采样、z370 真实离线节点和签名 Benchmark 自动关联验收均已通过；剩余 collector 的正式签名发布/下载渠道、生产服务身份、可靠事件和规格目录持续扩充。
 - collector 已支持 `--runtime-history-file` 跨进程追加和加载最多 90 天的 JSONL 运行历史，并在报告中给出真实 `observation_days`；该历史仍属于自报告证据。至少 7 个自然日的授信级长期稳定性仍需要设备侧周期代理提交观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
 - 私有存储代码支持 HMAC gateway、原生 S3 SigV4 和阿里云 OSS V4；可信事件核验和读取授权接口已完成。真实 bucket 禁止公共访问、RAM/IAM/RRSA/STS、KMS、保留期以及云事件源到桥接入口的部署验收仍未完成，腾讯云 COS 原生适配未实现。
@@ -38,7 +41,7 @@
 | 3 | P0 | new-api 用户可见预评估最小闭环 | new-api `NA-001` 至 `NA-006` | 2 | 代码已完成，在线与 z370 真实离线服务层 live contract 已通过；剩余真实 user-service/数据库环境的浏览器 HTTP 验收。 |
 | 4 | P0 | 技术引用接入 new-api | new-api `NA-007`（GPUFabric 侧已完成） | 2，可与 3 并行 | new-api 技术引用持久化和在线/离线 live contract 已通过；剩余 collector 正式发布和生产节点推广回归。 |
 | 5 | P0 | 预评估报告内容发布验收 | GPUFabric `GF-009` 至 `GF-011` 已完成，`GF-014` 持续扩充 | 4 | 结构化码、冻结 HTML、兼容空金融字段已通过；发布前复验目标型号目录来源，报告始终不生成无来源金额。 |
-| 6 | P0 | new-api 正式评估状态骨架 | new-api `NA-008` 至 `NA-011` | 2、3 | 代码及在线 T2 live contract 已完成；剩余真实回调接收、乱序重放和浏览器状态投影联合验收。 |
+| 6 | P0 | new-api 正式评估状态骨架 | new-api `NA-008` 至 `NA-011` | 2、3 | 代码、在线 T2 live contract 和 assessment-service Outbox 真实签名回调已完成；剩余持久数据库部署下的进程重启/乱序重放和浏览器状态投影联合验收。 |
 | 7 | P0 | 接入真实私有对象存储 | assessment-service + Storage Gateway | 1、6 | S3/OSS 上传、服务端 HEAD 核验、事务化事件收据和短时 GET 授权代码/本地测试已完成；剩余真实 bucket/KMS/最小权限和云事件源部署验收，COS 原生适配按部署区域另行决定。 |
 | 8 | P0 | 接入 Scanner、证据审核端和上传代理 | Scanner + Reviewer + new-api `NA-012` | 7 | assessment-service 队列、状态授权、结果回调和审计边界及 new-api 上传会话代理已完成；剩余真实 Scanner/OCR、Reviewer Workbench 联调，完成真实文件 upload -> event -> scan -> review -> `ready_for_valuation`。 |
 | 9 | P1 | 生产 BenchmarkEvidence 接入 | GPUFabric `GF-015` + assessment-service `AS-006` | 4、8 | GPUFabric 登记/Ed25519 验签、空 ID 自动关联、LLM/稳定性双证据 runner 和 assessment T1/T2 策略已通过本地回归；剩余生产 workload 验收、阈值异常复核和密钥签发/轮换/吊销。 |
@@ -46,7 +49,7 @@
 | 11 | P1 | 不可变市场快照聚合 | assessment-service `AS-008` | 10 | 代码已支持待核验队列、可复算配置 Hash、已核验 MarketObservation 聚合和最少 3 样本/2 来源；还需真实样本适配器、许可/撤回、异常值策略和生产回归。 |
 | 12 | P1 | 版本化估值策略 | assessment-service `AS-009` | 8、9、11 | 代码已支持 PricingPolicy 草稿/独立主体审批和 ValuationResult 可复算，同输入同策略返回同一结果；生产仍需真实市场许可和样本治理。 |
 | 13 | P1 | 正式审核后台 | assessment-service `AS-013` | 8、12 | 服务端已支持任务提交、主审/复审分配、顺序审批、职责分离和不可变动作审计，并拒绝人工金额覆盖；剩余真实 Workbench、人员身份联合认证和生产权限回归。 |
-| 14 | P1 | 报告冻结与生命周期 | assessment-service `AS-010` + new-api `NA-013` | 12、13 | 服务端和 new-api `NA-013` 下载代理均已实现；仍需真实 renderer/存储/签名依赖和 issued 下载联合验收。 |
+| 14 | P1 | 报告冻结与生命周期 | assessment-service `AS-010` + new-api `NA-013` | 12、13 | 服务端和 new-api `NA-013` 下载代理均已实现，服务/HTTP/独立 PostgreSQL/代理审计回归通过；仍需真实 renderer、私有存储、签名依赖和生产 issued 下载联合验收。 |
 | 15 | P1 | Signing Service / HSM | assessment-service `AS-012` | 14 | 已实现冻结摘要 envelope、依赖客户端、X.509 链和 detached signature 验证及失败保持 frozen；剩余真实 HSM 私钥、机构证书、可信时间戳和轮换演练。 |
 | 16 | P1 发布门禁 | 生产身份与可靠事件 | GPUFabric `GF-012/013` + new-api `NA-014` | 2 至 15 可并行推进 | assessment-service 已支持 Token 轮换和 subject-bound mTLS；剩余生产 OAuth2 issuer/audience、GPUFabric/new-api 身份、事件重试/死信、审计保留和依赖降级监控联合验收。 |
 
@@ -86,4 +89,4 @@
 - 在市场数据许可、样本治理、审核人员身份联合认证和正式报告冻结完成前，不向用户或授信流程输出参考估值、质押率、可贷额度或正式授信参考。
 - 在报告冻结和正式审核完成前，不接入生产 HSM 或申请正式机构证书。
 - 在真实对象存储、扫描器和审核端联调前，不宣称 AS-005 生产闭环完成。
-- new-api 回调验签、幂等和状态映射代码已完成；在真实回调密钥、重试和乱序联合验收前，不把 assessment-service 状态直接用于生产业务结论。
+- new-api 真实回调密钥、验签、任务绑定、幂等和状态映射已完成本地 Docker 联合验收；在持久数据库部署、进程重启、乱序/死信重放和监控告警验收前，不把 assessment-service 状态直接用于生产业务结论。
