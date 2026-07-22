@@ -16,16 +16,16 @@
 - asset-assessment-service 已实现原生 S3 SigV4 和阿里云 OSS V4 私有存储适配、正式报告 PDF/签发/撤销/过期/短时下载生命周期、Signing Service/X.509 验证边界、Token 轮换和 subject-bound mTLS。
 - `assessment.benchmark-policy.v1` 已接入正式评估：T1 要求有效稳定性证据，T2 额外要求有效 LLM 性能证据；双证据成功、稳定性单证据 T1 成功/T2 拒绝、幂等和 PostgreSQL 持久化跨服务回归已通过。
 - GPUFabric 已生成目录绑定的 `gpuf.asset_configuration.v1` 并自动关联同设备最新有效 BenchmarkEvidence；assessment-service 独立重算配置 Hash，估值强制匹配技术配置和经 `asset.lifecycle` 审核的成色。
-- GPUFabric 与 new-api 已实现稳定离线资产引用：new-api 返回 64 位 `benchmarkSourceRef`，GPUFabric 用固定 `gpuf.offline_asset_source.v1` profile 生成同一 `sourceRef`；collector `payloadSha256` 仍只绑定单次 challenge。跨语言固定向量和普通回归已通过，真实签名 Benchmark 的 z370 自动关联验收仍待执行。
+- GPUFabric 与 new-api 已实现稳定离线资产引用：new-api 返回 64 位 `benchmarkSourceRef`，GPUFabric 用固定 `gpuf.offline_asset_source.v1` profile 生成同一 `sourceRef`；collector `payloadSha256` 仍只绑定单次 challenge。跨语言固定向量、普通回归和 z370 真实签名 Benchmark 自动关联验收均已通过。
 - assessment-service 已提供 `market:verify` 隔离的待核验市场样本队列；真实供应商适配器仍需在许可和对象访问方案确定后接入。
-- 2026-07-21 本地 Docker staging 已部署当前 GPUFabric 与 assessment-service；new-api live contract 已通过在线预评估、目录配置 Hash、自动 BenchmarkEvidence、T2 正式评估和 `asset.lifecycle` 材料要求。独立离线 live contract 已通过 SSH 在 z370 的 RTX 4070 SUPER 上运行真实 `hw-asset-collector`，经 new-api 服务层消费一次性 challenge 并生成不可变报告/快照。assessment-service 回调密钥边界已与 new-api 对齐为 32 至 4096 字节，配置负例、全量测试和重部署后 live contract 均已通过。
+- 2026-07-22 本地 Docker staging 已部署当前 GPUFabric 与 assessment-service；new-api live contract 已通过在线预评估、目录配置 Hash、自动 BenchmarkEvidence、T2 正式评估和 `asset.lifecycle` 材料要求。独立离线 live contract 已通过 SSH 在 z370 的 RTX 4070 SUPER 上运行带利用率/温度/功耗序列的真实 `hw-asset-collector`，经 new-api 服务层消费一次性 challenge 并生成不可变报告/快照；同一流程通过 SSH 隧道运行 Ollama workload，自动关联 LLM 与稳定性两项 Ed25519 BenchmarkEvidence。assessment-service 回调密钥边界已与 new-api 对齐为 32 至 4096 字节，配置负例、全量测试和重部署后 live contract 均已通过。
 
 ### 尚未完成或存在缺口
 
 - asset-assessment-service 的内部远端已建立，生命周期基线提交 `17429ae` 与技术配置/成色/估值一致性提交 `7fd0899` 均已推送 `main`。
 - new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与 z370 离线服务层 live contract 已通过，剩余真实 user-service/数据库部署下的浏览器链路，以及真实材料、assessment-service Outbox 到 new-api HTTP 回调和 issued 下载联合回归。
-- GPUFabric T0 预评估代码闭环已完成，z370 真实离线节点回归已通过；剩余 collector 的正式签名发布/下载渠道、z370 签名 Benchmark 自动关联验收、生产服务身份、可靠事件和规格目录持续扩充。
-- 离线长期运行历史尚未实现。一次 collector 快照不能证明长期稳定性；需要设备侧周期代理按至少 7 个不同自然日提交 challenge-bound 运行观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。完成前离线报告必须保留 `RUNTIME_HISTORY_MISSING`；这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
+- GPUFabric T0 预评估代码闭环、collector 短期运行采样、z370 真实离线节点和签名 Benchmark 自动关联验收均已通过；剩余 collector 的正式签名发布/下载渠道、生产服务身份、可靠事件和规格目录持续扩充。
+- 离线短期运行采样已实现，但至少 7 个自然日的长期运行历史尚未实现。后续需要设备侧周期代理提交运行观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
 - 私有存储代码支持 HMAC gateway、原生 S3 SigV4 和阿里云 OSS V4；可信事件核验和读取授权接口已完成。真实 bucket 禁止公共访问、RAM/IAM/RRSA/STS、KMS、保留期以及云事件源到桥接入口的部署验收仍未完成，腾讯云 COS 原生适配未实现。
 - 报告生命周期和依赖失败语义已有服务端代码与本地测试；Scanner/Reviewer 的服务端接入边界已经完成，但真实隔离 Scanner/OCR、Reviewer Workbench、renderer、Signing Service/HSM、可信时间戳和生产证书尚未接入。市场数据样本/核验/不可变快照、版本化估值策略、策略审批职责分离和双人正式审核已有服务端代码闭环；真实供应商许可、生产样本治理和审核人员联合认证仍是正式金额前置门禁。
 

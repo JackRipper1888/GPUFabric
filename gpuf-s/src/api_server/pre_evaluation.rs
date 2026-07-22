@@ -1333,6 +1333,11 @@ fn normalize_offline(root: &Value, asset_name: Option<String>) -> Option<Normali
     let gpu_memory = strict_sum_u64(gpus.iter().map(|gpu| gpu.memory_bytes));
     let fp16_tflops = strict_sum(gpus.iter().map(|gpu| gpu.fp16_tflops));
     let fp32_tflops = strict_sum(gpus.iter().map(|gpu| gpu.fp32_tflops));
+    let runtime = normalize_offline_runtime(root);
+    let mut sources = vec!["hw-asset-collector:challenge-bound-sha256".to_string()];
+    if runtime.is_some() {
+        sources.push("hw-asset-collector:runtime-history".to_string());
+    }
     let asset_name_is_explicit = asset_name.is_some();
     Some(Normalized {
         source_type: "offline_collector",
@@ -1364,16 +1369,62 @@ fn normalize_offline(root: &Value, asset_name: Option<String>) -> Option<Normali
         specification_source: None,
         specification_version: None,
         gpus,
-        runtime: None,
+        runtime,
         fp16_tflops,
         fp32_tflops,
         int8_tops: None,
         int4_tops: None,
-        sources: vec!["hw-asset-collector:challenge-bound-sha256".to_string()],
+        sources,
         missing: Vec::new(),
         warnings: Vec::new(),
         missing_codes: Vec::new(),
         warning_codes: Vec::new(),
+    })
+}
+
+fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
+    let history = root.pointer("/hardware/runtime_history")?;
+    let observation_count = history.get("observation_count")?.as_u64()?;
+    if observation_count == 0 {
+        return None;
+    }
+
+    let gpu_utilization_percent = history
+        .get("avg_gpu_utilization_percent")
+        .and_then(Value::as_f64)
+        .filter(|value| valid_percent_f64(*value));
+    let gpu_temperature_c = history
+        .get("avg_temperature_c")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && (-100.0..=250.0).contains(value));
+    let gpu_power_usage_w = history
+        .get("avg_power_draw_w")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && (0.0..=100_000.0).contains(value));
+    if gpu_utilization_percent.is_none()
+        && gpu_temperature_c.is_none()
+        && gpu_power_usage_w.is_none()
+    {
+        return None;
+    }
+
+    let observation_days = history
+        .get("duration_seconds")
+        .and_then(Value::as_u64)
+        .map(|seconds| seconds / 86_400)
+        .and_then(|days| u32::try_from(days).ok());
+    Some(Runtime {
+        online: Some(true),
+        uptime_days: None,
+        cpu_usage_percent: None,
+        memory_usage_percent: None,
+        storage_usage_percent: None,
+        gpu_utilization_percent,
+        gpu_memory_usage_percent: None,
+        gpu_temperature_c,
+        gpu_power_usage_percent: None,
+        gpu_power_usage_w,
+        observation_days,
     })
 }
 
@@ -1900,6 +1951,46 @@ mod tests {
         });
         let normalized = normalize_offline(&evidence, None).unwrap();
         assert_eq!(normalized.asset_name, "Test GPU");
+    }
+
+    #[test]
+    fn offline_runtime_history_is_normalized_without_claiming_long_term_stability() {
+        let evidence = json!({
+            "hardware": {
+                "gpus": [{"model": "Test GPU", "vram_total_bytes": 8_589_934_592_u64}],
+                "runtime_history": {
+                    "sampling_interval_seconds": 60,
+                    "duration_seconds": 300,
+                    "observation_count": 6,
+                    "avg_gpu_utilization_percent": 83.5,
+                    "avg_temperature_c": 71.0,
+                    "avg_power_draw_w": 188.5,
+                    "max_temperature_c": 75.0,
+                    "max_power_draw_w": 205.0
+                }
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+
+        let normalized = normalize_offline(&evidence, None).unwrap();
+        let runtime = normalized.runtime.as_ref().unwrap();
+        assert_eq!(runtime.gpu_utilization_percent, Some(83.5));
+        assert_eq!(runtime.gpu_temperature_c, Some(71.0));
+        assert_eq!(runtime.gpu_power_usage_w, Some(188.5));
+        assert_eq!(runtime.observation_days, Some(0));
+        assert!(normalized
+            .sources
+            .contains(&"hw-asset-collector:runtime-history".to_string()));
+
+        let report = build_report(normalized, Vec::new());
+        assert!(!report
+            .evidence
+            .missing_codes
+            .contains(&"RUNTIME_HISTORY_MISSING".to_string()));
+        assert!(report
+            .evidence
+            .warning_codes
+            .contains(&"SHORT_OBSERVATION_WINDOW".to_string()));
     }
 
     #[test]

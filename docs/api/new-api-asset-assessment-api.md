@@ -31,6 +31,7 @@ sequenceDiagram
     actor User as Provider 浏览器
     participant N as new-api
     participant G as GPUFabric
+    participant C as hw-asset-collector
     participant B as Benchmark Runner
     participant A as assessment-service
     participant O as 对象存储
@@ -51,7 +52,9 @@ sequenceDiagram
         G-->>N: collectorChallenge + expiresAt + sourceRef
         N->>N: 保存 challenge SHA-256，校验稳定 sourceRef
         N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
-        User->>User: 在目标设备运行 hw-asset-collector
+        User->>C: challenge + 可选 runtime duration/interval
+        C->>C: 采集静态清单 + GPU 利用率/温度/功耗序列
+        C-->>User: challenge-bound 原始 JSON
         opt 提交前补齐可信 Benchmark
             Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥
             B->>B: 以 benchmarkSourceRef 运行至少 3 轮 workload
@@ -60,6 +63,7 @@ sequenceDiagram
         end
         User->>N: POST /pre-evaluations/{taskRef}/evidence，原始采集 JSON
         N->>G: from-evidence + 相同 offlineAssetRef
+        G->>G: 归一化 runtime；短于 7 天标记 SHORT_OBSERVATION_WINDOW
         G->>G: 自动关联该 sourceRef 的有效签名 Benchmark
         G-->>N: 202 不可变 reportId
         N-->>User: 202 status=generating
@@ -1166,21 +1170,30 @@ GPUFABRIC_BASE_URL='http://127.0.0.1:18181' \
 GPUFABRIC_BANKING_TOKEN='<staging-token>' \
 BANKING_LIVE_OFFLINE_COLLECTOR_PATH='/tmp/hw-asset-collector-0.1.0-linux-x86_64' \
 BANKING_LIVE_OFFLINE_SSH_TARGET='z370' \
+BANKING_LIVE_OFFLINE_RUNTIME_DURATION_SECONDS='2' \
+BANKING_LIVE_OFFLINE_RUNTIME_INTERVAL_SECONDS='1' \
 BANKING_LIVE_OFFLINE_BENCHMARK_RUNNER='/path/to/run_signed_ollama_benchmark.sh' \
 go test -buildvcs=false -count=1 \
   -run TestBankingLiveOfflineCollectorContract -v ./service
 ```
 
 该测试通过 new-api 服务层创建离线资产和一次性 challenge，在目标设备执行真实
-`hw-asset-collector --challenge <challenge>`，校验 v3 schema、`serials_redacted`、
-payload SHA-256、challenge 和至少一张 GPU，再把未修改的原始 JSON 提交给 GPUFabric。
+`hw-asset-collector --challenge <challenge>`；设置两个 runtime 环境变量时，测试会追加
+`--runtime-duration-seconds`/`--runtime-interval-seconds`，校验 v3 schema、
+`serials_redacted`、payload SHA-256、challenge、至少一张 GPU 和非空
+`runtime_history`，再把未修改的原始 JSON 提交给 GPUFabric。最终报告必须包含利用率、
+温度、功耗，并移除 `RUNTIME_HISTORY_MISSING`；短于 7 天的窗口必须保留
+`SHORT_OBSERVATION_WINDOW`。
 普通测试默认跳过该流程，避免意外执行 SSH 或创建 staging 报告。
 
 Benchmark runner 可选；设置后测试会自动注入 session 的 `GPUF_BENCHMARK_SOURCE_REF`，runner 还需由受控执行环境提供 `GPUF_BENCHMARK_API_URL`、producer Token、Ed25519 私钥/`keyId`、目标 Ollama URL 和模型。测试要求登记结果是 JSON，并在最终报告中验证至少两项已关联 Benchmark。
 
-2026-07-21 在 `ssh z370` 的 RTX 4070 SUPER 上完成过该回归：GPUFabric 将来源标记为
-`offline_collector / self_reported_challenge_bound`，目录补全 canonical model 和技术规格，
-并如实返回 `TRUSTED_BENCHMARK_MISSING`、`RUNTIME_HISTORY_MISSING`，未把理论规格冒充为实测。
+2026-07-22 在 `ssh z370` 的 RTX 4070 SUPER 上完成该完整回归：collector 采集真实
+利用率、温度、功耗和显存序列；受控 Runner 经 SSH 隧道对 `llama3.2:latest` 运行 3 轮
+workload，登记并自动关联 LLM 与稳定性两项 Ed25519 BenchmarkEvidence。GPUFabric 将来源
+标记为 `offline_collector / self_reported_challenge_bound`，目录补全 canonical model 和
+技术规格，报告包含 runtime 且保留 `SHORT_OBSERVATION_WINDOW`，未把 2 秒样本冒充为
+7 天长期历史。
 
 ## 20. 当前依赖
 

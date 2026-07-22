@@ -3,6 +3,7 @@ sequenceDiagram
     actor User as Provider 浏览器
     participant N as new-api
     participant G as GPUFabric
+    participant C as hw-asset-collector
     participant B as Benchmark Runner
     participant A as assessment-service
     participant O as 对象存储
@@ -24,7 +25,9 @@ sequenceDiagram
         G-->>N: collectorChallenge + expiresAt + sourceRef
         N->>N: 保存 challenge SHA-256，校验稳定 sourceRef
         N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
-        User->>User: 在目标设备运行 hw-asset-collector
+        User->>C: challenge + 可选 runtime duration/interval
+        C->>C: 采集静态清单 + GPU 利用率/温度/功耗序列
+        C-->>User: challenge-bound 原始 JSON
         opt 提交前补齐可信 Benchmark
             Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥
             B->>B: 以 benchmarkSourceRef 运行至少 3 轮 workload
@@ -33,6 +36,7 @@ sequenceDiagram
         end
         User->>N: POST /pre-evaluations/{taskRef}/evidence，原始采集 JSON
         N->>G: from-evidence + 相同 offlineAssetRef
+        G->>G: 归一化 runtime；短于 7 天标记 SHORT_OBSERVATION_WINDOW
         G->>G: 自动关联该 sourceRef 的有效签名 Benchmark
         G-->>N: 202 不可变 reportId
         N-->>User: 202 status=generating
