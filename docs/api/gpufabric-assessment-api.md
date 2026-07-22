@@ -35,13 +35,26 @@ Accept: application/json
 建议 scope：
 
 ```text
+device-candidate:read
 technical-report:read
 technical-snapshot:read
 ```
 
 assessment-service 和其他调用方必须使用不同服务身份，禁止共享 Token。报告创建可携带 `Idempotency-Key`，范围为脱敏服务主体 + 脱敏租户 + 操作；相同请求复用结果，不同请求返回 `409`。Benchmark 注册使用独立 producer Token 和 Ed25519 公钥集合。
 
-## 3. 创建技术预评估
+## 3. 查询本人设备候选（服务间）
+
+```http
+GET /internal/v1/banking/device-candidates?gpufUserRef=<mapped-user-ref>
+Authorization: Bearer <GPUF_BANKING_API_TOKEN>
+```
+
+该接口与技术预评估共用 banking 服务 Token 校验，只返回指定 GPUFabric 用户下
+`valid` 设备的必要字段：`gpufUserRef/gpufClientRef/displayName/status/osType/deviceName/health/uptimeDays/lastOnline`。
+原始引用只提供给 new-api 等内部编排服务；new-api 必须转换为绑定当前登录用户、短期有效的
+不透明候选引用后再返回浏览器。不得把公开 `/api/user/client_list` 当作 banking 归属校验边界。
+
+## 4. 创建技术预评估
 
 在线和离线创建接口分别为：
 
@@ -95,7 +108,7 @@ internal 离线请求示例：
 }
 ```
 
-## 4. 注册可信 BenchmarkEvidence
+## 5. 注册可信 BenchmarkEvidence
 
 ```http
 POST /api/banking/provider/benchmark-evidence
@@ -103,7 +116,7 @@ POST /api/banking/provider/benchmark-evidence
 
 只接受 Ed25519 签名的原始 `payloadJson`，并验证设备 `sourceRef`、参数 SHA-256、测试时间和有效期。报告只能引用已登记、未过期且与技术来源一致的证据。`scripts/run_signed_ollama_benchmark.sh` 最少执行 3 轮，并分别登记 LLM 吞吐和持续吞吐百分比两条证据。
 
-## 5. 查询技术预评估报告
+## 6. 查询技术预评估报告
 
 ```http
 GET /internal/v1/technical-pre-evaluations/{reportId}
@@ -142,7 +155,7 @@ GET /api/banking/provider/pre-evaluations/{reportId}/html
 
 调用方对原始 HTML UTF-8 字节计算 SHA-256，并同时比较引用 Hash 与 `X-Content-SHA256`。
 
-## 6. 查询不可变技术快照
+## 7. 查询不可变技术快照
 
 ```http
 GET /internal/v2/technical-snapshots/{snapshotId}
@@ -202,7 +215,7 @@ GET /internal/v2/technical-snapshots/{snapshotId}
 - [`technical-asset-snapshot.v2.schema.json`](../schema/technical-asset-snapshot.v2.schema.json)
 - [`technical-asset-snapshot-v2.json`](../examples/technical-asset-snapshot-v2.json)
 
-## 7. Hash 验证规则
+## 8. Hash 验证规则
 
 1. `reportJson` 与 `snapshotJson` 是数据库中不可变保存的原始 JSON 字节串。
 2. 分别对 UTF-8 字节直接计算 SHA-256，不得在验证前解析、重新排序或重新序列化。
@@ -212,7 +225,7 @@ GET /internal/v2/technical-snapshots/{snapshotId}
 
 旧的 canonical JSON 信封只用于存量兼容；新生成报告和快照统一使用原始 JSON 字节 Hash。
 
-## 8. 数据最小化
+## 9. 数据最小化
 
 技术快照不得返回：
 
@@ -223,7 +236,7 @@ GET /internal/v2/technical-snapshots/{snapshotId}
 
 需要设备绑定时只返回稳定脱敏标识或由评估域生成 `assetIdentityHash`。
 
-## 9. 状态和错误码
+## 10. 状态和错误码
 
 建议错误码：
 
@@ -238,14 +251,14 @@ GET /internal/v2/technical-snapshots/{snapshotId}
 | 422 | `TECHNICAL_SCHEMA_UNSUPPORTED` | schema 不受支持 |
 | 503 | `GPUFABRIC_UNAVAILABLE` | 服务暂不可用 |
 
-## 10. 兼容要求
+## 11. 兼容要求
 
 - 技术预评估 API 保持 v1，新增可选字段不得破坏旧客户端。
 - 技术快照使用独立 v2 schema，不要求修改旧 gpuf-c/gpuf-s 设备协议。
 - 新字段必须可选并包含来源、质量或缺失说明。
 - 不兼容变更必须升级 URL 或 schema version。
 
-## 11. 调用方职责
+## 12. 调用方职责
 
 asset-assessment-service 必须保存：
 

@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use crate::util::protoc::ClientId;
 use std::sync::Arc;
 use tracing::{error, info};
 
+use crate::api_server::pre_evaluation::authorize_banking_request;
 use crate::api_server::ApiServer;
 use crate::api_server::ClientInfoResponse;
 use crate::db::stats::{ClientHeartbeatInfo, ClientMonitorInfo};
@@ -47,6 +48,32 @@ pub struct ClientListQuery {
     pub status: Option<String>,
     pub name: Option<String>,
     pub valid_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BankingDeviceCandidatesQuery {
+    pub gpuf_user_ref: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankingDeviceCandidate {
+    pub gpuf_user_ref: String,
+    pub gpuf_client_ref: String,
+    pub display_name: String,
+    pub status: String,
+    pub os_type: String,
+    pub device_name: String,
+    pub health: u8,
+    pub uptime_days: u32,
+    pub last_online: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankingDeviceCandidatesResponse {
+    pub items: Vec<BankingDeviceCandidate>,
 }
 
 // API Handlers
@@ -119,6 +146,42 @@ pub async fn get_user_clients(
         devices,
     };
     Ok(Json(ApiResponse::success(response)))
+}
+
+pub async fn get_banking_device_candidates(
+    State(app_state): State<Arc<ApiServer>>,
+    headers: HeaderMap,
+    Query(query): Query<BankingDeviceCandidatesQuery>,
+) -> Result<Json<ApiResponse<BankingDeviceCandidatesResponse>>, StatusCode> {
+    authorize_banking_request(&headers)?;
+    let user_ref = query.gpuf_user_ref.trim();
+    if user_ref.is_empty() || user_ref.len() > 64 || user_ref != query.gpuf_user_ref {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let devices =
+        client::get_user_client_status_list(&app_state.db_pool, user_ref, None, None, None, None)
+            .await
+            .map_err(|error| {
+                tracing::error!("Failed to get banking device candidates: {}", error);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    let items = devices
+        .into_iter()
+        .map(|device| BankingDeviceCandidate {
+            gpuf_user_ref: user_ref.to_string(),
+            gpuf_client_ref: device.client_id,
+            display_name: device.client_name,
+            status: device.client_status,
+            os_type: device.os_type,
+            device_name: device.device_name,
+            health: device.health,
+            uptime_days: device.uptime_days,
+            last_online: device.last_online,
+        })
+        .collect();
+    Ok(Json(ApiResponse::success(
+        BankingDeviceCandidatesResponse { items },
+    )))
 }
 
 pub async fn get_user_client_status_list(

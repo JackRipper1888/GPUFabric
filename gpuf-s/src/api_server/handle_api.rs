@@ -39,6 +39,10 @@ impl ApiServer {
         let state = Arc::clone(&self);
         let pre_evaluation_routes = Router::new()
             .route(
+                "/internal/v1/banking/device-candidates",
+                get(client::get_banking_device_candidates),
+            )
+            .route(
                 "/api/banking/provider/benchmark-evidence",
                 post(benchmark_evidence::register),
             )
@@ -202,5 +206,20 @@ mod tests {
                 response.status()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn internal_banking_device_candidates_route_requires_service_auth() {
+        let mut router = test_server().create_api_router().await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/internal/v1/banking/device-candidates?gpufUserRef=1")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.call(request).await.unwrap();
+        assert!(matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::SERVICE_UNAVAILABLE
+        ));
     }
 }
