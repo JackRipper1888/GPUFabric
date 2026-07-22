@@ -76,10 +76,12 @@ internal 在线请求示例：
 }
 ```
 
-离线 collector 未启用运行采样时，`runtime: null` 是预期结果，报告会包含
-`RUNTIME_HISTORY_MISSING`。启用 `--runtime-duration-seconds` 后，GPUFabric 会把
-`hardware.runtime_history` 的利用率、温度和功耗均值归一化到 `runtime`；采样窗口不足
-7 天时保留 `SHORT_OBSERVATION_WINDOW`，不会把短期现场采样当作长期稳定性。
+离线 collector 未启用运行采样或历史文件时，`runtime: null` 是预期结果，报告会包含
+`RUNTIME_HISTORY_MISSING`。启用 `--runtime-duration-seconds` 后，或使用
+`--runtime-history-file` 加载跨进程 JSONL 历史，GPUFabric 会把
+`hardware.runtime_history` 的利用率、温度、功耗均值和真实 `observation_days` 归一化到
+`runtime`；窗口不足 7 天时保留 `SHORT_OBSERVATION_WINDOW`，不会把短期现场采样当作
+长期稳定性。
 
 internal 离线请求示例：
 

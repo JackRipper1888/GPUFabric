@@ -88,7 +88,7 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 - v1 报告结构仍包含兼容的业务字段，但调用方业务补充结果会被拒绝。
 - 技术快照 v2、逐字段来源、质量等级和冻结 HTML 已完成；GPUFabric 不生成正式 PDF。
 - 已支持签名 BenchmarkEvidence 的登记和验证；离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。z370 RTX 4070 SUPER 的真实 Ollama Runner 已登记 LLM 与稳定性两项 Ed25519 证据并自动关联到离线报告。
-- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列及均值/峰值。短期离线窗口会生成 `runtime` 并保留 `SHORT_OBSERVATION_WINDOW`；至少 7 个不同自然日的长期稳定性仍必须来自服务端 telemetry，不由一次现场采样冒充。
+- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。报告按保留窗口计算 `observation_days`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史仍是自报告，授信级长期稳定性仍应由服务端 telemetry 复核。
 - 市场数据属于私有评估域，不接入 GPUFabric。
 - v1 创建接口返回的报告已经冻结并持久化，状态固定为 `generated`；过期由调用方根据 `validUntil` 投影为 `expired`。
 

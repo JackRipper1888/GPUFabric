@@ -27,6 +27,7 @@ sequenceDiagram
         N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
         User->>C: challenge + 可选 runtime duration/interval
         C->>C: 采集静态清单 + GPU 利用率/温度/功耗序列
+        C->>C: 追加 JSONL 历史并加载保留窗口，计算 observation_days
         C-->>User: challenge-bound 原始 JSON
         opt 提交前补齐可信 Benchmark
             Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥

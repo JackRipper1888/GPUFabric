@@ -54,6 +54,7 @@ sequenceDiagram
         N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
         User->>C: challenge + 可选 runtime duration/interval
         C->>C: 采集静态清单 + GPU 利用率/温度/功耗序列
+        C->>C: 追加 JSONL 历史并加载保留窗口，计算 observation_days
         C-->>User: challenge-bound 原始 JSON
         opt 提交前补齐可信 Benchmark
             Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥
@@ -1176,6 +1177,11 @@ BANKING_LIVE_OFFLINE_BENCHMARK_RUNNER='/path/to/run_signed_ollama_benchmark.sh' 
 go test -buildvcs=false -count=1 \
   -run TestBankingLiveOfflineCollectorContract -v ./service
 ```
+
+如需复用远端跨进程历史，在同一命令中额外设置
+`BANKING_LIVE_OFFLINE_RUNTIME_HISTORY_FILE=/var/lib/hw-asset-collector/runtime.jsonl`
+和可选的 `BANKING_LIVE_OFFLINE_RUNTIME_HISTORY_RETENTION_DAYS=30`；设置 SSH target
+时该路径属于 z370。
 
 该测试通过 new-api 服务层创建离线资产和一次性 challenge，在目标设备执行真实
 `hw-asset-collector --challenge <challenge>`；设置两个 runtime 环境变量时，测试会追加

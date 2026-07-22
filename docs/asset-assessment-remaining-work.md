@@ -25,7 +25,7 @@
 - asset-assessment-service 的内部远端已建立，生命周期基线提交 `17429ae` 与技术配置/成色/估值一致性提交 `7fd0899` 均已推送 `main`。
 - new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与 z370 离线服务层 live contract 已通过，剩余真实 user-service/数据库部署下的浏览器链路，以及真实材料、assessment-service Outbox 到 new-api HTTP 回调和 issued 下载联合回归。
 - GPUFabric T0 预评估代码闭环、collector 短期运行采样、z370 真实离线节点和签名 Benchmark 自动关联验收均已通过；剩余 collector 的正式签名发布/下载渠道、生产服务身份、可靠事件和规格目录持续扩充。
-- 离线短期运行采样已实现，但至少 7 个自然日的长期运行历史尚未实现。后续需要设备侧周期代理提交运行观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
+- collector 已支持 `--runtime-history-file` 跨进程追加和加载最多 90 天的 JSONL 运行历史，并在报告中给出真实 `observation_days`；该历史仍属于自报告证据。至少 7 个自然日的授信级长期稳定性仍需要设备侧周期代理提交观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
 - 私有存储代码支持 HMAC gateway、原生 S3 SigV4 和阿里云 OSS V4；可信事件核验和读取授权接口已完成。真实 bucket 禁止公共访问、RAM/IAM/RRSA/STS、KMS、保留期以及云事件源到桥接入口的部署验收仍未完成，腾讯云 COS 原生适配未实现。
 - 报告生命周期和依赖失败语义已有服务端代码与本地测试；Scanner/Reviewer 的服务端接入边界已经完成，但真实隔离 Scanner/OCR、Reviewer Workbench、renderer、Signing Service/HSM、可信时间戳和生产证书尚未接入。市场数据样本/核验/不可变快照、版本化估值策略、策略审批职责分离和双人正式审核已有服务端代码闭环；真实供应商许可、生产样本治理和审核人员联合认证仍是正式金额前置门禁。
 

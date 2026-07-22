@@ -1409,10 +1409,16 @@ fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
     }
 
     let observation_days = history
-        .get("duration_seconds")
+        .get("observation_days")
         .and_then(Value::as_u64)
-        .map(|seconds| seconds / 86_400)
-        .and_then(|days| u32::try_from(days).ok());
+        .and_then(|days| u32::try_from(days).ok())
+        .or_else(|| {
+            history
+                .get("duration_seconds")
+                .and_then(Value::as_u64)
+                .map(|seconds| seconds / 86_400)
+                .and_then(|days| u32::try_from(days).ok())
+        });
     Some(Runtime {
         online: Some(true),
         uptime_days: None,
@@ -1988,6 +1994,31 @@ mod tests {
             .missing_codes
             .contains(&"RUNTIME_HISTORY_MISSING".to_string()));
         assert!(report
+            .evidence
+            .warning_codes
+            .contains(&"SHORT_OBSERVATION_WINDOW".to_string()));
+    }
+
+    #[test]
+    fn offline_persisted_runtime_history_uses_observation_days() {
+        let evidence = json!({
+            "hardware": {
+                "gpus": [{"model": "Test GPU", "vram_total_bytes": 8_589_934_592_u64}],
+                "runtime_history": {
+                    "duration_seconds": 300,
+                    "observation_count": 100,
+                    "observation_days": 8,
+                    "avg_gpu_utilization_percent": 50.0,
+                    "avg_temperature_c": 65.0,
+                    "avg_power_draw_w": 150.0
+                }
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+
+        let report = build_report(normalize_offline(&evidence, None).unwrap(), Vec::new());
+        assert_eq!(report.runtime.as_ref().unwrap().observation_days, Some(8));
+        assert!(!report
             .evidence
             .warning_codes
             .contains(&"SHORT_OBSERVATION_WINDOW".to_string()));
