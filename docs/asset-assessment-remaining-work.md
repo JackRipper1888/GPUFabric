@@ -17,7 +17,7 @@
 - `assessment.benchmark-policy.v1` 已接入正式评估：T1 要求有效稳定性证据，T2 额外要求有效 LLM 性能证据；双证据成功、稳定性单证据 T1 成功/T2 拒绝、幂等和 PostgreSQL 持久化跨服务回归已通过。
 - GPUFabric 已生成目录绑定的 `gpuf.asset_configuration.v1` 并自动关联同设备最新有效 BenchmarkEvidence；assessment-service 独立重算配置 Hash，估值强制匹配技术配置和经 `asset.lifecycle` 审核的成色。
 - GPUFabric 与 new-api 已实现稳定离线资产引用：new-api 返回 64 位 `benchmarkSourceRef`，GPUFabric 用固定 `gpuf.offline_asset_source.v1` profile 生成同一 `sourceRef`；collector `payloadSha256` 仍只绑定单次 challenge。跨语言固定向量、普通回归和 z370 真实签名 Benchmark 自动关联验收均已通过。
-- assessment-service 已提供 `market:verify` 隔离的待核验市场样本队列；真实供应商适配器仍需在许可和对象访问方案确定后接入。
+- assessment-service 已提供 `market:verify` 隔离的待核验市场样本队列，并新增 `cmd/market-feed-sync`：eBay Browse 直连、BrokerBin/分销商/拍卖授权 JSON 网关、OEM/成交导出、私有 S3/KMS 原始记录绑定、3 样本/2 来源/至少 1 成交快照门禁，以及估值/报告冻结二次门禁。真实供应商账号、许可、成交授权、KMS bucket 和核验人员仍需生产接入.
 - 2026-07-22 本地 Docker staging 已部署当前 GPUFabric 与 assessment-service；new-api live contract 已通过在线预评估、目录配置 Hash、自动 BenchmarkEvidence、T2 正式评估和 `asset.lifecycle` 材料要求。独立离线 live contract 已通过 SSH 在 z370 的 RTX 4070 SUPER 上运行带利用率/温度/功耗序列的真实 `hw-asset-collector`，经 new-api 服务层消费一次性 challenge 并生成不可变报告/快照；同一流程通过 SSH 隧道运行 Ollama workload，自动关联 LLM 与稳定性两项 Ed25519 BenchmarkEvidence。assessment-service 回调密钥边界已与 new-api 对齐为 32 至 4096 字节，配置负例、全量测试和重部署后 live contract 均已通过。
 - 2026-07-22 assessment-service Outbox 已向宿主机 `new-api` 真实回调路由投递事件；生产验签中间件、严格 JSON 控制器、任务绑定、状态投影和回执持久化均通过，最新在线设备评估的 `technical_fetching`、`evidence_pending` 事件在 0 次重试下标记 delivered。new-api 新增默认跳过的 `BANKING_LIVE_CALLBACK_E2E` 合同测试，可重复验证该边界。
 - 正式报告代码链路已通过三层回归：renderer/签名验证/私有存储失败不产生 issued 状态，签发/撤销/过期/最长 120 秒下载授权通过，独立 PostgreSQL 数据库的 issued 报告和 download grant 约束通过，new-api 回调后下载代理与不落 URL 的审计通过。
@@ -26,7 +26,7 @@
 
 - asset-assessment-service 的内部远端已建立，生命周期基线提交 `17429ae` 与技术配置/成色/估值一致性提交 `7fd0899` 均已推送 `main`。
 - new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与 z370 离线服务层 live contract、assessment-service Outbox 到 new-api HTTP 签名回调均已通过。剩余真实 user-service/数据库部署下的浏览器链路、真实材料闭环，以及接入生产 renderer/签名/存储后的 issued 下载联合回归。
-- 当前常驻的 `gpuf-s-test-api-server` 容器仍是候选设备路由提交前构建的旧镜像；本次联合验收使用当前已提交源码的临时 API 实例通过。进入持久联调环境前必须重建/滚动该容器，并复验 `/internal/v1/banking/device-candidates`，避免源码与部署漂移。
+- `gpuf-s-test-api-server` 已滚动到 GPUFabric 提交 `c51549b` 的非 root 当前镜像，并复验 `/internal/v1/banking/device-candidates` 在线候选链；临时回滚镜像仅保留作故障恢复，不改变源码。
 - GPUFabric T0 预评估代码闭环、collector 短期运行采样、z370 真实离线节点和签名 Benchmark 自动关联验收均已通过；剩余 collector 的正式签名发布/下载渠道、生产服务身份、可靠事件和规格目录持续扩充。
 - collector 已支持 `--runtime-history-file` 跨进程追加和加载最多 90 天的 JSONL 运行历史，并在报告中给出真实 `observation_days`；该历史仍属于自报告证据。至少 7 个自然日的授信级长期稳定性仍需要设备侧周期代理提交观测，服务端按稳定 `sourceRef` 去重聚合利用率、温度、功耗、在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
 - 私有存储代码支持 HMAC gateway、原生 S3 SigV4 和阿里云 OSS V4；可信事件核验和读取授权接口已完成。真实 bucket 禁止公共访问、RAM/IAM/RRSA/STS、KMS、保留期以及云事件源到桥接入口的部署验收仍未完成，腾讯云 COS 原生适配未实现。
@@ -45,8 +45,8 @@
 | 7 | P0 | 接入真实私有对象存储 | assessment-service + Storage Gateway | 1、6 | S3/OSS 上传、服务端 HEAD 核验、事务化事件收据和短时 GET 授权代码/本地测试已完成；剩余真实 bucket/KMS/最小权限和云事件源部署验收，COS 原生适配按部署区域另行决定。 |
 | 8 | P0 | 接入 Scanner、证据审核端和上传代理 | Scanner + Reviewer + new-api `NA-012` | 7 | assessment-service 队列、状态授权、结果回调和审计边界及 new-api 上传会话代理已完成；剩余真实 Scanner/OCR、Reviewer Workbench 联调，完成真实文件 upload -> event -> scan -> review -> `ready_for_valuation`。 |
 | 9 | P1 | 生产 BenchmarkEvidence 接入 | GPUFabric `GF-015` + assessment-service `AS-006` | 4、8 | GPUFabric 登记/Ed25519 验签、空 ID 自动关联、LLM/稳定性双证据 runner 和 assessment T1/T2 策略已通过本地回归；剩余生产 workload 验收、阈值异常复核和密钥签发/轮换/吊销。 |
-| 10 | P1 阻断估值 | 市场数据授权与治理 | 业务/合规 + assessment-service `AS-007` | 数据供应商与许可 | 代码已支持授权样本写入和核验；还需明确真实供应商、许可范围、保留期、币种、税口径、去重键和撤回机制；未完成前禁止正式金额输出。 |
-| 11 | P1 | 不可变市场快照聚合 | assessment-service `AS-008` | 10 | 代码已支持待核验队列、可复算配置 Hash、已核验 MarketObservation 聚合和最少 3 样本/2 来源；还需真实样本适配器、许可/撤回、异常值策略和生产回归。 |
+| 10 | P1 阻断估值 | 市场数据授权与治理 | 业务/合规 + assessment-service `AS-007` | 数据供应商与许可 | 采集适配器、统一字段、原始记录 Hash 和待核验队列已完成；还需明确真实供应商、许可范围、保留期、币种、税口径、去重键和撤回机制；未完成前禁止正式金额输出。 |
+| 11 | P1 | 不可变市场快照聚合 | assessment-service `AS-008` | 10 | 代码已支持供应商适配、待核验队列、可复算配置 Hash、3 样本/2 来源/至少 1 成交门禁和不可变快照；还需真实样本、许可/撤回、异常值策略和生产回归。 |
 | 12 | P1 | 版本化估值策略 | assessment-service `AS-009` | 8、9、11 | 代码已支持 PricingPolicy 草稿/独立主体审批和 ValuationResult 可复算，同输入同策略返回同一结果；生产仍需真实市场许可和样本治理。 |
 | 13 | P1 | 正式审核后台 | assessment-service `AS-013` | 8、12 | 服务端已支持任务提交、主审/复审分配、顺序审批、职责分离和不可变动作审计，并拒绝人工金额覆盖；剩余真实 Workbench、人员身份联合认证和生产权限回归。 |
 | 14 | P1 | 报告冻结与生命周期 | assessment-service `AS-010` + new-api `NA-013` | 12、13 | 服务端和 new-api `NA-013` 下载代理均已实现，服务/HTTP/独立 PostgreSQL/代理审计回归通过；仍需真实 renderer、私有存储、签名依赖和生产 issued 下载联合验收。 |
