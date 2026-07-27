@@ -653,9 +653,11 @@ internal 路径与现有 banking 路径共用鉴权、请求体限制、证据�
 
 ### POST `/api/banking/provider/benchmark-evidence`
 
-可信基准由受控 Benchmark Runner 先注册，再由预评估请求通过 `benchmarkEvidenceIds` 引用。注册接口使用独立 `GPUF_BENCHMARK_PRODUCER_TOKEN`，并按 `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` 中的 `keyId` 对 `payloadJson` 原始 UTF-8 字节执行 Ed25519 验签。Payload 必须绑定 64 位十六进制 `sourceRef`、参数 SHA-256、测试时间和不超过 30 天的有效期；证据表 INSERT-only。
+可信基准由受控 Benchmark Runner 先注册，再由预评估请求通过 `benchmarkEvidenceIds` 引用。注册接口使用独立 `GPUF_BENCHMARK_PRODUCER_TOKEN`，并按 `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` 中的 `keyId` 对 `payloadJson` 原始 UTF-8 字节执行 Ed25519 验签。生产必须设置 `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`；每个 key 条目包含 `publicKeyBase64`、`status=active|retired|revoked`、`notBefore` 和 `notAfter`。只有当前有效的 active key 能登记新证据；retired key 只允许其有效窗口内已登记证据继续用于新报告；revoked key 的证据立即禁止进入新报告。Payload 必须绑定 64 位十六进制 `sourceRef`、参数 SHA-256、测试时间和不超过 30 天的有效期；证据表 INSERT-only。
 
-`benchmarkEvidenceIds` 非空时严格加载指定证据；为空时服务端按当前技术 `sourceRef` 自动选择每个 metric 最新且未过期的一条已验签证据。`scripts/run_signed_ollama_benchmark.sh` 一次运行会分别登记 `tokens_per_second` 和 `sustained_throughput_percent`，用于满足 T2 的 LLM 类别和 T1/T2 的稳定性类别。自动选择不会跨设备、接受过期证据或执行任意调用方命令。
+`benchmarkEvidenceIds` 非空时严格加载指定且 key 状态可用的证据；为空时服务端按当前技术 `sourceRef` 自动选择每个 metric 最新且未过期、未吊销的一条已验签证据。若同指标最新记录来自 revoked key，会回退到上一条仍可用的记录。`scripts/run_signed_ollama_benchmark.sh` 一次运行会分别登记 `tokens_per_second` 和 `sustained_throughput_percent`，用于满足 T2 的 LLM 类别和 T1/T2 的稳定性类别。自动选择不会跨设备、接受过期证据或执行任意调用方命令。
+
+`scripts/manage_benchmark_keyring.sh issue` 以 `0600` 权限签发 Ed25519 私钥并生成 managed keyring 条目；`transition` 只允许 `active -> retired/revoked` 和 `retired -> revoked`，拒绝撤销后恢复。常规轮换顺序为：先增加新 active key 并滚动部署 GPUFabric，再切换 Runner 的 `GPUF_BENCHMARK_KEY_ID`/私钥，确认新证据可登记后把旧 key 改为 retired；旧证据全部过期后才移除旧公钥。私钥疑似泄露时直接改为 revoked、滚动部署并重新采集受影响 Benchmark。已冻结的历史报告保持不可变，但 revoked 证据不能进入之后创建的报告。
 
 报告请求不能直接提交任意性能数值、命令、脚本或镜像地址。不存在、过期或 `sourceRef` 与设备技术来源不一致的证据返回 HTTP `422`。
 

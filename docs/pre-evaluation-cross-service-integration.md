@@ -87,7 +87,7 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 
 - v1 报告结构仍包含兼容的业务字段，但调用方业务补充结果会被拒绝。
 - 技术快照 v2、逐字段来源、质量等级和冻结 HTML 已完成；GPUFabric 不生成正式 PDF。
-- 已支持签名 BenchmarkEvidence 的登记和验证；离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。远程 GPU 验收节点的 RTX 4070 SUPER 已通过真实 Ollama Runner 登记 LLM 与稳定性两项 Ed25519 证据，并自动关联到离线报告。
+- 已支持签名 BenchmarkEvidence 的登记和验证；managed keyring 提供 active/retired/revoked、生效窗口、生产元数据门禁和单向轮换/吊销工具，自动关联会排除 revoked key 并回退到同 metric 的上一条合法证据。离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。远程 GPU 验收节点的 RTX 4070 SUPER 已通过真实 Ollama Runner 登记 LLM 与稳定性两项 Ed25519 证据，并自动关联到离线报告。
 - 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。`gpuf.runtime_history.v1` 同时记录采样覆盖/缺口、逐卡缺失、高温、接近功率上限、时钟/热/功率限频、硬件减速、驱动恢复动作、不可纠正 ECC 与待处理显存修复，GPUFabric 把这些事实和结构化处置建议写入 JSON 与冻结 HTML，但不直接修改技术分数。报告按保留窗口计算 `observationDays`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史始终保留 `SELF_REPORTED_RUNTIME_HISTORY`。GPUFabric 另按稳定 `sourceRef` 对不同自然日成功提交的、challenge 绑定且含新鲜运行样本的不可变快照去重，输出 `serverObservationDays`；只有这个服务端计数达到 7 天才获得长期观测加分。
 - 市场数据属于私有评估域，不接入 GPUFabric。
 - v1 创建接口返回的报告已经冻结并持久化，状态固定为 `generated`；过期由调用方根据 `validUntil` 投影为 `expired`。
@@ -1096,7 +1096,7 @@ outbox_events
 | GF-009 | P1 | [completed] 规范化缺失码、警告码和 nextActions | GF-004 | 不再只依赖自由文本 |
 | GF-010 | P1 | [completed] 生成 `technical_pre_evaluation_report.v1` | GF-004/009 | 不包含无来源业务值 |
 | GF-011 | P1 | [completed] 增加 HTML 渲染 | GF-010 | JSON/HTML hash 可关联 |
-| GF-015 | P1 | [completed] 登记并验证签名 BenchmarkEvidence | GF-004/006 | Ed25519、设备绑定、参数版本、时效、不可变存储和跨设备拒绝通过 |
+| GF-015 | P1 | [completed] 登记并验证签名 BenchmarkEvidence | GF-004/006 | Ed25519、设备绑定、参数版本、时效、不可变存储、跨设备拒绝及 managed keyring 轮换/吊销通过 |
 | GF-012 | P1 | [release-hardening] 增加 mTLS/OAuth service scope | 基础设施 | new-api/assessment 独立 scope |
 | GF-013 | P1 | [release-hardening] 增加 snapshot/report 事件 | GF-006/010 | Outbox 或可靠事件发布 |
 | GF-014 | P1 | [ongoing] 扩充 GPU 规格目录与来源版本 | 无 | 目标型号覆盖和来源审核完成 |

@@ -8,7 +8,10 @@ use chrono::{DateTime, Duration, Utc};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{
     api_server::{pre_evaluation, ApiServer},
@@ -20,6 +23,59 @@ const BENCHMARK_SCHEMA_VERSION: &str = "gpuf.benchmark_evidence.v1";
 const MAX_BENCHMARK_AGE_DAYS: i64 = 30;
 const MAX_CLOCK_SKEW_MINUTES: i64 = 5;
 const MAX_EVIDENCE_IDS: usize = 32;
+const MAX_EVIDENCE_CANDIDATES: i64 = 512;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BenchmarkKeyStatus {
+    Active,
+    Retired,
+    Revoked,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedBenchmarkKeyConfig {
+    public_key_base64: String,
+    status: BenchmarkKeyStatus,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BenchmarkKeyConfigValue {
+    Legacy(String),
+    Managed(ManagedBenchmarkKeyConfig),
+}
+
+#[derive(Debug)]
+struct BenchmarkVerificationKey {
+    public_key: Vec<u8>,
+    status: BenchmarkKeyStatus,
+    not_before: Option<DateTime<Utc>>,
+    not_after: Option<DateTime<Utc>>,
+}
+
+impl BenchmarkVerificationKey {
+    fn accepts_registration_at(&self, now: &DateTime<Utc>) -> bool {
+        self.status == BenchmarkKeyStatus::Active && self.valid_at(now)
+    }
+
+    fn accepts_evidence_tested_at(&self, tested_at: &DateTime<Utc>) -> bool {
+        self.status != BenchmarkKeyStatus::Revoked && self.valid_at(tested_at)
+    }
+
+    fn valid_at(&self, timestamp: &DateTime<Utc>) -> bool {
+        self.not_before
+            .as_ref()
+            .is_none_or(|not_before| timestamp >= not_before)
+            && self
+                .not_after
+                .as_ref()
+                .is_none_or(|not_after| timestamp < not_after)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -65,20 +121,26 @@ pub async fn register(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     validate_identifier(&envelope.key_id, 64)?;
-    let keys = configured_public_keys()?;
-    let public_key = keys
+    let keys = configured_keyring()?;
+    let verification_key = keys
         .get(&envelope.key_id)
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if !verification_key.accepts_registration_at(&Utc::now()) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let signature = STANDARD
         .decode(envelope.signature_base64.as_bytes())
         .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-    UnparsedPublicKey::new(&ED25519, public_key)
+    UnparsedPublicKey::new(&ED25519, &verification_key.public_key)
         .verify(envelope.payload_json.as_bytes(), &signature)
         .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
 
     let payload: BenchmarkPayload = serde_json::from_str(&envelope.payload_json)
         .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
     validate_payload(&payload)?;
+    if !verification_key.accepts_evidence_tested_at(&payload.tested_at) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let payload_sha256 = format!("{:x}", Sha256::digest(envelope.payload_json.as_bytes()));
     let result = benchmark_evidence::register(
         &state.db_pool,
@@ -120,28 +182,67 @@ pub async fn load_for_report(
 ) -> Result<Vec<pre_evaluation::Benchmark>, StatusCode> {
     let now = Utc::now();
     if evidence_ids.is_empty() {
-        return benchmark_evidence::list_latest_valid_for_source(
+        if !benchmark_evidence::has_valid_for_source(pool, source_ref, now)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            return Ok(Vec::new());
+        }
+        let keyring = configured_keyring()?;
+        let allowed_key_ids: Vec<_> = keyring
+            .iter()
+            .filter(|(_, key)| key.status != BenchmarkKeyStatus::Revoked)
+            .map(|(key_id, _)| key_id.clone())
+            .collect();
+        let candidates = benchmark_evidence::list_valid_for_source(
             pool,
             source_ref,
             now,
-            MAX_EVIDENCE_IDS as i64,
+            &allowed_key_ids,
+            MAX_EVIDENCE_CANDIDATES,
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        .map(|values| values.into_iter().map(to_report_benchmark).collect());
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(select_benchmarks_for_report(candidates, &keyring)
+            .into_iter()
+            .map(to_report_benchmark)
+            .collect());
     }
+    let keyring = configured_keyring()?;
     let mut benchmarks = Vec::with_capacity(evidence_ids.len());
     for evidence_id in evidence_ids {
         let evidence = benchmark_evidence::get(pool, evidence_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-        if evidence.source_ref != source_ref || evidence.expires_at <= now {
+        if evidence.source_ref != source_ref
+            || evidence.expires_at <= now
+            || !keyring
+                .get(&evidence.key_id)
+                .is_some_and(|key| key.accepts_evidence_tested_at(&evidence.tested_at))
+        {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
         benchmarks.push(to_report_benchmark(evidence));
     }
     Ok(benchmarks)
+}
+
+fn select_benchmarks_for_report(
+    candidates: Vec<benchmark_evidence::StoredBenchmarkEvidence>,
+    keyring: &BTreeMap<String, BenchmarkVerificationKey>,
+) -> Vec<benchmark_evidence::StoredBenchmarkEvidence> {
+    let mut selected_metrics = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|evidence| {
+            keyring
+                .get(&evidence.key_id)
+                .is_some_and(|key| key.accepts_evidence_tested_at(&evidence.tested_at))
+        })
+        .filter(|evidence| selected_metrics.insert(evidence.metric.to_lowercase()))
+        .take(MAX_EVIDENCE_IDS)
+        .collect()
 }
 
 fn to_report_benchmark(
@@ -197,27 +298,67 @@ fn authorize_benchmark_producer(headers: &HeaderMap) -> Result<(), StatusCode> {
     Ok(())
 }
 
-fn configured_public_keys() -> Result<BTreeMap<String, Vec<u8>>, StatusCode> {
+fn configured_keyring() -> Result<BTreeMap<String, BenchmarkVerificationKey>, StatusCode> {
     let raw = std::env::var("GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON")
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let encoded: BTreeMap<String, String> =
-        serde_json::from_str(&raw).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let require_metadata = match std::env::var("GPUF_BENCHMARK_REQUIRE_KEY_METADATA") {
+        Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => true,
+        Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => false,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Err(std::env::VarError::NotPresent) => false,
+    };
+    parse_keyring(&raw, require_metadata).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn parse_keyring(
+    raw: &str,
+    require_metadata: bool,
+) -> Result<BTreeMap<String, BenchmarkVerificationKey>, ()> {
+    let encoded: BTreeMap<String, BenchmarkKeyConfigValue> =
+        serde_json::from_str(raw).map_err(|_| ())?;
     if encoded.is_empty() || encoded.len() > 16 {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(());
     }
-    encoded
-        .into_iter()
-        .map(|(key_id, value)| {
-            validate_identifier(&key_id, 64).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            let decoded = STANDARD
-                .decode(value.as_bytes())
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            if decoded.len() != 32 {
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+    let mut keyring = BTreeMap::new();
+    let mut public_keys = BTreeSet::new();
+    for (key_id, value) in encoded {
+        validate_identifier(&key_id, 64).map_err(|_| ())?;
+        let (public_key_base64, status, not_before, not_after) = match value {
+            BenchmarkKeyConfigValue::Legacy(public_key_base64) if !require_metadata => {
+                (public_key_base64, BenchmarkKeyStatus::Active, None, None)
             }
-            Ok((key_id, decoded))
-        })
-        .collect()
+            BenchmarkKeyConfigValue::Legacy(_) => return Err(()),
+            BenchmarkKeyConfigValue::Managed(config) => {
+                if config.not_after <= config.not_before {
+                    return Err(());
+                }
+                (
+                    config.public_key_base64,
+                    config.status,
+                    Some(config.not_before),
+                    Some(config.not_after),
+                )
+            }
+        };
+        let public_key = STANDARD
+            .decode(public_key_base64.as_bytes())
+            .map_err(|_| ())?;
+        if public_key.len() != 32 || !public_keys.insert(public_key.clone()) {
+            return Err(());
+        }
+        keyring.insert(
+            key_id,
+            BenchmarkVerificationKey {
+                public_key,
+                status,
+                not_before,
+                not_after,
+            },
+        );
+    }
+    Ok(keyring)
 }
 
 fn validate_payload(payload: &BenchmarkPayload) -> Result<(), StatusCode> {
@@ -271,6 +412,36 @@ fn is_hex(value: &str, expected_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn timestamp(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn stored_evidence(
+        evidence_id: &str,
+        metric: &str,
+        key_id: &str,
+        tested_at: DateTime<Utc>,
+    ) -> benchmark_evidence::StoredBenchmarkEvidence {
+        benchmark_evidence::StoredBenchmarkEvidence {
+            evidence_id: evidence_id.to_string(),
+            source_ref: "a".repeat(64),
+            suite: "GPUFabric-Ollama".to_string(),
+            suite_version: "1.0".to_string(),
+            task: "LLM generation".to_string(),
+            metric: metric.to_string(),
+            value: 42.0,
+            unit: "tokens/s".to_string(),
+            tested_at,
+            expires_at: tested_at + Duration::days(29),
+            parameters_sha256: "b".repeat(64),
+            key_id: key_id.to_string(),
+            payload_sha256: "c".repeat(64),
+        }
+    }
 
     #[test]
     fn evidence_ids_are_bounded_sorted_and_deduplicated() {
@@ -290,6 +461,132 @@ mod tests {
     fn payload_rejects_financial_or_unbounded_fields_via_serde() {
         let payload = r#"{"schemaVersion":"gpuf.benchmark_evidence.v1","evidenceId":"bench-1","sourceRef":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","suite":"suite","suiteVersion":"1","task":"llm","metric":"tokens_per_second","value":1.0,"unit":"tokens/s","testedAt":"2026-07-17T00:00:00Z","expiresAt":"2026-07-18T00:00:00Z","parametersSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","loanAmount":1}"#;
         assert!(serde_json::from_str::<BenchmarkPayload>(payload).is_err());
+    }
+
+    #[test]
+    fn managed_keyring_enforces_status_and_validity_windows() {
+        let keyring_json = json!({
+            "runner-active": {
+                "publicKeyBase64": STANDARD.encode([1_u8; 32]),
+                "status": "active",
+                "notBefore": "2026-07-01T00:00:00Z",
+                "notAfter": "2027-07-01T00:00:00Z"
+            },
+            "runner-retired": {
+                "publicKeyBase64": STANDARD.encode([2_u8; 32]),
+                "status": "retired",
+                "notBefore": "2025-07-01T00:00:00Z",
+                "notAfter": "2026-08-01T00:00:00Z"
+            },
+            "runner-revoked": {
+                "publicKeyBase64": STANDARD.encode([3_u8; 32]),
+                "status": "revoked",
+                "notBefore": "2025-07-01T00:00:00Z",
+                "notAfter": "2027-07-01T00:00:00Z"
+            }
+        })
+        .to_string();
+        let keyring = parse_keyring(&keyring_json, true).unwrap();
+        let inside = timestamp("2026-07-27T00:00:00Z");
+        let before = timestamp("2026-06-30T23:59:59Z");
+
+        assert!(keyring["runner-active"].accepts_registration_at(&inside));
+        assert!(keyring["runner-active"].accepts_evidence_tested_at(&inside));
+        assert!(!keyring["runner-active"].accepts_evidence_tested_at(&before));
+        assert!(!keyring["runner-retired"].accepts_registration_at(&inside));
+        assert!(keyring["runner-retired"].accepts_evidence_tested_at(&inside));
+        assert!(!keyring["runner-revoked"].accepts_registration_at(&inside));
+        assert!(!keyring["runner-revoked"].accepts_evidence_tested_at(&inside));
+    }
+
+    #[test]
+    fn production_metadata_gate_rejects_legacy_or_ambiguous_keyrings() {
+        let legacy = json!({"runner-legacy": STANDARD.encode([1_u8; 32])}).to_string();
+        assert!(parse_keyring(&legacy, false).is_ok());
+        assert!(parse_keyring(&legacy, true).is_err());
+
+        let duplicate = json!({
+            "runner-a": {
+                "publicKeyBase64": STANDARD.encode([2_u8; 32]),
+                "status": "active",
+                "notBefore": "2026-07-01T00:00:00Z",
+                "notAfter": "2027-07-01T00:00:00Z"
+            },
+            "runner-b": {
+                "publicKeyBase64": STANDARD.encode([2_u8; 32]),
+                "status": "retired",
+                "notBefore": "2025-07-01T00:00:00Z",
+                "notAfter": "2026-08-01T00:00:00Z"
+            }
+        })
+        .to_string();
+        assert!(parse_keyring(&duplicate, true).is_err());
+
+        let invalid_window = json!({
+            "runner-invalid": {
+                "publicKeyBase64": STANDARD.encode([3_u8; 32]),
+                "status": "active",
+                "notBefore": "2027-07-01T00:00:00Z",
+                "notAfter": "2026-07-01T00:00:00Z"
+            }
+        })
+        .to_string();
+        assert!(parse_keyring(&invalid_window, true).is_err());
+    }
+
+    #[test]
+    fn automatic_selection_skips_revoked_latest_evidence_and_falls_back() {
+        let tested_at = timestamp("2026-07-27T00:00:00Z");
+        let valid_key = |status| BenchmarkVerificationKey {
+            public_key: vec![1_u8; 32],
+            status,
+            not_before: Some(timestamp("2026-07-01T00:00:00Z")),
+            not_after: Some(timestamp("2027-07-01T00:00:00Z")),
+        };
+        let keyring = BTreeMap::from([
+            (
+                "runner-revoked".to_string(),
+                valid_key(BenchmarkKeyStatus::Revoked),
+            ),
+            (
+                "runner-retired".to_string(),
+                valid_key(BenchmarkKeyStatus::Retired),
+            ),
+            (
+                "runner-active".to_string(),
+                valid_key(BenchmarkKeyStatus::Active),
+            ),
+        ]);
+        let selected = select_benchmarks_for_report(
+            vec![
+                stored_evidence(
+                    "bench-latest-revoked",
+                    "tokens_per_second",
+                    "runner-revoked",
+                    tested_at,
+                ),
+                stored_evidence(
+                    "bench-older-valid",
+                    "tokens_per_second",
+                    "runner-retired",
+                    tested_at - Duration::minutes(1),
+                ),
+                stored_evidence(
+                    "bench-stability",
+                    "sustained_throughput_percent",
+                    "runner-active",
+                    tested_at - Duration::minutes(2),
+                ),
+            ],
+            &keyring,
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|evidence| evidence.evidence_id.as_str())
+                .collect::<Vec<_>>(),
+            ["bench-older-valid", "bench-stability"]
+        );
     }
 
     #[test]

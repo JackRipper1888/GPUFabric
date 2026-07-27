@@ -9,7 +9,7 @@ require_env() {
     fi
 }
 
-for command in curl jq openssl sha256sum date; do
+for command in curl jq openssl sha256sum date stat; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'required command not found: %s\n' "$command" >&2
         exit 2
@@ -33,6 +33,19 @@ if [[ ! "$GPUF_BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{64}$ ]]; then
 fi
 if [[ ! -r "$GPUF_BENCHMARK_PRIVATE_KEY" ]]; then
     printf 'benchmark private key is not readable\n' >&2
+    exit 2
+fi
+if [[ -L "$GPUF_BENCHMARK_PRIVATE_KEY" || ! -f "$GPUF_BENCHMARK_PRIVATE_KEY" ]]; then
+    printf 'benchmark private key must be a regular non-symlink file\n' >&2
+    exit 2
+fi
+private_key_mode="$(stat -c '%a' "$GPUF_BENCHMARK_PRIVATE_KEY")"
+if (( (8#$private_key_mode & 077) != 0 )); then
+    printf 'benchmark private key must not be accessible by group or other users\n' >&2
+    exit 2
+fi
+if [[ ! "$GPUF_BENCHMARK_KEY_ID" =~ ^[A-Za-z0-9._:-]{1,64}$ ]]; then
+    printf 'GPUF_BENCHMARK_KEY_ID has an invalid format\n' >&2
     exit 2
 fi
 

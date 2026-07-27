@@ -146,7 +146,27 @@ internal 离线请求示例：
 POST /api/banking/provider/benchmark-evidence
 ```
 
-只接受 Ed25519 签名的原始 `payloadJson`，并验证设备 `sourceRef`、参数 SHA-256、测试时间和有效期。报告只能引用已登记、未过期且与技术来源一致的证据。`scripts/run_signed_ollama_benchmark.sh` 最少执行 3 轮，并分别登记 LLM 吞吐和持续吞吐百分比两条证据。
+只接受 Ed25519 签名的原始 `payloadJson`，并验证设备 `sourceRef`、参数 SHA-256、测试时间和有效期。报告只能引用已登记、未过期、key 状态可用且与技术来源一致的证据。`scripts/run_signed_ollama_benchmark.sh` 最少执行 3 轮，并分别登记 LLM 吞吐和持续吞吐百分比两条证据。
+
+生产配置使用 managed keyring，并设置 `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`：
+
+```json
+{
+  "runner-prod-2026q3": {
+    "publicKeyBase64": "<32-byte Ed25519 public key, base64>",
+    "status": "active",
+    "notBefore": "2026-07-01T00:00:00Z",
+    "notAfter": "2027-07-01T00:00:00Z"
+  }
+}
+```
+
+`active` 可登记和引用，`retired` 禁止新登记但保留有效期内旧证据引用，`revoked`
+立即禁止该 key 的证据进入新报告。使用
+`scripts/manage_benchmark_keyring.sh issue KEY_ID PRIVATE_KEY KEYRING_JSON` 签发，
+使用 `transition KEY_ID retired|revoked KEYRING_JSON` 单向变更状态。常规轮换先部署
+新 active 公钥，再切换 Runner，最后 retire 旧 key；疑似泄露则直接 revoke 并重跑
+受影响基准。Runner 私钥必须为非软链接普通文件，且组/其他用户不可访问。
 
 ## 6. 查询技术预评估报告
 

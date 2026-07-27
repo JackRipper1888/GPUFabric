@@ -44,7 +44,7 @@
 | 6 | P0 | new-api 正式评估状态骨架 | new-api `NA-008` 至 `NA-011` | 2、3 | 代码、在线 T2 live contract 和 assessment-service Outbox 真实签名回调已完成；剩余持久数据库部署下的进程重启/乱序重放和浏览器状态投影联合验收。 |
 | 7 | P0 | 接入真实私有对象存储 | assessment-service + Storage Gateway | 1、6 | S3/OSS 上传、服务端 HEAD 核验、事务化事件收据和短时 GET 授权代码/本地测试已完成；剩余真实 bucket/KMS/最小权限和云事件源部署验收，COS 原生适配按部署区域另行决定。 |
 | 8 | P0 | 接入 Scanner、证据审核端和上传代理 | Scanner + Reviewer + new-api `NA-012` | 7 | assessment-service 队列、状态授权、结果回调和审计边界及 new-api 上传会话代理已完成；剩余真实 Scanner/OCR、Reviewer Workbench 联调，完成真实文件 upload -> event -> scan -> review -> `ready_for_valuation`。 |
-| 9 | P1 | 生产 BenchmarkEvidence 接入 | GPUFabric `GF-015` + assessment-service `AS-006` | 4、8 | GPUFabric 登记/Ed25519 验签、空 ID 自动关联、LLM/稳定性双证据 runner 和 assessment T1/T2 策略已通过本地回归；剩余生产 workload 验收、阈值异常复核和密钥签发/轮换/吊销。 |
+| 9 | P1 | 生产 BenchmarkEvidence 接入 | GPUFabric `GF-015` + assessment-service `AS-006` | 4、8 | GPUFabric 登记/Ed25519 验签、空 ID 自动关联、LLM/稳定性双证据 runner、managed keyring 的 active/retired/revoked 生命周期和 assessment T1/T2 策略已通过本地回归；剩余生产 workload 验收、阈值异常复核及真实密钥轮换/紧急吊销演练。 |
 | 10 | P1 阻断估值 | 市场数据授权与治理 | 业务/合规 + assessment-service `AS-007` | 数据供应商与许可 | 采集适配器、统一字段、原始记录 Hash 和待核验队列已完成；还需明确真实供应商、许可范围、保留期、币种、税口径、去重键和撤回机制；未完成前禁止正式金额输出。 |
 | 11 | P1 | 不可变市场快照聚合 | assessment-service `AS-008` | 10 | 代码已支持供应商适配、待核验队列、可复算配置 Hash、3 样本/2 来源/至少 1 成交门禁和不可变快照；还需真实样本、许可/撤回、异常值策略和生产回归。 |
 | 12 | P1 | 版本化估值策略 | assessment-service `AS-009` | 8、9、11 | 代码已支持 PricingPolicy 草稿/独立主体审批和 ValuationResult 可复算，同输入同策略返回同一结果；生产仍需真实市场许可和样本治理。 |
