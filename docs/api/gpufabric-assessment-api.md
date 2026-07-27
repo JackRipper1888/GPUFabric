@@ -101,6 +101,33 @@ GPUFabric 从 `device_daily_stats` 聚合出的至少 7 个自然日在线观测
 `runtime.serverObservationDays` 给出后者/前者的服务端计数；本地文件覆盖范围继续由
 `runtime.observationDays` 表示，两者不得混用。
 
+collector 从 `gpuf.runtime_history.v1` 起提供以下采样质量和 GPU 健康事实。GPUFabric
+只在 `runtime.historyPolicyVersion` 精确匹配该版本时接收这些字段；`null` 表示旧
+collector、驱动不支持或输入越界，`0` 表示支持该指标且未观察到事件。
+
+| 报告字段 | 含义 |
+| --- | --- |
+| `historyPolicyVersion` | 运行历史统计口径，当前为 `gpuf.runtime_history.v1` |
+| `samplingIntervalSeconds` | collector 配置的目标采样间隔 |
+| `expectedSampleCount` / `missingSampleCount` | 按窗口和目标间隔推导的应采次数及缺失次数 |
+| `sampleCoveragePercent` | `min(observationCount, expectedSampleCount) / expectedSampleCount`，低于 90% 产生 `RUNTIME_SAMPLE_COVERAGE_LOW` |
+| `maximumSampleGapSeconds` | 相邻有效样本之间的最大时间差 |
+| `expectedGpuCount` / `gpuObservationCount` / `missingGpuObservationCount` | `nvidia-smi` 可见 GPU 数、实际逐卡观测数及缺失数；缺失数大于 0 产生 `GPU_OBSERVATION_INCOMPLETE` |
+| `highTemperatureObservationCount` | 达到 GPU T.Limit 的逐卡观测数；驱动不提供 T.Limit 时使用 85 C |
+| `nearPowerLimitObservationCount` | 功耗达到 enforced power limit 95% 的逐卡观测数；高负载下可为正常事实，不单独产生告警 |
+| `clockLimitObservationCount` | 除 GPU idle 外存在活动时钟限制原因的逐卡观测数 |
+| `thermalThrottleObservationCount` | 软件或硬件热限频观测数 |
+| `powerThrottleObservationCount` | 软件功率上限或硬件 power-brake 观测数 |
+| `hardwareSlowdownObservationCount` | NVIDIA 硬件减速原因观测数 |
+| `recoveryActionRequiredObservationCount` | 驱动当前建议 reset/reboot 等恢复动作的观测数，不等同于历史重启次数 |
+| `uncorrectedEccErrorObservationCount` / `maxUncorrectedEccErrors` | 不可纠正 ECC 非零观测数及窗口内最大计数 |
+| `pendingPageRetirementObservationCount` / `pendingRowRemapObservationCount` | 显存页退役或行重映射待处理观测数 |
+
+结构化动作映射为：采样覆盖或逐卡缺口对应 `RESTORE_RUNTIME_SAMPLING`；高温/热限频
+对应 `INSPECT_GPU_COOLING`；功率限制对应 `INSPECT_GPU_POWER_DELIVERY`；硬件减速、
+驱动恢复、不可纠正 ECC 或待修复显存对应 `RUN_GPU_DIAGNOSTICS`。这些告警和动作不直接
+改变技术分数或等级；真实历史 reset/Xid 事件仍需另接 DCGM 或系统日志证据。
+
 internal 离线请求示例：
 
 ```json

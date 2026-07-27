@@ -29,6 +29,12 @@ const SCHEMA_VERSION: &str = "gpuf.pre_evaluation.v1";
 const COLLECTOR_SCHEMA_VERSION: &str = "gpuf.hw_asset_report.v3";
 const CHALLENGE_TTL_SECONDS: u64 = 300;
 const RUNTIME_OBSERVATION_CLOCK_TOLERANCE_SECONDS: u64 = 600;
+const RUNTIME_HISTORY_POLICY_VERSION: &str = "gpuf.runtime_history.v1";
+const MIN_RUNTIME_SAMPLE_COVERAGE_PERCENT: f64 = 90.0;
+const MAX_RUNTIME_SAMPLE_COUNT: u64 = 10_000_000;
+const MAX_RUNTIME_GPU_OBSERVATION_COUNT: u64 = 2_560_000_000;
+const MAX_RUNTIME_WINDOW_SECONDS: u64 = 90 * 86_400 + 300;
+const MAX_RUNTIME_ECC_ERRORS: u64 = 1_000_000_000;
 const EVIDENCE_RETENTION_SWEEP_SECONDS: u64 = 60 * 60;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
@@ -250,7 +256,7 @@ pub struct Gpu {
     pub specification_version: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Runtime {
     pub online: Option<bool>,
@@ -265,6 +271,26 @@ pub struct Runtime {
     pub gpu_power_usage_w: Option<f64>,
     pub observation_days: Option<u32>,
     pub server_observation_days: Option<u32>,
+    pub history_policy_version: Option<String>,
+    pub sampling_interval_seconds: Option<u64>,
+    pub expected_sample_count: Option<u64>,
+    pub missing_sample_count: Option<u64>,
+    pub sample_coverage_percent: Option<f64>,
+    pub maximum_sample_gap_seconds: Option<u64>,
+    pub expected_gpu_count: Option<u32>,
+    pub gpu_observation_count: Option<u64>,
+    pub missing_gpu_observation_count: Option<u64>,
+    pub high_temperature_observation_count: Option<u64>,
+    pub near_power_limit_observation_count: Option<u64>,
+    pub clock_limit_observation_count: Option<u64>,
+    pub thermal_throttle_observation_count: Option<u64>,
+    pub power_throttle_observation_count: Option<u64>,
+    pub hardware_slowdown_observation_count: Option<u64>,
+    pub recovery_action_required_observation_count: Option<u64>,
+    pub uncorrected_ecc_error_observation_count: Option<u64>,
+    pub max_uncorrected_ecc_errors: Option<u64>,
+    pub pending_page_retirement_observation_count: Option<u64>,
+    pub pending_row_remap_observation_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -578,6 +604,7 @@ pub async fn create_from_client(
             server_observation_days: u32::try_from(history.observation_days)
                 .ok()
                 .filter(|value| *value > 0),
+            ..Runtime::default()
         }),
         fp16_tflops: None,
         fp32_tflops: None,
@@ -1435,6 +1462,22 @@ fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
                 .map(|seconds| seconds / 86_400)
                 .and_then(|days| u32::try_from(days).ok())
         });
+    let history_policy_version = history
+        .get("policy_version")
+        .and_then(Value::as_str)
+        .filter(|value| *value == RUNTIME_HISTORY_POLICY_VERSION)
+        .map(str::to_string);
+    let has_v1_metrics = history_policy_version.is_some();
+    let runtime_count = |key, maximum| {
+        has_v1_metrics
+            .then(|| {
+                history
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value <= maximum)
+            })
+            .flatten()
+    };
     Some(Runtime {
         online: Some(true),
         uptime_days: None,
@@ -1448,6 +1491,80 @@ fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
         gpu_power_usage_w,
         observation_days,
         server_observation_days: None,
+        history_policy_version,
+        sampling_interval_seconds: runtime_count(
+            "sampling_interval_seconds",
+            MAX_RUNTIME_WINDOW_SECONDS,
+        )
+        .filter(|value| *value > 0),
+        expected_sample_count: runtime_count("expected_sample_count", MAX_RUNTIME_SAMPLE_COUNT),
+        missing_sample_count: runtime_count("missing_sample_count", MAX_RUNTIME_SAMPLE_COUNT),
+        sample_coverage_percent: has_v1_metrics
+            .then(|| {
+                history
+                    .get("sample_coverage_percent")
+                    .and_then(Value::as_f64)
+                    .filter(|value| valid_percent_f64(*value))
+            })
+            .flatten(),
+        maximum_sample_gap_seconds: runtime_count(
+            "maximum_sample_gap_seconds",
+            MAX_RUNTIME_WINDOW_SECONDS,
+        ),
+        expected_gpu_count: runtime_count("expected_gpu_count", 256)
+            .and_then(|value| u32::try_from(value).ok()),
+        gpu_observation_count: runtime_count(
+            "gpu_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        missing_gpu_observation_count: runtime_count(
+            "missing_gpu_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        high_temperature_observation_count: runtime_count(
+            "high_temperature_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        near_power_limit_observation_count: runtime_count(
+            "near_power_limit_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        clock_limit_observation_count: runtime_count(
+            "clock_limit_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        thermal_throttle_observation_count: runtime_count(
+            "thermal_throttle_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        power_throttle_observation_count: runtime_count(
+            "power_throttle_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        hardware_slowdown_observation_count: runtime_count(
+            "hardware_slowdown_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        recovery_action_required_observation_count: runtime_count(
+            "recovery_action_required_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        uncorrected_ecc_error_observation_count: runtime_count(
+            "uncorrected_ecc_error_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        max_uncorrected_ecc_errors: runtime_count(
+            "max_uncorrected_ecc_errors",
+            MAX_RUNTIME_ECC_ERRORS,
+        ),
+        pending_page_retirement_observation_count: runtime_count(
+            "pending_page_retirement_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
+        pending_row_remap_observation_count: runtime_count(
+            "pending_row_remap_observation_count",
+            MAX_RUNTIME_GPU_OBSERVATION_COUNT,
+        ),
     })
 }
 
@@ -1685,6 +1802,7 @@ fn build_report(mut evidence: Normalized, benchmarks: Vec<Benchmark>) -> Report 
         warnings.push("运行状态观测窗口少于 7 天".to_string());
         warning_codes.push("SHORT_OBSERVATION_WINDOW".to_string());
     }
+    append_runtime_health_warnings(evidence.runtime.as_ref(), &mut warnings, &mut warning_codes);
     if has_theoretical_performance(
         evidence.fp16_tflops,
         evidence.fp32_tflops,
@@ -1785,6 +1903,85 @@ fn build_report(mut evidence: Normalized, benchmarks: Vec<Benchmark>) -> Report 
             next_actions,
         },
         disclaimer: "本报告仅描述设备技术事实与证据完整度，不构成权属确认、市场估值、质押率、贷款额度或银行授信结论。",
+    }
+}
+
+fn append_runtime_health_warnings(
+    runtime: Option<&Runtime>,
+    warnings: &mut Vec<String>,
+    warning_codes: &mut Vec<String>,
+) {
+    let Some(runtime) = runtime else {
+        return;
+    };
+    if runtime
+        .sample_coverage_percent
+        .is_some_and(|coverage| coverage < MIN_RUNTIME_SAMPLE_COVERAGE_PERCENT)
+    {
+        warnings.push(format!(
+            "运行采样覆盖率低于 {:.0}%，长期序列存在缺口",
+            MIN_RUNTIME_SAMPLE_COVERAGE_PERCENT
+        ));
+        warning_codes.push("RUNTIME_SAMPLE_COVERAGE_LOW".to_string());
+    }
+    if runtime
+        .missing_gpu_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列存在 GPU 观测缺口".to_string());
+        warning_codes.push("GPU_OBSERVATION_INCOMPLETE".to_string());
+    }
+    if runtime
+        .high_temperature_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列观察到 GPU 高温".to_string());
+        warning_codes.push("GPU_HIGH_TEMPERATURE_OBSERVED".to_string());
+    }
+    if runtime
+        .thermal_throttle_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列观察到 GPU 热限频".to_string());
+        warning_codes.push("GPU_THERMAL_THROTTLING_OBSERVED".to_string());
+    }
+    if runtime
+        .power_throttle_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列观察到 GPU 功率限制事件".to_string());
+        warning_codes.push("GPU_POWER_THROTTLING_OBSERVED".to_string());
+    }
+    if runtime
+        .hardware_slowdown_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列观察到 GPU 硬件减速事件".to_string());
+        warning_codes.push("GPU_HARDWARE_SLOWDOWN_OBSERVED".to_string());
+    }
+    if runtime
+        .recovery_action_required_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("GPU 驱动报告需要执行恢复动作".to_string());
+        warning_codes.push("GPU_RECOVERY_ACTION_REQUIRED".to_string());
+    }
+    if runtime
+        .uncorrected_ecc_error_observation_count
+        .is_some_and(|count| count > 0)
+    {
+        warnings.push("运行序列观察到 GPU 不可纠正 ECC 错误".to_string());
+        warning_codes.push("GPU_UNCORRECTED_ECC_OBSERVED".to_string());
+    }
+    if runtime
+        .pending_page_retirement_observation_count
+        .is_some_and(|count| count > 0)
+        || runtime
+            .pending_row_remap_observation_count
+            .is_some_and(|count| count > 0)
+    {
+        warnings.push("GPU 显存存在待处理的页退役或行重映射".to_string());
+        warning_codes.push("GPU_MEMORY_REPAIR_PENDING".to_string());
     }
 }
 
@@ -1889,6 +2086,39 @@ fn next_actions(missing_codes: &[String], warning_codes: &[String]) -> Vec<Strin
         )
     }) {
         actions.push("COLLECT_SERVER_RUNTIME_OBSERVATIONS".to_string());
+    }
+    if warning_codes.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "RUNTIME_SAMPLE_COVERAGE_LOW" | "GPU_OBSERVATION_INCOMPLETE"
+        )
+    }) {
+        actions.push("RESTORE_RUNTIME_SAMPLING".to_string());
+    }
+    if warning_codes.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "GPU_HIGH_TEMPERATURE_OBSERVED" | "GPU_THERMAL_THROTTLING_OBSERVED"
+        )
+    }) {
+        actions.push("INSPECT_GPU_COOLING".to_string());
+    }
+    if warning_codes
+        .iter()
+        .any(|value| value == "GPU_POWER_THROTTLING_OBSERVED")
+    {
+        actions.push("INSPECT_GPU_POWER_DELIVERY".to_string());
+    }
+    if warning_codes.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "GPU_HARDWARE_SLOWDOWN_OBSERVED"
+                | "GPU_RECOVERY_ACTION_REQUIRED"
+                | "GPU_UNCORRECTED_ECC_OBSERVED"
+                | "GPU_MEMORY_REPAIR_PENDING"
+        )
+    }) {
+        actions.push("RUN_GPU_DIAGNOSTICS".to_string());
     }
     if missing_codes
         .iter()
@@ -2143,6 +2373,116 @@ mod tests {
     }
 
     #[test]
+    fn offline_runtime_health_metrics_are_normalized_into_warnings_and_actions() {
+        let evidence = json!({
+            "hardware": {
+                "gpus": [{"model": "Test GPU", "vram_total_bytes": 8_589_934_592_u64}],
+                "runtime_history": {
+                    "policy_version": RUNTIME_HISTORY_POLICY_VERSION,
+                    "sampling_interval_seconds": 60,
+                    "duration_seconds": 180,
+                    "observation_count": 3,
+                    "expected_sample_count": 4,
+                    "missing_sample_count": 1,
+                    "sample_coverage_percent": 75.0,
+                    "maximum_sample_gap_seconds": 120,
+                    "observation_days": 1,
+                    "expected_gpu_count": 2,
+                    "gpu_observation_count": 5,
+                    "missing_gpu_observation_count": 1,
+                    "avg_gpu_utilization_percent": 50.0,
+                    "avg_temperature_c": 65.0,
+                    "avg_power_draw_w": 150.0,
+                    "high_temperature_observation_count": 1,
+                    "near_power_limit_observation_count": 1,
+                    "clock_limit_observation_count": 1,
+                    "thermal_throttle_observation_count": 1,
+                    "power_throttle_observation_count": 1,
+                    "hardware_slowdown_observation_count": 1,
+                    "recovery_action_required_observation_count": 1,
+                    "uncorrected_ecc_error_observation_count": 1,
+                    "max_uncorrected_ecc_errors": 2,
+                    "pending_page_retirement_observation_count": 1,
+                    "pending_row_remap_observation_count": 1
+                }
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+
+        let normalized = normalize_offline(&evidence, None).unwrap();
+        let runtime = normalized.runtime.as_ref().unwrap();
+        assert_eq!(
+            runtime.history_policy_version.as_deref(),
+            Some(RUNTIME_HISTORY_POLICY_VERSION)
+        );
+        assert_eq!(runtime.expected_sample_count, Some(4));
+        assert_eq!(runtime.sample_coverage_percent, Some(75.0));
+        assert_eq!(runtime.maximum_sample_gap_seconds, Some(120));
+        assert_eq!(runtime.expected_gpu_count, Some(2));
+        assert_eq!(runtime.missing_gpu_observation_count, Some(1));
+        assert_eq!(runtime.max_uncorrected_ecc_errors, Some(2));
+
+        let report = build_report(normalized, Vec::new());
+        for code in [
+            "RUNTIME_SAMPLE_COVERAGE_LOW",
+            "GPU_OBSERVATION_INCOMPLETE",
+            "GPU_HIGH_TEMPERATURE_OBSERVED",
+            "GPU_THERMAL_THROTTLING_OBSERVED",
+            "GPU_POWER_THROTTLING_OBSERVED",
+            "GPU_HARDWARE_SLOWDOWN_OBSERVED",
+            "GPU_RECOVERY_ACTION_REQUIRED",
+            "GPU_UNCORRECTED_ECC_OBSERVED",
+            "GPU_MEMORY_REPAIR_PENDING",
+        ] {
+            assert!(report.evidence.warning_codes.contains(&code.to_string()));
+        }
+        for action in [
+            "RESTORE_RUNTIME_SAMPLING",
+            "INSPECT_GPU_COOLING",
+            "INSPECT_GPU_POWER_DELIVERY",
+            "RUN_GPU_DIAGNOSTICS",
+        ] {
+            assert!(report.evidence.next_actions.contains(&action.to_string()));
+        }
+        let html = report_html::render(&report, "report-hash");
+        assert!(html.contains("运行历史与健康观测"));
+        assert!(html.contains("75.00%"));
+        assert!(html.contains("最大不可纠正 ECC"));
+        assert_eq!(report.assessment.evidence_score, 50);
+    }
+
+    #[test]
+    fn unknown_runtime_policy_does_not_activate_health_metrics() {
+        let evidence = json!({
+            "hardware": {
+                "gpus": [{"model": "Test GPU"}],
+                "runtime_history": {
+                    "policy_version": "unrecognized.runtime.policy",
+                    "observation_count": 1,
+                    "avg_temperature_c": 65.0,
+                    "sample_coverage_percent": 1.0,
+                    "high_temperature_observation_count": 99
+                }
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+
+        let report = build_report(normalize_offline(&evidence, None).unwrap(), Vec::new());
+        let runtime = report.runtime.as_ref().unwrap();
+        assert!(runtime.history_policy_version.is_none());
+        assert!(runtime.sample_coverage_percent.is_none());
+        assert!(runtime.high_temperature_observation_count.is_none());
+        assert!(!report
+            .evidence
+            .warning_codes
+            .contains(&"RUNTIME_SAMPLE_COVERAGE_LOW".to_string()));
+        assert!(!report
+            .evidence
+            .warning_codes
+            .contains(&"GPU_HIGH_TEMPERATURE_OBSERVED".to_string()));
+    }
+
+    #[test]
     fn only_server_observed_history_receives_long_term_credit() {
         let runtime = || {
             Some(Runtime {
@@ -2158,6 +2498,7 @@ mod tests {
                 gpu_power_usage_w: Some(150.0),
                 observation_days: Some(8),
                 server_observation_days: None,
+                ..Runtime::default()
             })
         };
         let normalized = |source_type| Normalized {

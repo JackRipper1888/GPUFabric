@@ -36,6 +36,7 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
     let missing_codes = code_list(&report.evidence.missing_codes);
     let warning_codes = code_list(&report.evidence.warning_codes);
     let next_actions = code_list(&report.evidence.next_actions);
+    let runtime_rows = runtime_rows(report);
 
     format!(
         r#"<!doctype html>
@@ -102,6 +103,10 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
       <div class="table-wrap"><table><thead><tr><th>序号</th><th>型号</th><th>显存</th><th>理论性能</th><th>规格版本</th></tr></thead><tbody>{gpu_rows}</tbody></table></div>
     </section>
     <section>
+      <h2>运行历史与健康观测</h2>
+      <div class="table-wrap"><table class="asset-table"><tbody>{runtime_rows}</tbody></table></div>
+    </section>
+    <section>
       <h2>可信性能基准</h2>
       <div class="table-wrap"><table><thead><tr><th>套件</th><th>任务</th><th>指标</th><th>结果</th><th>测试时间</th></tr></thead><tbody>{benchmark_rows}</tbody></table></div>
     </section>
@@ -140,6 +145,55 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
         ),
         conclusion = escape(&report.assessment.conclusion),
     )
+}
+
+fn runtime_rows(report: &Report) -> String {
+    let Some(runtime) = report.runtime.as_ref() else {
+        return "<tr><td colspan=\"4\">暂无运行历史</td></tr>".to_string();
+    };
+    format!(
+        "<tr><th>本地观测天数</th><td>{}</td><th>服务端观测天数</th><td>{}</td></tr>\
+         <tr><th>采样覆盖率</th><td>{}</td><th>最大采样间隔</th><td>{}</td></tr>\
+         <tr><th>缺失采样</th><td>{}</td><th>缺失 GPU 观测</th><td>{}</td></tr>\
+         <tr><th>高温观测</th><td>{}</td><th>接近功率上限</th><td>{}</td></tr>\
+         <tr><th>时钟限制</th><td>{}</td><th>热限频</th><td>{}</td></tr>\
+         <tr><th>功率限制</th><td>{}</td><th>硬件减速</th><td>{}</td></tr>\
+         <tr><th>驱动要求恢复</th><td>{}</td><th>不可纠正 ECC 观测</th><td>{}</td></tr>\
+         <tr><th>最大不可纠正 ECC</th><td>{}</td><th>待处理显存修复</th><td>{}</td></tr>",
+        display_number(runtime.observation_days),
+        display_number(runtime.server_observation_days),
+        runtime
+            .sample_coverage_percent
+            .map(|value| format!("{value:.2}%"))
+            .unwrap_or_else(|| "-".to_string()),
+        runtime
+            .maximum_sample_gap_seconds
+            .map(|value| format!("{value} 秒"))
+            .unwrap_or_else(|| "-".to_string()),
+        display_number(runtime.missing_sample_count),
+        display_number(runtime.missing_gpu_observation_count),
+        display_number(runtime.high_temperature_observation_count),
+        display_number(runtime.near_power_limit_observation_count),
+        display_number(runtime.clock_limit_observation_count),
+        display_number(runtime.thermal_throttle_observation_count),
+        display_number(runtime.power_throttle_observation_count),
+        display_number(runtime.hardware_slowdown_observation_count),
+        display_number(runtime.recovery_action_required_observation_count),
+        display_number(runtime.uncorrected_ecc_error_observation_count),
+        display_number(runtime.max_uncorrected_ecc_errors),
+        display_number(
+            runtime
+                .pending_page_retirement_observation_count
+                .zip(runtime.pending_row_remap_observation_count)
+                .and_then(|(pages, rows)| pages.checked_add(rows)),
+        ),
+    )
+}
+
+fn display_number<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn code_list(values: &[String]) -> String {

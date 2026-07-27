@@ -957,6 +957,14 @@ count receives the seven-day long-observation completeness/score credit. Until
 then the report includes `SERVER_OBSERVATION_WINDOW_SHORT` and the next action
 `COLLECT_SERVER_RUNTIME_OBSERVATIONS`.
 
+For `gpuf.runtime_history.v1`, the normalized `runtime` object and frozen HTML
+also expose sampling coverage/gaps, missing per-GPU observations, temperature
+and power thresholds, clock/thermal/power slowdown events, driver recovery
+actions, uncorrected ECC counters, and pending memory repair observations.
+Coverage below 90% or observed hardware anomalies produce structured warning
+and next-action codes without directly changing the technical score. See
+`docs/api/gpufabric-assessment-api.md` for the field and code mapping.
+
 Build the request without reserializing the collector document:
 
 ```bash

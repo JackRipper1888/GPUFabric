@@ -88,7 +88,7 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 - v1 报告结构仍包含兼容的业务字段，但调用方业务补充结果会被拒绝。
 - 技术快照 v2、逐字段来源、质量等级和冻结 HTML 已完成；GPUFabric 不生成正式 PDF。
 - 已支持签名 BenchmarkEvidence 的登记和验证；离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。远程 GPU 验收节点的 RTX 4070 SUPER 已通过真实 Ollama Runner 登记 LLM 与稳定性两项 Ed25519 证据，并自动关联到离线报告。
-- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。报告按保留窗口计算 `observationDays`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史始终保留 `SELF_REPORTED_RUNTIME_HISTORY`。GPUFabric 另按稳定 `sourceRef` 对不同自然日成功提交的、challenge 绑定且含新鲜运行样本的不可变快照去重，输出 `serverObservationDays`；只有这个服务端计数达到 7 天才获得长期观测加分。
+- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。`gpuf.runtime_history.v1` 同时记录采样覆盖/缺口、逐卡缺失、高温、接近功率上限、时钟/热/功率限频、硬件减速、驱动恢复动作、不可纠正 ECC 与待处理显存修复，GPUFabric 把这些事实和结构化处置建议写入 JSON 与冻结 HTML，但不直接修改技术分数。报告按保留窗口计算 `observationDays`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史始终保留 `SELF_REPORTED_RUNTIME_HISTORY`。GPUFabric 另按稳定 `sourceRef` 对不同自然日成功提交的、challenge 绑定且含新鲜运行样本的不可变快照去重，输出 `serverObservationDays`；只有这个服务端计数达到 7 天才获得长期观测加分。
 - 市场数据属于私有评估域，不接入 GPUFabric。
 - v1 创建接口返回的报告已经冻结并持久化，状态固定为 `generated`；过期由调用方根据 `validUntil` 投影为 `expired`。
 

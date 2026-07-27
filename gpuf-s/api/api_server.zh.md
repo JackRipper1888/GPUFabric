@@ -714,6 +714,12 @@ challenge 过期或重放均返回 HTTP `422`。最大 4 MiB。
 证据分；不足时报告保留 `SERVER_OBSERVATION_WINDOW_SHORT`，并返回后续动作
 `COLLECT_SERVER_RUNTIME_OBSERVATIONS`。
 
+`gpuf.runtime_history.v1` 还把采样覆盖率、最大间隔、缺失样本/逐卡观测以及高温、
+接近功率上限、时钟限制、热/功率限频、硬件减速、驱动恢复动作、不可纠正 ECC 和待处理
+显存修复计数归一化到 `runtime`，冻结 HTML 同步展示这些事实。覆盖率低于 90% 或出现
+硬件异常时返回相应 `warningCodes` 和 `nextActions`；这些字段不直接改变技术分数。
+字段口径与完整代码映射见 `docs/api/gpufabric-assessment-api.md`。
+
 使用 `jq -Rs` 构造请求，只转义外层字符串，不重新序列化采集报告：
 
 ```bash
