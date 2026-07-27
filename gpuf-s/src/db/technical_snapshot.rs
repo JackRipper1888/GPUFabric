@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::Postgres, Pool};
+use sqlx::{postgres::Postgres, Executor, Pool};
 
 use super::pre_evaluation::{IdempotencyScope, ReportInsert};
 
@@ -29,6 +29,16 @@ pub async fn runtime_observation_coverage(
     pool: &Pool<Postgres>,
     source_ref: &str,
 ) -> Result<RuntimeObservationCoverage> {
+    runtime_observation_coverage_with_executor(pool, source_ref).await
+}
+
+async fn runtime_observation_coverage_with_executor<'e, E>(
+    executor: E,
+    source_ref: &str,
+) -> Result<RuntimeObservationCoverage>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let (observation_days, observed_today) = sqlx::query_as::<_, (i64, bool)>(
         r#"
         SELECT COUNT(DISTINCT (created_at AT TIME ZONE 'UTC')::DATE)::BIGINT,
@@ -43,11 +53,16 @@ pub async fn runtime_observation_coverage(
         WHERE source_type = 'offline_collector'
           AND source_ref = $1
           AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-          AND (snapshot_json::JSONB #>> '{runtime,serverObservationDays}') IS NOT NULL
+          AND created_at <= CURRENT_TIMESTAMP
+          AND JSONB_TYPEOF(
+                  snapshot_json::JSONB #> '{runtime,serverObservationDays}'
+              ) = 'number'
+          AND (snapshot_json::JSONB #>> '{runtime,serverObservationDays}')
+              ~ '^([1-9]|[12][0-9]|30)$'
         "#,
     )
     .bind(source_ref)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     Ok(RuntimeObservationCoverage {
         observation_days,
@@ -185,4 +200,80 @@ pub async fn get_stored_snapshot(
         snapshot_json,
         snapshot_sha256: expected_hash,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    #[ignore = "requires GPUF_TEST_DATABASE_URL"]
+    async fn runtime_observation_coverage_filters_and_deduplicates_utc_days() {
+        let database_url = std::env::var("GPUF_TEST_DATABASE_URL")
+            .expect("GPUF_TEST_DATABASE_URL is required for this integration test");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+
+        sqlx::query(
+            r#"
+            CREATE TEMP TABLE technical_asset_snapshots (
+                source_type TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            ) ON COMMIT DROP
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO technical_asset_snapshots (
+                source_type, source_ref, snapshot_json, created_at
+            ) VALUES
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":1}}', CURRENT_TIMESTAMP),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":1}}', CURRENT_TIMESTAMP),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":2}}', CURRENT_TIMESTAMP - INTERVAL '1 day'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":3}}', CURRENT_TIMESTAMP - INTERVAL '29 days'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":4}}', CURRENT_TIMESTAMP - INTERVAL '31 days'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":5}}', CURRENT_TIMESTAMP + INTERVAL '1 minute'),
+                ('gpuf_online',       'source-a', '{"runtime":{"serverObservationDays":6}}', CURRENT_TIMESTAMP - INTERVAL '2 days'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":0}}', CURRENT_TIMESTAMP - INTERVAL '2 days'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":"7"}}', CURRENT_TIMESTAMP - INTERVAL '2 days'),
+                ('offline_collector', 'source-a', '{"runtime":{"serverObservationDays":null}}', CURRENT_TIMESTAMP - INTERVAL '2 days'),
+                ('offline_collector', 'source-b', '{"runtime":{"serverObservationDays":1}}', CURRENT_TIMESTAMP - INTERVAL '1 day')
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+
+        let coverage = runtime_observation_coverage_with_executor(&mut *transaction, "source-a")
+            .await
+            .unwrap();
+        assert_eq!(coverage.observation_days, 3);
+        assert!(coverage.observed_today);
+
+        let previous_day =
+            runtime_observation_coverage_with_executor(&mut *transaction, "source-b")
+                .await
+                .unwrap();
+        assert_eq!(previous_day.observation_days, 1);
+        assert!(!previous_day.observed_today);
+
+        let missing =
+            runtime_observation_coverage_with_executor(&mut *transaction, "source-missing")
+                .await
+                .unwrap();
+        assert_eq!(missing.observation_days, 0);
+        assert!(!missing.observed_today);
+
+        transaction.rollback().await.unwrap();
+    }
 }
