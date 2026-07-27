@@ -21,13 +21,15 @@
 - 2026-07-22 本地 Docker staging 已部署当前 GPUFabric 与 assessment-service；new-api live contract 已通过在线预评估、目录配置 Hash、自动 BenchmarkEvidence、T2 正式评估和 `asset.lifecycle` 材料要求。独立离线 live contract 已通过 SSH 在远程 GPU 验收节点的 RTX 4070 SUPER 上运行带利用率/温度/功耗序列的真实 `hw-asset-collector`，经 new-api 服务层消费一次性 challenge 并生成不可变报告/快照；同一流程通过 SSH 隧道运行 Ollama workload，自动关联 LLM 与稳定性两项 Ed25519 BenchmarkEvidence。assessment-service 回调密钥边界已与 new-api 对齐为 32 至 4096 字节，配置负例、全量测试和重部署后 live contract 均已通过。
 - 2026-07-22 assessment-service Outbox 已向宿主机 `new-api` 真实回调路由投递事件；生产验签中间件、严格 JSON 控制器、任务绑定、状态投影和回执持久化均通过，最新在线设备评估的 `technical_fetching`、`evidence_pending` 事件在 0 次重试下标记 delivered。new-api 新增默认跳过的 `BANKING_LIVE_CALLBACK_E2E` 合同测试，可重复验证该边界。
 - 正式报告代码链路已通过三层回归：renderer/签名验证/私有存储失败不产生 issued 状态，签发/撤销/过期/最长 120 秒下载授权通过，独立 PostgreSQL 数据库的 issued 报告和 download grant 约束通过，new-api 回调后下载代理与不落 URL 的审计通过。
+- 2026-07-27 `hw-asset-collector` `main` 提交 `17c80d3` 已推送：版本升级为 0.2.0，补齐 BSD-3-Clause、Rust 1.88 MSRV、x86_64/aarch64 Gitea 构建矩阵、可复现归档、内外 SHA-256、Ed25519 签名/验签、Linux 安装器和 systemd 周期采样。临时密钥实测完成签名、包内清单、二进制版本、重复构建一致性、宽权限私钥拒绝和标签匹配门禁；尚未创建正式 `v0.2.0` 标签，也未向仓库注入生产发布私钥。
+- 2026-07-27 以 new-api `feature/banking-integration` 当前提交 `9c0ff186` 重跑在线 T2 live contract 和真实 Outbox 签名回调，报告/快照/材料要求及 `evidence_pending` 原子投影通过；assessment-service 全量 Go 回归、new-api banking/service/model 回归及 GPUFabric 评估库 66 项回归通过。本地常驻 new-api staging 镜像仍固定在 `f12b7140`，因此真实浏览器/持久数据库验收必须先滚动到经发布审批的 feature 镜像。
 
 ### 尚未完成或存在缺口
 
 - asset-assessment-service 的内部远端已建立，生命周期基线提交 `17429ae` 与技术配置/成色/估值一致性提交 `7fd0899` 均已推送 `main`。
 - new-api 已实现资产绑定、在线/离线预评估、正式评估、材料会话、签名回调、状态投影和下载 API；在线与远程 GPU 节点离线服务层 live contract、assessment-service Outbox 到 new-api HTTP 签名回调均已通过。剩余真实 user-service/数据库部署下的浏览器链路、真实材料闭环，以及接入生产 renderer/签名/存储后的 issued 下载联合回归。
 - `gpuf-s-test-api-server` 已滚动到 GPUFabric 提交 `c51549b` 的非 root 当前镜像，并复验 `/internal/v1/banking/device-candidates` 在线候选链；临时回滚镜像仅保留作故障恢复，不改变源码。
-- GPUFabric T0 预评估代码闭环、collector 短期运行采样、远程 GPU 验收节点和签名 Benchmark 自动关联验收均已通过；剩余 collector 的正式签名发布/下载渠道、生产服务身份、可靠事件和规格目录持续扩充。
+- GPUFabric T0 预评估代码闭环、collector 短期运行采样、远程 GPU 验收节点、签名 Benchmark 自动关联和 collector 发布工程均已通过；剩余的是创建受控版本标签、注入生产签名密钥、建立下载渠道、部署生产服务身份及持续扩充规格目录。
 - collector 已支持 `--runtime-history-file` 跨进程追加和加载最多 90 天的 JSONL 运行历史，并在报告中给出真实 `observationDays`；该历史仍属于自报告证据。离线报告固定保留 `SELF_REPORTED_RUNTIME_HISTORY`，即使本地窗口满 7 天也不直接增加服务端长期观测分。GPUFabric 已按稳定 `sourceRef` 对不同自然日成功提交的、challenge 绑定且含新鲜运行样本的不可变快照去重，报告输出 `serverObservationDays`，只有该计数达到 7 天才增加长期观测完整度和证据分。剩余部署项是让设备侧周期代理至少运行 7 个自然日，并进一步聚合在线率和异常计数。短期窗口保留 `SHORT_OBSERVATION_WINDOW` / `SERVER_OBSERVATION_WINDOW_SHORT`；完全没有 runtime_history 时才保留 `RUNTIME_HISTORY_MISSING`，这不是 T1/T2 当前签名 Benchmark 门禁的替代项。
 - 私有存储代码支持 HMAC gateway、原生 S3 SigV4 和阿里云 OSS V4；可信事件核验和读取授权接口已完成。真实 bucket 禁止公共访问、RAM/IAM/RRSA/STS、KMS、保留期以及云事件源到桥接入口的部署验收仍未完成，腾讯云 COS 原生适配未实现。
 - 报告生命周期和依赖失败语义已有服务端代码与本地测试；Scanner/Reviewer 的服务端接入边界已经完成，但真实隔离 Scanner/OCR、Reviewer Workbench、renderer、Signing Service/HSM、可信时间戳和生产证书尚未接入。市场数据样本/核验/不可变快照、版本化估值策略、策略审批职责分离和双人正式审核已有服务端代码闭环；真实供应商许可、生产样本治理和审核人员联合认证仍是正式金额前置门禁。
@@ -39,7 +41,7 @@
 | 1 | P0 阻断 | 建立 asset-assessment-service 代码基线 | asset-assessment-service | 无 | 已完成：`main` 已包含并推送生命周期与数据闭环提交 `17429ae`、`7fd0899`。 |
 | 2 | P0 阻断 | 部署当前 v1/v2 技术底稿链路 | GPUFabric + assessment-service | 1 | 本地 Docker 三 Hash、篡改拒绝、租户幂等、在线/离线和签名基准已通过；剩余裸金属同步部署与发布回归。 |
 | 3 | P0 | new-api 用户可见预评估最小闭环 | new-api `NA-001` 至 `NA-006` | 2 | 代码已完成，在线与远程 GPU 节点离线服务层 live contract 已通过；剩余真实 user-service/数据库环境的浏览器 HTTP 验收。 |
-| 4 | P0 | 技术引用接入 new-api | new-api `NA-007`（GPUFabric 侧已完成） | 2，可与 3 并行 | new-api 技术引用持久化和在线/离线 live contract 已通过；剩余 collector 正式发布和生产节点推广回归。 |
+| 4 | P0 | 技术引用接入 new-api | new-api `NA-007`（GPUFabric 侧已完成） | 2，可与 3 并行 | new-api 技术引用持久化和在线/离线 live contract 已通过，collector 签名发布工程已完成；剩余正式标签、下载渠道和生产节点推广回归。 |
 | 5 | P0 | 预评估报告内容发布验收 | GPUFabric `GF-009` 至 `GF-011` 已完成，`GF-014` 持续扩充 | 4 | 结构化码、冻结 HTML、兼容空金融字段已通过；发布前复验目标型号目录来源，报告始终不生成无来源金额。 |
 | 6 | P0 | new-api 正式评估状态骨架 | new-api `NA-008` 至 `NA-011` | 2、3 | 代码、在线 T2 live contract 和 assessment-service Outbox 真实签名回调已完成；剩余持久数据库部署下的进程重启/乱序重放和浏览器状态投影联合验收。 |
 | 7 | P0 | 接入真实私有对象存储 | assessment-service + Storage Gateway | 1、6 | S3/OSS 上传、服务端 HEAD 核验、事务化事件收据和短时 GET 授权代码/本地测试已完成；剩余真实 bucket/KMS/最小权限和云事件源部署验收，COS 原生适配按部署区域另行决定。 |

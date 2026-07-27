@@ -106,7 +106,8 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 当前限制：
 
 - 本地 live 回归直接测试 new-api 服务层；浏览器会话仍需在真实 user-service、数据库迁移和 Provider 角色环境中验收。
-- 在线/T2 已通过真实服务，远程 GPU 验收节点上的离线 collector 已通过一次性 challenge、runtime 采样、原始 JSON、new-api 服务层和 GPUFabric 的真实 staging 回归；同一回归通过受控 SSH 隧道访问节点上的 Ollama，自动关联两项签名 Benchmark。assessment-service 与 new-api 的回调密钥长度边界已统一并通过配置测试。真实材料上传、Outbox 到 new-api HTTP 回调接收和 issued 下载仍需联合 staging 回归。
+- 在线/T2 已通过真实服务，远程 GPU 验收节点上的离线 collector 已通过一次性 challenge、runtime 采样、原始 JSON、new-api 服务层和 GPUFabric 的真实 staging 回归；同一回归通过受控 SSH 隧道访问节点上的 Ollama，自动关联两项签名 Benchmark。assessment-service 与 new-api 的回调密钥长度边界已统一并通过配置测试，Outbox 到 new-api HTTP 的真实签名回调和原子状态投影已重复验收。真实材料上传及 Scanner/Reviewer、生产 renderer/签名/存储后的 issued 下载仍需联合 staging 回归。
+- `hw-asset-collector` 0.2.0 发布工程已在 `main@17c80d3` 完成：Gitea CI 固定 Rust 1.88，正式标签构建 x86_64/aarch64 双架构归档并强制 Ed25519 签名；包内包含校验清单、安装器和 systemd 周期采样单元。正式下载渠道仍需由发布方创建 `v0.2.0` 标签并配置受控签名 Secret 后产生。
 - 生产仍必须使用 HTTPS/mTLS 或 OAuth2 服务身份；本机 HTTP 只允许显式测试开关。
 - 旧 banking 兼容路由仍存在，发布时需确认弃用计划，避免前端继续接入旧资源名。
 
