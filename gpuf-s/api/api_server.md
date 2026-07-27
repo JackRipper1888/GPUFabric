@@ -948,6 +948,15 @@ keeps the legacy per-payload source behavior. A controlled runner must register
 benchmarks for the stable source before the same collector JSON is submitted;
 an empty `benchmarkEvidenceIds` then auto-associates the signed evidence.
 
+For runtime history, `runtime.observationDays` describes the collector's local
+JSONL window and remains self-reported. GPUFabric separately counts immutable,
+challenge-bound reports containing a runtime sample no more than ten minutes
+from submission, deduplicated by UTC day and stable `sourceRef` over 30 days.
+The result is returned as `runtime.serverObservationDays`; only this server-side
+count receives the seven-day long-observation completeness/score credit. Until
+then the report includes `SERVER_OBSERVATION_WINDOW_SHORT` and the next action
+`COLLECT_SERVER_RUNTIME_OBSERVATIONS`.
+
 Build the request without reserializing the collector document:
 
 ```bash

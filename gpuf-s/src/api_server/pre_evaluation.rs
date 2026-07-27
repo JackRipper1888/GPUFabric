@@ -28,6 +28,7 @@ use crate::{
 const SCHEMA_VERSION: &str = "gpuf.pre_evaluation.v1";
 const COLLECTOR_SCHEMA_VERSION: &str = "gpuf.hw_asset_report.v3";
 const CHALLENGE_TTL_SECONDS: u64 = 300;
+const RUNTIME_OBSERVATION_CLOCK_TOLERANCE_SECONDS: u64 = 600;
 const EVIDENCE_RETENTION_SWEEP_SECONDS: u64 = 60 * 60;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
@@ -263,6 +264,7 @@ pub struct Runtime {
     pub gpu_power_usage_percent: Option<f64>,
     pub gpu_power_usage_w: Option<f64>,
     pub observation_days: Option<u32>,
+    pub server_observation_days: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -573,6 +575,9 @@ pub async fn create_from_client(
             observation_days: u32::try_from(history.observation_days)
                 .ok()
                 .filter(|value| *value > 0),
+            server_observation_days: u32::try_from(history.observation_days)
+                .ok()
+                .filter(|value| *value > 0),
         }),
         fp16_tflops: None,
         fp32_tflops: None,
@@ -663,10 +668,21 @@ pub async fn create_from_evidence(
     let evidence_value = verify_offline_evidence(&request.hardware_evidence_json)?;
     let mut evidence = normalize_offline(&evidence_value, request.asset_name)
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if let Some(offline_asset_ref) = request.offline_asset_ref.as_deref() {
-        evidence.source_id = stable_offline_source_ref(offline_asset_ref)?;
-    }
+    let has_stable_source_ref =
+        if let Some(offline_asset_ref) = request.offline_asset_ref.as_deref() {
+            evidence.source_id = stable_offline_source_ref(offline_asset_ref)?;
+            true
+        } else {
+            false
+        };
     enrich_with_gpu_specs(&state.db_pool, &mut evidence).await?;
+    attach_server_runtime_observation_days(
+        &state.db_pool,
+        &mut evidence,
+        &evidence_value,
+        has_stable_source_ref,
+    )
+    .await?;
     let benchmarks = benchmark_evidence::load_for_report(
         &state.db_pool,
         &benchmark_evidence_ids,
@@ -1431,7 +1447,60 @@ fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
         gpu_power_usage_percent: None,
         gpu_power_usage_w,
         observation_days,
+        server_observation_days: None,
     })
+}
+
+async fn attach_server_runtime_observation_days(
+    pool: &sqlx::PgPool,
+    evidence: &mut Normalized,
+    raw_evidence: &Value,
+    has_stable_source_ref: bool,
+) -> Result<(), StatusCode> {
+    let Some(runtime) = evidence.runtime.as_mut() else {
+        return Ok(());
+    };
+    if !has_stable_source_ref {
+        evidence
+            .warnings
+            .push("缺少稳定离线资产引用，无法累计服务端运行观测天数".to_string());
+        evidence
+            .warning_codes
+            .push("STABLE_RUNTIME_SOURCE_MISSING".to_string());
+        return Ok(());
+    }
+    let now = Utc::now().timestamp().max(0) as u64;
+    if !has_fresh_offline_runtime_observation(raw_evidence, now) {
+        evidence.warnings.push(
+            "本次运行历史没有接近 challenge 提交时间的新鲜样本，不计入服务端观测天数".to_string(),
+        );
+        evidence
+            .warning_codes
+            .push("FRESH_RUNTIME_OBSERVATION_MISSING".to_string());
+        return Ok(());
+    }
+    let coverage = technical_snapshot::runtime_observation_coverage(pool, &evidence.source_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let current_days = coverage.observation_days + i64::from(!coverage.observed_today);
+    runtime.server_observation_days = u32::try_from(current_days.clamp(1, 30)).ok();
+    evidence
+        .sources
+        .push("gpufabric:challenge-submission-history".to_string());
+    Ok(())
+}
+
+fn has_fresh_offline_runtime_observation(root: &Value, now_unix: u64) -> bool {
+    let collected_at = root.get("collected_at_unix").and_then(Value::as_u64);
+    let window_end = root
+        .pointer("/hardware/runtime_history/window_end_unix")
+        .and_then(Value::as_u64);
+    collected_at
+        .zip(window_end)
+        .is_some_and(|(collected_at, window_end)| {
+            collected_at.abs_diff(now_unix) <= RUNTIME_OBSERVATION_CLOCK_TOLERANCE_SECONDS
+                && window_end.abs_diff(now_unix) <= RUNTIME_OBSERVATION_CLOCK_TOLERANCE_SECONDS
+        })
 }
 
 async fn enrich_with_gpu_specs(
@@ -1591,6 +1660,21 @@ fn build_report(mut evidence: Normalized, benchmarks: Vec<Benchmark>) -> Report 
     if evidence.source_type == "offline_collector" {
         warnings.push("离线 challenge 证据属于自报告，不等同于 TPM/TEE 硬件证明".to_string());
         warning_codes.push("SELF_REPORTED_EVIDENCE".to_string());
+        if evidence.runtime.is_some() {
+            warnings.push(
+                "离线运行历史属于设备自报告，可用于现场参考，但不能替代服务端连续观测".to_string(),
+            );
+            warning_codes.push("SELF_REPORTED_RUNTIME_HISTORY".to_string());
+            if evidence
+                .runtime
+                .as_ref()
+                .and_then(|value| value.server_observation_days)
+                .is_none_or(|days| days < 7)
+            {
+                warnings.push("服务端确认的运行观测窗口少于 7 个自然日".to_string());
+                warning_codes.push("SERVER_OBSERVATION_WINDOW_SHORT".to_string());
+            }
+        }
     }
     if evidence
         .runtime
@@ -1614,10 +1698,13 @@ fn build_report(mut evidence: Normalized, benchmarks: Vec<Benchmark>) -> Report 
 
     let missing_codes = dedupe(missing_codes);
     let warning_codes = dedupe(warning_codes);
-    let next_actions = next_actions(&missing_codes);
+    let next_actions = next_actions(&missing_codes, &warning_codes);
     let llm_tokens_per_second = benchmark_by_unit(&benchmarks, &["tokens/s", "tok/s"]);
     let ttft_ms = benchmark_by_metric(&benchmarks, "ttft");
-    let sustained_throughput_percent = benchmark_by_metric(&benchmarks, "sustained_throughput");
+    let sustained_throughput_percent = benchmark_by_metrics(
+        &benchmarks,
+        &["sustained_throughput_percent", "sustained_throughput"],
+    );
     let report_id = format!(
         "PRE-{}-{}",
         generated_at.format("%Y-%m"),
@@ -1714,11 +1801,7 @@ fn completeness(evidence: &Normalized, benchmarks: &[Benchmark]) -> u8 {
         ),
         evidence.os.is_some(),
         evidence.runtime.is_some(),
-        evidence
-            .runtime
-            .as_ref()
-            .and_then(|value| value.observation_days)
-            .is_some_and(|days| days >= 7),
+        has_server_observed_long_term_runtime(evidence),
         !benchmarks.is_empty(),
         evidence.specification_source.is_some() && evidence.specification_version.is_some(),
         evidence.source_type == "gpuf_online" || evidence.payload_sha256.is_some(),
@@ -1749,7 +1832,7 @@ fn score(evidence: &Normalized, benchmarks: &[Benchmark]) -> u8 {
         .map(|value| {
             u8::from(value.gpu_utilization_percent.is_some()) * 5
                 + u8::from(value.gpu_temperature_c.is_some()) * 5
-                + u8::from(value.observation_days.unwrap_or(0) >= 7) * 10
+                + u8::from(has_server_observed_long_term_runtime(evidence)) * 10
         })
         .unwrap_or(0);
     let benchmark = if benchmarks.is_empty() { 0 } else { 20 };
@@ -1761,7 +1844,15 @@ fn score(evidence: &Normalized, benchmarks: &[Benchmark]) -> u8 {
     hardware + runtime + benchmark + integrity
 }
 
-fn next_actions(missing_codes: &[String]) -> Vec<String> {
+fn has_server_observed_long_term_runtime(evidence: &Normalized) -> bool {
+    evidence
+        .runtime
+        .as_ref()
+        .and_then(|value| value.server_observation_days)
+        .is_some_and(|days| days >= 7)
+}
+
+fn next_actions(missing_codes: &[String], warning_codes: &[String]) -> Vec<String> {
     let mut actions = Vec::new();
     if missing_codes.iter().any(|value| {
         matches!(
@@ -1788,6 +1879,16 @@ fn next_actions(missing_codes: &[String]) -> Vec<String> {
         .any(|value| value == "RUNTIME_HISTORY_MISSING")
     {
         actions.push("COLLECT_RUNTIME_HISTORY".to_string());
+    }
+    if warning_codes.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "STABLE_RUNTIME_SOURCE_MISSING"
+                | "FRESH_RUNTIME_OBSERVATION_MISSING"
+                | "SERVER_OBSERVATION_WINDOW_SHORT"
+        )
+    }) {
+        actions.push("COLLECT_SERVER_RUNTIME_OBSERVATIONS".to_string());
     }
     if missing_codes
         .iter()
@@ -1896,9 +1997,16 @@ fn benchmark_by_unit(values: &[Benchmark], units: &[&str]) -> Option<f64> {
         .map(|value| value.value)
 }
 fn benchmark_by_metric(values: &[Benchmark], metric: &str) -> Option<f64> {
+    benchmark_by_metrics(values, &[metric])
+}
+fn benchmark_by_metrics(values: &[Benchmark], metrics: &[&str]) -> Option<f64> {
     values
         .iter()
-        .find(|value| value.metric.eq_ignore_ascii_case(metric))
+        .find(|value| {
+            metrics
+                .iter()
+                .any(|metric| value.metric.eq_ignore_ascii_case(metric))
+        })
         .map(|value| value.value)
 }
 fn dedupe(values: Vec<String>) -> Vec<String> {
@@ -2022,6 +2130,103 @@ mod tests {
             .evidence
             .warning_codes
             .contains(&"SHORT_OBSERVATION_WINDOW".to_string()));
+        assert!(report
+            .evidence
+            .warning_codes
+            .contains(&"SELF_REPORTED_RUNTIME_HISTORY".to_string()));
+        assert!(report
+            .evidence
+            .next_actions
+            .contains(&"COLLECT_SERVER_RUNTIME_OBSERVATIONS".to_string()));
+        assert_eq!(report.assessment.completeness_percent, 50);
+        assert_eq!(report.assessment.evidence_score, 50);
+    }
+
+    #[test]
+    fn only_server_observed_history_receives_long_term_credit() {
+        let runtime = || {
+            Some(Runtime {
+                online: Some(true),
+                uptime_days: None,
+                cpu_usage_percent: None,
+                memory_usage_percent: None,
+                storage_usage_percent: None,
+                gpu_utilization_percent: Some(50.0),
+                gpu_memory_usage_percent: None,
+                gpu_temperature_c: Some(65.0),
+                gpu_power_usage_percent: None,
+                gpu_power_usage_w: Some(150.0),
+                observation_days: Some(8),
+                server_observation_days: None,
+            })
+        };
+        let normalized = |source_type| Normalized {
+            source_type,
+            source_id: "source".to_string(),
+            payload_sha256: Some("a".repeat(64)),
+            asset_name: "Test GPU".to_string(),
+            asset_name_is_explicit: false,
+            device_count: 0,
+            primary_gpu_model: "Test GPU".to_string(),
+            os: None,
+            cpu_model: None,
+            system_memory_bytes: None,
+            gpu_memory_bytes: None,
+            architecture: None,
+            process_nm: None,
+            tdp_w: None,
+            interconnect: None,
+            memory_bandwidth_gbps: None,
+            interconnect_bandwidth_gbps: None,
+            supported_workloads: Vec::new(),
+            specification_source: None,
+            specification_version: None,
+            gpus: Vec::new(),
+            runtime: runtime(),
+            fp16_tflops: None,
+            fp32_tflops: None,
+            int8_tops: None,
+            int4_tops: None,
+            sources: Vec::new(),
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            missing_codes: Vec::new(),
+            warning_codes: Vec::new(),
+        };
+
+        assert!(!has_server_observed_long_term_runtime(&normalized(
+            "offline_collector"
+        )));
+        let mut online = normalized("gpuf_online");
+        online.runtime.as_mut().unwrap().server_observation_days = Some(8);
+        assert!(has_server_observed_long_term_runtime(&online));
+
+        let mut offline = normalized("offline_collector");
+        offline.runtime.as_mut().unwrap().server_observation_days = Some(8);
+        assert!(has_server_observed_long_term_runtime(&offline));
+    }
+
+    #[test]
+    fn server_observation_requires_fresh_report_and_runtime_sample() {
+        let now = 1_800_000_000_u64;
+        let evidence = |collected_at, window_end| {
+            json!({
+                "collected_at_unix": collected_at,
+                "hardware": {"runtime_history": {"window_end_unix": window_end}}
+            })
+        };
+        assert!(has_fresh_offline_runtime_observation(
+            &evidence(now - 60, now - 30),
+            now
+        ));
+        assert!(!has_fresh_offline_runtime_observation(
+            &evidence(now - 3_600, now - 30),
+            now
+        ));
+        assert!(!has_fresh_offline_runtime_observation(
+            &evidence(now - 60, now - 3_600),
+            now
+        ));
     }
 
     #[test]
@@ -2030,6 +2235,39 @@ mod tests {
         assert!(has_theoretical_performance(None, None, Some(568.0), None));
         assert!(!has_theoretical_performance(None, None, None, None));
         assert!(!has_theoretical_performance(None, Some(0.0), None, None));
+    }
+
+    #[test]
+    fn report_reads_runner_and_legacy_sustained_throughput_metrics() {
+        let benchmark = |metric: &str, value: f64| Benchmark {
+            evidence_id: format!("bench-{metric}"),
+            evidence_sha256: "a".repeat(64),
+            key_id: "runner-key".to_string(),
+            parameters_sha256: "b".repeat(64),
+            suite: "GPUFabric-Ollama-Stability".to_string(),
+            version: "1.0".to_string(),
+            task: "repeated LLM generation".to_string(),
+            metric: metric.to_string(),
+            value,
+            unit: "percent".to_string(),
+            tested_at: "2026-07-27T00:00:00Z".to_string(),
+            expires_at: "2026-08-25T00:00:00Z".to_string(),
+        };
+
+        assert_eq!(
+            benchmark_by_metrics(
+                &[benchmark("sustained_throughput_percent", 96.5)],
+                &["sustained_throughput_percent", "sustained_throughput"],
+            ),
+            Some(96.5)
+        );
+        assert_eq!(
+            benchmark_by_metrics(
+                &[benchmark("sustained_throughput", 94.2)],
+                &["sustained_throughput_percent", "sustained_throughput"],
+            ),
+            Some(94.2)
+        );
     }
 
     #[test]

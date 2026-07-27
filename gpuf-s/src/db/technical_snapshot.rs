@@ -20,6 +20,41 @@ pub struct StoredSnapshot {
     pub snapshot_sha256: String,
 }
 
+pub struct RuntimeObservationCoverage {
+    pub observation_days: i64,
+    pub observed_today: bool,
+}
+
+pub async fn runtime_observation_coverage(
+    pool: &Pool<Postgres>,
+    source_ref: &str,
+) -> Result<RuntimeObservationCoverage> {
+    let (observation_days, observed_today) = sqlx::query_as::<_, (i64, bool)>(
+        r#"
+        SELECT COUNT(DISTINCT (created_at AT TIME ZONE 'UTC')::DATE)::BIGINT,
+               COALESCE(
+                   BOOL_OR(
+                       (created_at AT TIME ZONE 'UTC')::DATE =
+                       (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::DATE
+                   ),
+                   FALSE
+               )
+        FROM technical_asset_snapshots
+        WHERE source_type = 'offline_collector'
+          AND source_ref = $1
+          AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+          AND (snapshot_json::JSONB #>> '{runtime,serverObservationDays}') IS NOT NULL
+        "#,
+    )
+    .bind(source_ref)
+    .fetch_one(pool)
+    .await?;
+    Ok(RuntimeObservationCoverage {
+        observation_days,
+        observed_today,
+    })
+}
+
 pub async fn save_report_with_snapshot(
     pool: &Pool<Postgres>,
     report: ReportInsert<'_>,

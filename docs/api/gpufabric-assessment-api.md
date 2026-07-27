@@ -94,7 +94,12 @@ internal 在线请求示例：
 `--runtime-history-file` 加载跨进程 JSONL 历史，GPUFabric 会把
 `hardware.runtime_history` 的利用率、温度、功耗均值和真实 `observation_days` 归一化到
 `runtime`；窗口不足 7 天时保留 `SHORT_OBSERVATION_WINDOW`，不会把短期现场采样当作
-长期稳定性。
+长期稳定性。即使本地历史超过 7 天，离线报告仍保留
+`SELF_REPORTED_RUNTIME_HISTORY`，且不获得服务端长期观测的完整度和证据分；该加分只适用于
+GPUFabric 从 `device_daily_stats` 聚合出的至少 7 个自然日在线观测，或同一稳定
+`sourceRef` 在不同自然日提交的至少 7 份 challenge 绑定且含新鲜运行样本的不可变快照。
+`runtime.serverObservationDays` 给出后者/前者的服务端计数；本地文件覆盖范围继续由
+`runtime.observationDays` 表示，两者不得混用。
 
 internal 离线请求示例：
 

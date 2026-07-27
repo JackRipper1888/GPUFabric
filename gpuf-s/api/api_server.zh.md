@@ -707,6 +707,13 @@ challenge 过期或重放均返回 HTTP `422`。最大 4 MiB。
 单次 payload Hash 来源语义。可信 Runner 必须在提交同一份 collector JSON 前，使用会话
 返回的稳定 `sourceRef` 登记 Benchmark；提交时空 `benchmarkEvidenceIds` 会自动关联。
 
+运行历史中的 `runtime.observationDays` 只表示 collector 本地 JSONL 覆盖窗口，仍属于
+自报告。GPUFabric 另按稳定 `sourceRef` 和 UTC 自然日，对最近 30 天内成功提交且其最新
+运行样本距离提交不超过 10 分钟的 challenge 绑定不可变报告去重计数，结果写入
+`runtime.serverObservationDays`。只有这个服务端计数达到 7 天才获得长期观测完整度和
+证据分；不足时报告保留 `SERVER_OBSERVATION_WINDOW_SHORT`，并返回后续动作
+`COLLECT_SERVER_RUNTIME_OBSERVATIONS`。
+
 使用 `jq -Rs` 构造请求，只转义外层字符串，不重新序列化采集报告：
 
 ```bash

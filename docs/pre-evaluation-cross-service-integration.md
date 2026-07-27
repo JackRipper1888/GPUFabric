@@ -87,8 +87,8 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 
 - v1 报告结构仍包含兼容的业务字段，但调用方业务补充结果会被拒绝。
 - 技术快照 v2、逐字段来源、质量等级和冻结 HTML 已完成；GPUFabric 不生成正式 PDF。
-- 已支持签名 BenchmarkEvidence 的登记和验证；离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。z370 RTX 4070 SUPER 的真实 Ollama Runner 已登记 LLM 与稳定性两项 Ed25519 证据并自动关联到离线报告。
-- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。报告按保留窗口计算 `observation_days`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史仍是自报告，授信级长期稳定性仍应由服务端 telemetry 复核。
+- 已支持签名 BenchmarkEvidence 的登记和验证；离线 `offlineAssetRef` 使用固定 profile 映射为跨 challenge 稳定 `sourceRef`，collector `payloadSha256` 只承担单次证据完整性。远程 GPU 验收节点的 RTX 4070 SUPER 已通过真实 Ollama Runner 登记 LLM 与稳定性两项 Ed25519 证据，并自动关联到离线报告。
+- 在线资产从 `device_daily_stats` 聚合最长 30 天运行历史；collector 现在可选用 `--runtime-duration-seconds`/`--runtime-interval-seconds` 采集 NVIDIA 利用率、温度、功耗、显存使用序列，并用 `--runtime-history-file` 跨进程保留 JSONL 历史。报告按保留窗口计算 `observationDays`，短于 7 天会保留 `SHORT_OBSERVATION_WINDOW`；离线历史始终保留 `SELF_REPORTED_RUNTIME_HISTORY`。GPUFabric 另按稳定 `sourceRef` 对不同自然日成功提交的、challenge 绑定且含新鲜运行样本的不可变快照去重，输出 `serverObservationDays`；只有这个服务端计数达到 7 天才获得长期观测加分。
 - 市场数据属于私有评估域，不接入 GPUFabric。
 - v1 创建接口返回的报告已经冻结并持久化，状态固定为 `generated`；过期由调用方根据 `validUntil` 投影为 `expired`。
 
@@ -106,7 +106,7 @@ DELETE /api/banking/provider/pre-evaluations/{reportId}/evidence
 当前限制：
 
 - 本地 live 回归直接测试 new-api 服务层；浏览器会话仍需在真实 user-service、数据库迁移和 Provider 角色环境中验收。
-- 在线/T2 已通过真实服务，z370 离线 collector 已通过一次性 challenge、runtime 采样、原始 JSON、new-api 服务层和 GPUFabric 的真实 staging 回归；同一回归通过 SSH 隧道访问 z370 Ollama，自动关联两项签名 Benchmark。assessment-service 与 new-api 的回调密钥长度边界已统一并通过配置测试。真实材料上传、Outbox 到 new-api HTTP 回调接收和 issued 下载仍需联合 staging 回归。
+- 在线/T2 已通过真实服务，远程 GPU 验收节点上的离线 collector 已通过一次性 challenge、runtime 采样、原始 JSON、new-api 服务层和 GPUFabric 的真实 staging 回归；同一回归通过受控 SSH 隧道访问节点上的 Ollama，自动关联两项签名 Benchmark。assessment-service 与 new-api 的回调密钥长度边界已统一并通过配置测试。真实材料上传、Outbox 到 new-api HTTP 回调接收和 issued 下载仍需联合 staging 回归。
 - 生产仍必须使用 HTTPS/mTLS 或 OAuth2 服务身份；本机 HTTP 只允许显式测试开关。
 - 旧 banking 兼容路由仍存在，发布时需确认弃用计划，避免前端继续接入旧资源名。
 
