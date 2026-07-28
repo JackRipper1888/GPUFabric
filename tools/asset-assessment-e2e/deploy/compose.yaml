@@ -1,0 +1,269 @@
+name: gpuf-asset-assessment-local-e2e
+
+services:
+  postgres:
+    image: postgres@sha256:c43f162c605f2a652337e6fb4fd5839679a97d1f1aa0da984450aff821d25b02
+    environment:
+      POSTGRES_USER: assessment
+      POSTGRES_PASSWORD: local-e2e-assessment-db-only
+      POSTGRES_DB: assessment
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assessment -d assessment"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  clamav:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        APT_MIRROR: mirrors.aliyun.com
+    image: gpuf/asset-assessment-e2e-support:local
+    user: clamav
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        cp /opt/local-e2e-clamav/local-e2e.hdb /var/lib/clamav/local-e2e.hdb
+        exec clamd --config-file=/etc/clamav/clamd-local-e2e.conf
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "printf 'zPING\\0' | curl -sS --max-time 2 telnet://127.0.0.1:3310 | grep -q PONG"
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/clamav:size=8m,uid=101,gid=102
+    volumes:
+      - clamav-database:/var/lib/clamav
+
+  minio-tls-init:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        APT_MIRROR: mirrors.aliyun.com
+    image: gpuf/asset-assessment-e2e-support:local
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        mkdir -p /tls
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 7 \
+          -subj '/CN=GPUFabric Local E2E MinIO CA/O=GPUFabric Local E2E' \
+          -keyout /tls/ca.key -out /tls/ca.crt
+        openssl req -newkey rsa:2048 -nodes -sha256 \
+          -config /config/minio-tls.cnf -keyout /tls/private.key -out /tls/server.csr
+        openssl x509 -req -sha256 -days 7 -in /tls/server.csr \
+          -CA /tls/ca.crt -CAkey /tls/ca.key -CAcreateserial \
+          -extensions v3_req -extfile /config/minio-tls.cnf -out /tls/public.crt
+        chmod 755 /tls
+        chmod 644 /tls/ca.crt /tls/public.crt
+        chmod 600 /tls/ca.key /tls/private.key
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - /tmp/gpuf-asset-assessment-e2e-minio-tls:/tls
+      - ./minio-tls.cnf:/config/minio-tls.cnf:ro
+
+  support:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        APT_MIRROR: mirrors.aliyun.com
+    image: gpuf/asset-assessment-e2e-support:local
+    depends_on:
+      clamav:
+        condition: service_healthy
+      minio-tls-init:
+        condition: service_completed_successfully
+    environment:
+      E2E_SUPPORT_ADDR: 0.0.0.0:28080
+      E2E_SUPPORT_TOKEN: local-e2e-support-token-only-rotate-before-production
+      E2E_CALLBACK_SECRET: ${ASSESSMENT_E2E_CALLBACK_SECRET:-local-e2e-assessment-callback-secret-only}
+      E2E_STATE_DIR: /state
+      E2E_TRUST_ROOT_EXPORT_PATH: /public-trust/local-e2e-root-ca.pem
+      E2E_HSM_USER_PIN: "648219"
+      E2E_HSM_SO_PIN: "92746183"
+      E2E_CLAMAV_ADDR: clamav:3310
+      E2E_ALLOWED_DOWNLOAD_HOSTS: 127.0.0.1:29000
+      SSL_CERT_FILE: /minio-tls/ca.crt
+    ports:
+      - "127.0.0.1:28180:28080"
+      - "127.0.0.1:28092:8092"
+      - "127.0.0.1:29000:29000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:28080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - support-state:/state
+      - public-trust:/public-trust
+      - /tmp/gpuf-asset-assessment-e2e-minio-tls:/minio-tls:ro
+    networks:
+      - default
+      - gpuf-s-test-net
+
+  minio:
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    network_mode: service:support
+    depends_on:
+      support:
+        condition: service_healthy
+    command: ["server", "/data", "--address", ":29000", "--console-address", ":29001", "--certs-dir", "/tls"]
+    environment:
+      MINIO_ROOT_USER: local-e2e-minio
+      MINIO_ROOT_PASSWORD: local-e2e-minio-secret-only
+      # Test-only built-in KMS key so the service's mandatory SSE-S3 contract is exercised.
+      MINIO_KMS_SECRET_KEY: local-e2e-master-key:pqvasK1y+79nWHfCwXnYVdOH/Yv3xYqqBHU5joRSvrA=
+    healthcheck:
+      test: ["CMD", "curl", "--cacert", "/tls/ca.crt", "-fsS", "https://127.0.0.1:29000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - minio-data:/data
+      - /tmp/gpuf-asset-assessment-e2e-minio-tls:/tls:ro
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /tmp/.mc/certs/CAs
+        cp /tls/ca.crt /tmp/.mc/certs/CAs/local-e2e-minio-ca.crt
+        mc alias set local https://support:29000 local-e2e-minio local-e2e-minio-secret-only
+        mc mb --ignore-existing local/private-assessment-evidence
+        mc mb --ignore-existing local/private-assessment-reports
+        mc mb --ignore-existing local/private-market-evidence
+        mc cp /fixtures/market/*.json local/private-market-evidence/market/
+        mc anonymous set none local/private-assessment-evidence
+        mc anonymous set none local/private-assessment-reports
+        mc anonymous set none local/private-market-evidence
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: localhost,127.0.0.1,support
+      no_proxy: localhost,127.0.0.1,support
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./fixtures:/fixtures:ro
+      - /tmp/gpuf-asset-assessment-e2e-minio-tls:/tls:ro
+
+  assessment:
+    image: ${ASSESSMENT_E2E_IMAGE:-gpuf/asset-assessment-service:e2e-local}
+    network_mode: service:support
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      support:
+        condition: service_healthy
+    environment:
+      ASSESSMENT_HTTP_ADDR: :8092
+      ASSESSMENT_DATABASE_DSN: postgres://assessment:local-e2e-assessment-db-only@postgres:5432/assessment?sslmode=disable
+      ASSESSMENT_MIGRATE_ON_START: "true"
+      ASSESSMENT_MIGRATIONS_DIR: migrations
+      ASSESSMENT_SERVICE_CREDENTIALS_JSON: >-
+        {"e2e-client":{"token":"local-e2e-client-token-0000000000000001","scopes":["assessment:create","assessment:read","assessment:evidence"]},"object-storage-gateway":{"token":"local-e2e-storage-token-00000000000001","scopes":["assessment:evidence:complete"]},"evidence-scanner":{"token":"local-e2e-scanner-token-00000000000001","scopes":["assessment:evidence:scan"]},"assessment-reviewer":{"token":"local-e2e-evidence-review-token-000001","scopes":["assessment:review"]},"market-provider-a":{"token":"local-e2e-market-a-token-0000000000001","scopes":["market:write","market:read"]},"market-provider-b":{"token":"local-e2e-market-b-token-0000000000001","scopes":["market:write","market:read"]},"market-data-verifier":{"token":"local-e2e-market-verify-token-000000001","scopes":["market:verify","market:read"]},"market-snapshot-worker":{"token":"local-e2e-market-snapshot-token-0000001","scopes":["market:snapshot","market:read"]},"pricing-policy-author":{"token":"local-e2e-pricing-author-token-00000001","scopes":["pricing:write"]},"pricing-policy-approver":{"token":"local-e2e-pricing-approve-token-0000001","scopes":["pricing:approve"]},"valuation-worker":{"token":"local-e2e-valuation-token-000000000001","scopes":["assessment:valuation:execute","assessment:valuation:read","assessment:formal-review:submit"]},"formal-review-coordinator":{"token":"local-e2e-review-coordinate-token-00001","scopes":["assessment:formal-review:assign","assessment:formal-review:read"]},"formal-review-workbench":{"token":"local-e2e-review-workbench-token-00001","scopes":["assessment:formal-review:action","assessment:formal-review:read"]},"report-freeze-worker":{"token":"local-e2e-report-freeze-token-0000001","scopes":["assessment:report:freeze","assessment:report:read","assessment:report:content"]},"report-issue-worker":{"token":"local-e2e-report-issue-token-00000001","scopes":["assessment:report:issue","assessment:report:read"]},"report-revoke-worker":{"token":"local-e2e-report-revoke-token-0000001","scopes":["assessment:report:revoke","assessment:report:read"]},"report-download-gateway":{"token":"local-e2e-report-download-token-00001","scopes":["assessment:report:download","assessment:report:read"]},"report-expiry-worker":{"token":"local-e2e-report-expiry-token-0000001","scopes":["assessment:report:expire","assessment:report:read"]}}
+      ASSESSMENT_GPUFABRIC_URL: http://gpuf-s-test-api-server:18081
+      ASSESSMENT_GPUFABRIC_TOKEN: ${GPUF_TEST_BANKING_API_TOKEN:?GPUF_TEST_BANKING_API_TOKEN is required}
+      ASSESSMENT_NEW_API_CALLBACK_URL: ${ASSESSMENT_E2E_CALLBACK_URL:-http://127.0.0.1:28080/api/banking/callback/assessment}
+      ASSESSMENT_CALLBACK_SIGNING_SECRET: ${ASSESSMENT_E2E_CALLBACK_SECRET:-local-e2e-assessment-callback-secret-only}
+      ASSESSMENT_OUTBOX_POLL_INTERVAL: 500ms
+      ASSESSMENT_OUTBOX_MAX_ATTEMPTS: "12"
+      ASSESSMENT_EVIDENCE_STORAGE_PROVIDER: s3
+      ASSESSMENT_EVIDENCE_S3_REGION: us-east-1
+      ASSESSMENT_EVIDENCE_S3_ENDPOINT: https://127.0.0.1:29000
+      ASSESSMENT_EVIDENCE_S3_BUCKET: private-assessment-evidence
+      ASSESSMENT_EVIDENCE_S3_PREFIX: assessment
+      ASSESSMENT_EVIDENCE_S3_ACCESS_KEY_ID: local-e2e-minio
+      ASSESSMENT_EVIDENCE_S3_SECRET_ACCESS_KEY: local-e2e-minio-secret-only
+      ASSESSMENT_EVIDENCE_S3_USE_PATH_STYLE: "true"
+      ASSESSMENT_EVIDENCE_S3_SERVER_SIDE_ENCRYPTION: AES256
+      ASSESSMENT_EVIDENCE_ACCESS_TTL: 120s
+      ASSESSMENT_UPLOAD_TTL: 5m
+      ASSESSMENT_UPLOAD_MAX_BYTES: "16777216"
+      ASSESSMENT_ENABLE_FORMAL_REPORTS: "true"
+      ASSESSMENT_ENABLE_REPORT_LIFECYCLE: "true"
+      ASSESSMENT_REPORT_VALIDITY: 15s
+      ASSESSMENT_REPORT_DOWNLOAD_TTL: 120s
+      ASSESSMENT_REPORT_EXPIRY_INTERVAL: 1m
+      ASSESSMENT_REPORT_MAX_PDF_BYTES: "33554432"
+      ASSESSMENT_PDF_RENDERER_URL: http://127.0.0.1:28080
+      ASSESSMENT_PDF_RENDERER_TOKEN: local-e2e-support-token-only-rotate-before-production
+      ASSESSMENT_SIGNING_SERVICE_URL: http://127.0.0.1:28080
+      ASSESSMENT_SIGNING_SERVICE_TOKEN: local-e2e-support-token-only-rotate-before-production
+      ASSESSMENT_SIGNING_TRUST_ROOTS_PATH: /public-trust/local-e2e-root-ca.pem
+      ASSESSMENT_REPORT_STORAGE_PROVIDER: s3
+      ASSESSMENT_REPORT_S3_REGION: us-east-1
+      ASSESSMENT_REPORT_S3_ENDPOINT: https://127.0.0.1:29000
+      ASSESSMENT_REPORT_S3_BUCKET: private-assessment-reports
+      ASSESSMENT_REPORT_S3_PREFIX: assessment
+      ASSESSMENT_REPORT_S3_ACCESS_KEY_ID: local-e2e-minio
+      ASSESSMENT_REPORT_S3_SECRET_ACCESS_KEY: local-e2e-minio-secret-only
+      ASSESSMENT_REPORT_S3_USE_PATH_STYLE: "true"
+      ASSESSMENT_REPORT_S3_SERVER_SIDE_ENCRYPTION: AES256
+      ASSESSMENT_REQUIRE_MTLS: "false"
+      SSL_CERT_FILE: /minio-tls/ca.crt
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: localhost,127.0.0.1,postgres,gpuf-s-test-api-server
+      no_proxy: localhost,127.0.0.1,postgres,gpuf-s-test-api-server
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8092/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - public-trust:/public-trust:ro
+      - /tmp/gpuf-asset-assessment-e2e-minio-tls:/minio-tls:ro
+      - ${ASSESSMENT_SERVICE_DIR:-../../../../asset-assessment-service}/migrations:/app/migrations:ro
+
+networks:
+  gpuf-s-test-net:
+    external: true
+    name: gpuf-s-test-network
+
+volumes:
+  postgres-data:
+  clamav-database:
+  support-state:
+  public-trust:
+  minio-data:

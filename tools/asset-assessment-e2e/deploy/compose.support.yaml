@@ -1,0 +1,72 @@
+name: gpuf-asset-assessment-support-e2e
+
+services:
+  clamav:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        APT_MIRROR: mirrors.aliyun.com
+    image: gpuf/asset-assessment-e2e-support:local
+    user: clamav
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        cp /opt/local-e2e-clamav/local-e2e.hdb /var/lib/clamav/local-e2e.hdb
+        exec clamd --config-file=/etc/clamav/clamd-local-e2e.conf
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "printf 'zPING\\0' | curl -sS --max-time 2 telnet://127.0.0.1:3310 | grep -q PONG"
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/clamav:size=8m,uid=101,gid=102
+    volumes:
+      - clamav-database:/var/lib/clamav
+
+  support:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      network: host
+      args:
+        APT_MIRROR: mirrors.aliyun.com
+    image: gpuf/asset-assessment-e2e-support:local
+    depends_on:
+      clamav:
+        condition: service_healthy
+    environment:
+      E2E_SUPPORT_ADDR: 0.0.0.0:28080
+      E2E_SUPPORT_TOKEN: local-e2e-support-token-only-rotate-before-production
+      E2E_STATE_DIR: /state
+      E2E_TRUST_ROOT_EXPORT_PATH: /public-trust/local-e2e-root-ca.pem
+      E2E_HSM_USER_PIN: "648219"
+      E2E_HSM_SO_PIN: "92746183"
+      E2E_CLAMAV_ADDR: clamav:3310
+      E2E_ALLOWED_DOWNLOAD_HOSTS: minio:9000
+    ports:
+      - "127.0.0.1:28080:28080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:28080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    volumes:
+      - support-state:/state
+      - public-trust:/public-trust
+
+volumes:
+  clamav-database:
+  support-state:
+  public-trust:

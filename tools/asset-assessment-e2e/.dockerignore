@@ -1,0 +1,4 @@
+.git
+artifacts
+deploy/state
+**/*_test.go
