@@ -195,6 +195,14 @@ struct ClientStatusRow {
 }
 
 #[derive(serde::Serialize)]
+pub struct ClientPreEvaluationReport {
+    pub report_id: String,
+    pub generated_at: DateTime<Utc>,
+    pub preview_url: String,
+    pub download_url: String,
+}
+
+#[derive(serde::Serialize)]
 pub struct ClientDeviceInfo {
     pub client_id: String,
     pub client_name: String,
@@ -218,6 +226,9 @@ pub struct ClientDeviceInfo {
     pub geo_longitude: Option<f64>,
     pub geo_source: Option<String>,
     pub geo_updated_at: Option<DateTime<Utc>>,
+    pub has_pre_evaluation_report: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_evaluation_report: Option<ClientPreEvaluationReport>,
 }
 
 pub async fn get_loaded_models_batch_from_redis(
@@ -412,6 +423,8 @@ pub async fn get_user_client_status_list(
                 geo_longitude: row.geo_longitude,
                 geo_source: row.geo_source,
                 geo_updated_at: row.geo_updated_at,
+                has_pre_evaluation_report: false,
+                pre_evaluation_report: None,
             }
         })
         .collect();

@@ -1,8 +1,8 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE, ETAG},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, ETAG},
         HeaderMap, StatusCode,
     },
     response::Response,
@@ -534,7 +534,7 @@ pub async fn create_from_client(
     let asset_name_is_explicit = request.asset_name.is_some();
     let mut evidence = Normalized {
         source_type: "gpuf_online",
-        source_id: hash(&format!("gpuf-online-source:{client_id}")),
+        source_id: pre_evaluation::online_source_id(&client_id.to_string()),
         payload_sha256: None,
         asset_name: request
             .asset_name
@@ -764,10 +764,17 @@ pub async fn get_report(
     Ok(Json(ApiResponse::success(report)))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ReportHtmlQuery {
+    #[serde(default)]
+    pub download: bool,
+}
+
 pub async fn get_report_html(
     State(state): State<Arc<ApiServer>>,
     headers: HeaderMap,
     Path(report_id): Path<String>,
+    Query(query): Query<ReportHtmlQuery>,
 ) -> Result<Response<Body>, StatusCode> {
     authorize_banking_request(&headers)?;
     if !valid_report_id(&report_id) {
@@ -780,10 +787,26 @@ pub async fn get_report_html(
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "private, no-store")
+        .header(
+            CONTENT_DISPOSITION,
+            report_content_disposition(&report_id, query.download),
+        )
         .header(ETAG, format!("\"{}\"", stored.report_html_sha256))
         .header("x-content-sha256", stored.report_html_sha256)
+        .header(
+            "content-security-policy",
+            "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'self'",
+        )
+        .header("x-content-type-options", "nosniff")
+        .header("x-frame-options", "SAMEORIGIN")
         .body(Body::from(stored.report_html))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn report_content_disposition(report_id: &str, download: bool) -> String {
+    let disposition = if download { "attachment" } else { "inline" };
+    format!("{disposition}; filename=\"pre-evaluation-{report_id}.html\"")
 }
 
 pub async fn get_internal_report(
@@ -2650,6 +2673,26 @@ mod tests {
         assert!(
             parse_banking_token_list("CHANGE_ME_BANKING_API_TOKEN_AT_LEAST_32_CHARS").is_none()
         );
+    }
+
+    #[test]
+    fn report_html_disposition_supports_preview_and_download() {
+        assert_eq!(
+            report_content_disposition("PRE-123", false),
+            "inline; filename=\"pre-evaluation-PRE-123.html\""
+        );
+        assert_eq!(
+            report_content_disposition("PRE-123", true),
+            "attachment; filename=\"pre-evaluation-PRE-123.html\""
+        );
+    }
+
+    #[test]
+    fn report_html_query_defaults_to_preview() {
+        let query: ReportHtmlQuery = serde_json::from_value(json!({})).unwrap();
+        assert!(!query.download);
+        let query: ReportHtmlQuery = serde_json::from_value(json!({"download": true})).unwrap();
+        assert!(query.download);
     }
 
     #[test]

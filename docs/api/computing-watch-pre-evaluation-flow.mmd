@@ -1,0 +1,44 @@
+flowchart LR
+    U["API 调用方"] -->|"GET /api/computing/watch/list"| B["gpunexus-web<br/>会话 BFF"]
+    B -->|"GET /api/user/client_list<br/>会话 user_id + 过滤参数"| A["gpuf-api-server"]
+
+    A --> G[("gpu_assets")]
+    A --> D[("device_info")]
+    A --> S[("system_info")]
+    A --> C[("client_daily_stats")]
+    A --> R[("pre_evaluation_reports")]
+
+    G --> A
+    D --> A
+    S --> A
+    C --> A
+    R -->|"最新 generated 报告"| A
+
+    A -->|"has_pre_evaluation_report<br/>report_id / generated_at<br/>内部 preview_url / download_url"| B
+    B -->|"改写为同源会话代理 URL"| U
+
+    U -->|"GET preview_url / download_url<br/>仅携带登录会话"| P{"会话鉴权 + 用户归属校验"}
+    P -->|"服务端 Banking Token"| A
+    A --> R
+    R -->|"冻结 HTML + SHA-256"| A
+    A -->|"重新计算 SHA-256"| H{"API 完整性一致?"}
+    H -->|"否"| E["HTTP 500"]
+    H -->|"是"| B
+    B -->|"再次计算 SHA-256"| Q{"BFF 完整性一致?"}
+    Q -->|"否"| F["HTTP 502"]
+    Q -->|"预览"| V["200 inline HTML<br/>no-store + CSP"]
+    Q -->|"下载"| W["200 attachment HTML<br/>no-store + CSP"]
+
+    classDef caller fill:#ffffff,stroke:#202124,color:#202124,stroke-width:2px;
+    classDef service fill:#e8f0fe,stroke:#1967d2,color:#174ea6,stroke-width:2px;
+    classDef data fill:#e6f4ea,stroke:#188038,color:#137333,stroke-width:2px;
+    classDef gate fill:#fef7e0,stroke:#f9ab00,color:#7a4d00,stroke-width:2px;
+    classDef result fill:#f3e8fd,stroke:#9334e6,color:#681da8,stroke-width:2px;
+    classDef error fill:#fce8e6,stroke:#d93025,color:#a50e0e,stroke-width:2px;
+
+    class U caller;
+    class B,A service;
+    class G,D,S,C,R data;
+    class P,H,Q gate;
+    class V,W result;
+    class E,F error;

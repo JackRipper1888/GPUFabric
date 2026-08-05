@@ -205,7 +205,7 @@ GET /internal/v1/technical-pre-evaluations/{reportId}
 GET /api/banking/provider/pre-evaluations/{reportId}/html
 ```
 
-调用方对原始 HTML UTF-8 字节计算 SHA-256，并同时比较引用 Hash 与 `X-Content-SHA256`。
+调用方对原始 HTML UTF-8 字节计算 SHA-256，并同时比较引用 Hash 与 `X-Content-SHA256`。默认响应为 `Content-Disposition: inline`，增加 `?download=true` 后为 `attachment`；两种模式都返回 `Cache-Control: private, no-store` 和限制性安全响应头。浏览器不得持有 Banking Token，应由会话 BFF 校验用户归属后代理。列表字段和交互细节见 [算力资产预评估报告 API](computing-watch-pre-evaluation-api.md)。
 
 ## 7. 查询不可变技术快照
 

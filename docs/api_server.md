@@ -159,6 +159,12 @@ Get all clients for a user with support for multiple filter conditions.
 | `devices[].last_online` | string | Last online time |
 | `devices[].created_at` | string | Creation time |
 | `devices[].uptime_days` | number | Uptime in days |
+| `devices[].has_pre_evaluation_report` | boolean | Whether a generated, previewable pre-evaluation report exists |
+| `devices[].pre_evaluation_report` | object | Latest generated report metadata; omitted when unavailable |
+| `devices[].pre_evaluation_report.report_id` | string | Pre-evaluation report ID |
+| `devices[].pre_evaluation_report.generated_at` | string | Report generation time |
+| `devices[].pre_evaluation_report.preview_url` | string | API Server HTML preview URL; banking bearer token required |
+| `devices[].pre_evaluation_report.download_url` | string | API Server HTML attachment URL; banking bearer token required |
 
 #### Request Example
 

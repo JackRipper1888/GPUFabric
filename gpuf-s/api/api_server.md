@@ -815,6 +815,12 @@ Get a user’s client list.
 | created_at | RFC3339 string |
 | uptime_days | number |
 | loaded_models | object[] |
+| has_pre_evaluation_report | boolean |
+| pre_evaluation_report | object, omitted when unavailable |
+| pre_evaluation_report.report_id | string |
+| pre_evaluation_report.generated_at | RFC3339 string |
+| pre_evaluation_report.preview_url | string; authenticated API Server HTML URL |
+| pre_evaluation_report.download_url | string; authenticated API Server HTML attachment URL |
 
 ### Example
 ```bash
@@ -983,6 +989,8 @@ SHA-256 is checked before returning the document. Missing reports return HTTP `4
 ### GET `/api/banking/provider/pre-evaluations/{reportId}/html`
 
 Returns the frozen technical pre-evaluation HTML bytes. `Content-Type` is `text/html; charset=utf-8`; `ETag` and `X-Content-SHA256` declare the `gpuf.report-html-bytes.v1` byte hash. Reads recompute the hash and fail with HTTP `500` on mismatch. The HTML contains technical facts, trusted benchmarks, and structured gaps only.
+Service callers send `Authorization: Bearer <GPUF_BANKING_API_TOKEN>` and use the URL without a query string for `Content-Disposition: inline`, or add `?download=true` for `attachment`. Both modes return `Cache-Control: private, no-store`, a restrictive CSP, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: SAMEORIGIN`. The `preview_url` and `download_url` fields from `/api/user/client_list` target these modes. Browsers must use a session-authenticated BFF that verifies report ownership and adds the token server-side; do not expose the banking token to browser code.
+
 
 ### GET `/internal/v1/technical-pre-evaluations/{reportId}`
 

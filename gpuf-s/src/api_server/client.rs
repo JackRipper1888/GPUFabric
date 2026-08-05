@@ -16,7 +16,8 @@ use crate::api_server::ApiServer;
 use crate::api_server::ClientInfoResponse;
 use crate::db::stats::{ClientHeartbeatInfo, ClientMonitorInfo};
 use crate::db::{
-    client::{self, ClientDeviceDetailResponse, ClientDeviceInfo},
+    client::{self, ClientDeviceDetailResponse, ClientDeviceInfo, ClientPreEvaluationReport},
+    pre_evaluation,
     stats::{self, EditClientRequest},
 };
 
@@ -141,6 +142,7 @@ pub async fn get_user_clients(
             d.loaded_models = models.clone();
         }
     }
+    attach_pre_evaluation_reports(&app_state.db_pool, &query.user_id, &mut devices).await?;
     let response = ClientListResponse {
         total: devices.len(),
         devices,
@@ -212,11 +214,50 @@ pub async fn get_user_client_status_list(
             d.loaded_models = models.clone();
         }
     }
+    attach_pre_evaluation_reports(&app_state.db_pool, &query.user_id, &mut devices).await?;
     let response = ClientListResponse {
         total: devices.len(),
         devices,
     };
     Ok(Json(ApiResponse::success(response)))
+}
+
+async fn attach_pre_evaluation_reports(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    user_id: &str,
+    devices: &mut [ClientDeviceInfo],
+) -> Result<(), StatusCode> {
+    let reports = pre_evaluation::list_latest_generated_online_reports(pool, user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                "Failed to get pre-evaluation reports for client list: {}",
+                error
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let reports_by_source = reports
+        .into_iter()
+        .map(|report| (report.source_id.clone(), report))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for device in devices {
+        let source_id = pre_evaluation::online_source_id(&device.client_id);
+        if let Some(report) = reports_by_source.get(&source_id) {
+            let report_url = format!(
+                "/api/banking/provider/pre-evaluations/{}/html",
+                report.report_id
+            );
+            device.has_pre_evaluation_report = true;
+            device.pre_evaluation_report = Some(ClientPreEvaluationReport {
+                report_id: report.report_id.clone(),
+                generated_at: report.generated_at,
+                preview_url: report_url.clone(),
+                download_url: format!("{report_url}?download=true"),
+            });
+        }
+    }
+    Ok(())
 }
 
 //#@ get_user_clients_device_detail api

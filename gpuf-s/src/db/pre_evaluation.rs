@@ -1,6 +1,14 @@
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::Postgres, Pool};
+use sqlx::{postgres::Postgres, FromRow, Pool};
+
+#[derive(Clone, Debug, FromRow)]
+pub struct OnlineReportSummary {
+    pub source_id: String,
+    pub report_id: String,
+    pub generated_at: DateTime<Utc>,
+}
 
 pub struct ReportInsert<'a> {
     pub report_id: &'a str,
@@ -43,6 +51,35 @@ pub enum IdempotencyClaim {
     Completed(String),
     Conflict,
     Pending,
+}
+
+pub fn online_source_id(client_id: &str) -> String {
+    let value = format!("gpuf-online-source:{client_id}");
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+pub async fn list_latest_generated_online_reports(
+    pool: &Pool<Postgres>,
+    user_id: &str,
+) -> Result<Vec<OnlineReportSummary>> {
+    Ok(sqlx::query_as::<_, OnlineReportSummary>(
+        r#"
+        SELECT DISTINCT ON (source_id)
+               source_id,
+               report_id,
+               created_at AS generated_at
+        FROM pre_evaluation_reports
+        WHERE user_id = $1
+          AND source_type = 'gpuf_online'
+          AND report_status = 'generated'
+          AND report_html IS NOT NULL
+          AND report_html_sha256 IS NOT NULL
+        ORDER BY source_id, created_at DESC, report_id DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn get_report(
@@ -241,4 +278,21 @@ pub async fn purge_expired_evidence(pool: &Pool<Postgres>) -> Result<u64> {
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::online_source_id;
+
+    #[test]
+    fn online_source_id_is_stable_and_client_scoped() {
+        let first = online_source_id("e5dd57907588424abb886eff4bcfd378");
+        let repeated = online_source_id("e5dd57907588424abb886eff4bcfd378");
+        let other = online_source_id("00112233445566778899aabbccddeeff");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, other);
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 }
