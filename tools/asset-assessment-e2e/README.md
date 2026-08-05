@@ -82,3 +82,73 @@ go test ./...
 The runner exits non-zero at the first failed gate. A successful run prints the
 artifact directory. Its manifest, PDF, detached signature and exported local CA
 allow an independent verifier to recompute hashes and validate the test chain.
+
+## Shared Test Environment
+
+The runner can execute inside the shared assessment Docker network without
+embedding deployment credentials. It reads the support token from
+`E2E_SUPPORT_TOKEN` or `ASSESSMENT_PDF_RENDERER_TOKEN`, and reads assessment
+subject/token pairs from `E2E_ASSESSMENT_CREDENTIALS_JSON` or the service's
+existing `ASSESSMENT_SERVICE_CREDENTIALS_JSON`. Both the single `token` and
+rotating `tokens` credential forms are supported. The legacy
+`ASSESSMENT_SERVICE_TOKEN` and `ASSESSMENT_LEGACY_SERVICE_SUBJECT` pair can
+supply the `new-api` client role.
+
+Set these non-secret controls explicitly for a shared run:
+
+```bash
+E2E_ASSESSMENT_URL=http://asset-assessment-service:8092
+E2E_SUPPORT_URL=https://assessment-report-support
+E2E_GPUFABRIC_URL=http://gpuf-api-server:18081
+E2E_ALLOW_CONTAINER_HTTP=true
+E2E_CALLBACK_MODE=external
+E2E_TENANT_REF=tenant-shared-test
+```
+
+Plain HTTP remains limited to loopback by default. The opt-in permits only
+single-label container hostnames and private IP addresses; public HTTP targets
+are still rejected. HTTPS targets do not require this opt-in.
+
+The default `E2E_REPORT_LIFECYCLE_MODE=full` keeps the local revocation, short
+expiry and callback-sink gates. A shared deployment with a long report validity
+or no revocation test identity can explicitly use
+`E2E_REPORT_LIFECYCLE_MODE=skip` together with
+`E2E_CALLBACK_MODE=external`. That mode still exercises technical report
+creation, T2 verification, evidence upload and integrity failures, malware
+scanning, OCR, evidence review, market data, pricing approval, valuation,
+two-person formal review, PDF rendering, HSM signing, private storage and
+download verification. Verify external callback outbox delivery separately.
+
+Build a portable runner for an Alpine assessment runtime with:
+
+```bash
+CGO_ENABLED=0 go build -trimpath -o asset-assessment-e2e-runner ./cmd/runner
+```
+
+Do not pass tokens on the command line or write them into runner logs. Inject
+them through a restricted environment file or the platform secret manager.
+
+### Shared Acceptance Record (2026-08-05)
+
+Run `20260805T050741-33e85650` completed the shared-environment report mainline
+for offline Apple M1 Pro asset `e5dd57907588424abb886eff4bcfd378`:
+
+- assessment `ASMT-20260805-dbe8539c21d5ca3c`
+- technical report `PRE-2026-08-3D53DBE960FE4D1E9A901F55B674B087`
+- issued report `AER-20260805-a70dfc0d5454d12e`
+- PDF SHA-256 `08134a637616e4395801392a8114e57323ea37e5c291ef1d8b3878bd563dd16a`
+- ECDSA-P256-SHA256 signature and certificate-chain verification passed
+
+The run covered T2 verification, tenant isolation, upload integrity failures,
+EICAR rejection, OCR, evidence review, market insufficiency and success gates,
+pricing dual approval, valuation, formal dual review, PDF rendering, HSM signing,
+private storage and download verification. Its benchmark rows are explicitly
+tagged `shared-test-e2e/api-regression-no-performance-claim`; they are regression
+fixtures, not device performance claims.
+
+Revocation and expiry were not executed because the shared deployment has no
+`report-revoke-worker` test identity and uses 180-day report validity. The
+external new-api callback returned `409 CALLBACK_BINDING_CONFLICT` because this
+direct assessment run had no matching local new-api task. A callback acceptance
+run must first create the task through new-api; do not report this callback as
+passed until that prerequisite is satisfied.

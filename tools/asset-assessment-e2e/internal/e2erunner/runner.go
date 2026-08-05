@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,45 +28,94 @@ import (
 )
 
 const (
-	supportToken = "local-e2e-support-token-only-rotate-before-production"
-	tenantRef    = "tenant-local-e2e"
+	defaultSupportToken  = "local-e2e-support-token-only-rotate-before-production"
+	defaultTenantRef     = "tenant-local-e2e"
+	callbackModeLocal    = "local"
+	callbackModeExternal = "external"
+	lifecycleModeFull    = "full"
+	lifecycleModeSkip    = "skip"
 )
 
 type Config struct {
 	AssessmentURL   string
 	SupportURL      string
+	SupportToken    string
 	GPUFabricURL    string
 	GPUFabricToken  string
 	GPUFabricUser   string
 	GPUFabricClient string
+	TenantRef       string
+	Credentials     map[string]serviceCredential
+	CallbackMode    string
 	CallbackSecret  string
+	LifecycleMode   string
 	FixtureDir      string
 	OutputDir       string
 }
 
 func LoadConfig() (Config, error) {
+	allowContainerHTTP, err := envBool("E2E_ALLOW_CONTAINER_HTTP", false)
+	if err != nil {
+		return Config{}, err
+	}
+	callbackMode := envDefault("E2E_CALLBACK_MODE", callbackModeLocal)
+	if callbackMode != callbackModeLocal && callbackMode != callbackModeExternal {
+		return Config{}, errors.New("E2E_CALLBACK_MODE must be local or external")
+	}
+	lifecycleMode := envDefault("E2E_REPORT_LIFECYCLE_MODE", lifecycleModeFull)
+	if lifecycleMode != lifecycleModeFull && lifecycleMode != lifecycleModeSkip {
+		return Config{}, errors.New("E2E_REPORT_LIFECYCLE_MODE must be full or skip")
+	}
+	if lifecycleMode == lifecycleModeSkip && callbackMode != callbackModeExternal {
+		return Config{}, errors.New("skipping report lifecycle gates requires E2E_CALLBACK_MODE=external")
+	}
+
 	config := Config{
 		AssessmentURL:   envDefault("E2E_ASSESSMENT_URL", "http://127.0.0.1:28092"),
 		SupportURL:      envDefault("E2E_SUPPORT_URL", "http://127.0.0.1:28180"),
 		GPUFabricURL:    envDefault("E2E_GPUFABRIC_URL", "http://127.0.0.1:18181"),
-		GPUFabricToken:  strings.TrimSpace(os.Getenv("GPUF_TEST_BANKING_API_TOKEN")),
+		GPUFabricToken:  firstEnvironment("GPUF_TEST_BANKING_API_TOKEN", "ASSESSMENT_GPUFABRIC_TOKEN"),
 		GPUFabricUser:   envDefault("E2E_GPUFABRIC_USER_REF", "1"),
 		GPUFabricClient: envDefault("E2E_GPUFABRIC_CLIENT_REF", "bcbe19cbf6063d72f8253d22abad8bb6"),
-		CallbackSecret:  envDefault("ASSESSMENT_E2E_CALLBACK_SECRET", "local-e2e-assessment-callback-secret-only"),
+		TenantRef:       envDefault("E2E_TENANT_REF", defaultTenantRef),
+		CallbackMode:    callbackMode,
+		CallbackSecret:  firstEnvironment("ASSESSMENT_E2E_CALLBACK_SECRET", "ASSESSMENT_CALLBACK_SIGNING_SECRET"),
+		LifecycleMode:   lifecycleMode,
 		FixtureDir:      envDefault("E2E_MARKET_FIXTURE_DIR", "deploy/fixtures/market"),
 		OutputDir:       envDefault("E2E_OUTPUT_DIR", "/tmp/gpuf-asset-assessment-e2e-results"),
 	}
-	if len(config.GPUFabricToken) < 32 {
-		return Config{}, errors.New("GPUF_TEST_BANKING_API_TOKEN must be provided")
+	if len(config.GPUFabricToken) < 32 || len(config.GPUFabricToken) > 4096 {
+		return Config{}, errors.New("GPUF_TEST_BANKING_API_TOKEN or ASSESSMENT_GPUFABRIC_TOKEN must contain 32 to 4096 bytes")
 	}
-	if len(config.CallbackSecret) < 32 || len(config.CallbackSecret) > 4096 {
+	allLocal := true
+	for _, raw := range []string{config.AssessmentURL, config.SupportURL, config.GPUFabricURL} {
+		if err := validateServiceURL(raw, allowContainerHTTP); err != nil {
+			return Config{}, err
+		}
+		if !isLoopbackHTTP(raw) {
+			allLocal = false
+		}
+	}
+	config.SupportToken = firstEnvironment("E2E_SUPPORT_TOKEN", "ASSESSMENT_PDF_RENDERER_TOKEN")
+	if config.SupportToken == "" && allLocal {
+		config.SupportToken = defaultSupportToken
+	}
+	if len(config.SupportToken) < 32 || len(config.SupportToken) > 4096 {
+		return Config{}, errors.New("E2E_SUPPORT_TOKEN or ASSESSMENT_PDF_RENDERER_TOKEN must contain 32 to 4096 bytes")
+	}
+	if config.CallbackMode == callbackModeLocal && config.CallbackSecret == "" && allLocal {
+		config.CallbackSecret = "local-e2e-assessment-callback-secret-only"
+	}
+	if config.CallbackMode == callbackModeLocal && (len(config.CallbackSecret) < 32 || len(config.CallbackSecret) > 4096) {
 		return Config{}, errors.New("ASSESSMENT_E2E_CALLBACK_SECRET must contain 32 to 4096 bytes")
 	}
-	for _, raw := range []string{config.AssessmentURL, config.SupportURL, config.GPUFabricURL} {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Scheme != "http" || !strings.HasPrefix(parsed.Host, "127.0.0.1:") {
-			return Config{}, errors.New("local E2E service URLs must use loopback HTTP")
-		}
+	credentialJSON := firstEnvironment("E2E_ASSESSMENT_CREDENTIALS_JSON", "ASSESSMENT_SERVICE_CREDENTIALS_JSON")
+	if credentialJSON == "" && !allLocal {
+		return Config{}, errors.New("shared E2E requires E2E_ASSESSMENT_CREDENTIALS_JSON or ASSESSMENT_SERVICE_CREDENTIALS_JSON")
+	}
+	config.Credentials, err = loadRunnerCredentials(credentialJSON, config.LifecycleMode)
+	if err != nil {
+		return Config{}, err
 	}
 	return config, nil
 }
@@ -80,7 +130,7 @@ type runner struct {
 
 type serviceCredential struct{ subject, token string }
 
-var credentials = map[string]serviceCredential{
+var defaultCredentials = map[string]serviceCredential{
 	"client":         {"e2e-client", "local-e2e-client-token-0000000000000001"},
 	"storage":        {"object-storage-gateway", "local-e2e-storage-token-00000000000001"},
 	"scanner":        {"evidence-scanner", "local-e2e-scanner-token-00000000000001"},
@@ -99,6 +149,93 @@ var credentials = map[string]serviceCredential{
 	"download":       {"report-download-gateway", "local-e2e-report-download-token-00001"},
 	"revoke":         {"report-revoke-worker", "local-e2e-report-revoke-token-0000001"},
 	"expiry":         {"report-expiry-worker", "local-e2e-report-expiry-token-0000001"},
+}
+
+var credentialSubjectCandidates = map[string][]string{
+	"client":         {"e2e-client", "new-api"},
+	"storage":        {"object-storage-gateway"},
+	"scanner":        {"evidence-scanner"},
+	"evidence":       {"assessment-reviewer"},
+	"market-a":       {"market-provider-a"},
+	"market-b":       {"market-provider-b"},
+	"market-verify":  {"market-data-verifier"},
+	"snapshot":       {"market-snapshot-worker"},
+	"policy-author":  {"pricing-policy-author"},
+	"policy-approve": {"pricing-policy-approver"},
+	"valuation":      {"valuation-worker"},
+	"coordinator":    {"formal-review-coordinator"},
+	"workbench":      {"formal-review-workbench"},
+	"freeze":         {"report-freeze-worker"},
+	"issue":          {"report-issue-worker"},
+	"download":       {"report-download-gateway"},
+	"revoke":         {"report-revoke-worker"},
+	"expiry":         {"report-expiry-worker"},
+}
+
+type configuredCredential struct {
+	Token  string   `json:"token"`
+	Tokens []string `json:"tokens"`
+}
+
+func loadRunnerCredentials(raw, lifecycleMode string) (map[string]serviceCredential, error) {
+	if strings.TrimSpace(raw) == "" {
+		return cloneCredentials(defaultCredentials), nil
+	}
+	configured := make(map[string]configuredCredential)
+	if err := json.Unmarshal([]byte(raw), &configured); err != nil {
+		return nil, errors.New("E2E assessment credentials must be valid JSON")
+	}
+	legacyToken := firstEnvironment("E2E_ASSESSMENT_SERVICE_TOKEN", "ASSESSMENT_SERVICE_TOKEN")
+	if legacyToken != "" {
+		legacySubject := firstEnvironment("E2E_ASSESSMENT_LEGACY_SERVICE_SUBJECT", "ASSESSMENT_LEGACY_SERVICE_SUBJECT")
+		if legacySubject == "" {
+			legacySubject = "new-api"
+		}
+		if _, exists := configured[legacySubject]; !exists {
+			configured[legacySubject] = configuredCredential{Token: legacyToken}
+		}
+	}
+
+	result := make(map[string]serviceCredential, len(defaultCredentials))
+	for role, subjects := range credentialSubjectCandidates {
+		if lifecycleMode == lifecycleModeSkip && (role == "revoke" || role == "expiry") {
+			continue
+		}
+		credential, subject, found := findConfiguredCredential(configured, subjects)
+		if !found {
+			return nil, fmt.Errorf("E2E assessment credential is missing for role %q (subjects: %s)", role, strings.Join(subjects, ", "))
+		}
+		token := strings.TrimSpace(credential.Token)
+		if token == "" {
+			for _, candidate := range credential.Tokens {
+				if token = strings.TrimSpace(candidate); token != "" {
+					break
+				}
+			}
+		}
+		if len(token) < 32 || len(token) > 4096 {
+			return nil, fmt.Errorf("E2E assessment credential token for role %q must contain 32 to 4096 bytes", role)
+		}
+		result[role] = serviceCredential{subject: subject, token: token}
+	}
+	return result, nil
+}
+
+func findConfiguredCredential(configured map[string]configuredCredential, subjects []string) (configuredCredential, string, bool) {
+	for _, subject := range subjects {
+		if credential, exists := configured[subject]; exists {
+			return credential, subject, true
+		}
+	}
+	return configuredCredential{}, "", false
+}
+
+func cloneCredentials(source map[string]serviceCredential) map[string]serviceCredential {
+	result := make(map[string]serviceCredential, len(source))
+	for role, credential := range source {
+		result[role] = credential
+	}
+	return result
 }
 
 type apiEnvelope struct {
@@ -135,7 +272,7 @@ func (r *runner) run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := r.expectServiceError(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+assessment.AssessmentID, nil, credentials["client"], "tenant-other", r.id("tenant-denial"), http.StatusNotFound, "ASSESSMENT_NOT_FOUND"); err != nil {
+	if err := r.expectServiceError(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+assessment.AssessmentID, nil, r.config.Credentials["client"], "tenant-other", r.id("tenant-denial"), http.StatusNotFound, "ASSESSMENT_NOT_FOUND"); err != nil {
 		return "", err
 	}
 	if err := r.validateEvidenceNegativeGates(ctx, assessment.AssessmentID); err != nil {
@@ -178,21 +315,27 @@ func (r *runner) run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[%s] validating revoked and expired report download denial", r.runID)
-	r.phase = "revocation"
-	revocationReport, err := r.createSecondaryReport(ctx, market, policy)
-	if err != nil {
-		return "", err
-	}
-	if err := r.revokeAndAssert(ctx, revocationReport.ReportID); err != nil {
-		return "", err
-	}
-	r.phase = "expiry"
-	if err := r.expireAndAssert(ctx, report); err != nil {
-		return "", err
-	}
-	if err := r.validateCallbackFlow(ctx, report.AssessmentID, revocationReport.AssessmentID); err != nil {
-		return "", err
+	if r.config.LifecycleMode == lifecycleModeFull {
+		log.Printf("[%s] validating revoked and expired report download denial", r.runID)
+		r.phase = "revocation"
+		revocationReport, err := r.createSecondaryReport(ctx, market, policy)
+		if err != nil {
+			return "", err
+		}
+		if err := r.revokeAndAssert(ctx, revocationReport.ReportID); err != nil {
+			return "", err
+		}
+		r.phase = "expiry"
+		if err := r.expireAndAssert(ctx, report); err != nil {
+			return "", err
+		}
+		if r.config.CallbackMode == callbackModeLocal {
+			if err := r.validateCallbackFlow(ctx, report.AssessmentID, revocationReport.AssessmentID); err != nil {
+				return "", err
+			}
+		}
+	} else {
+		log.Printf("[%s] shared mode: report revocation, expiry and local callback sink gates skipped", r.runID)
 	}
 	return result, nil
 }
@@ -206,7 +349,7 @@ type technicalInput struct {
 func (r *runner) createTechnicalInput(ctx context.Context) (technicalInput, error) {
 	body := map[string]any{
 		"gpufUserRef": r.config.GPUFabricUser, "gpufClientRef": r.config.GPUFabricClient,
-		"tenantRef": tenantRef, "clientRequestId": r.id("gpuf-pre"), "assetName": "Local E2E GPU Node",
+		"tenantRef": r.config.TenantRef, "clientRequestId": r.id("gpuf-pre"), "assetName": "Local E2E GPU Node",
 	}
 	headers := map[string]string{
 		"Authorization":   "Bearer " + r.config.GPUFabricToken,
@@ -267,7 +410,7 @@ type assessmentView struct {
 func (r *runner) createAssessment(ctx context.Context, input technicalInput) (assessmentView, error) {
 	body := map[string]any{
 		"clientRequestId": r.id("assessment"), "correlationId": r.id("correlation"),
-		"tenantRef": tenantRef, "userRef": r.config.GPUFabricUser,
+		"tenantRef": r.config.TenantRef, "userRef": r.config.GPUFabricUser,
 		"assetRef":      "gpufabric:client:" + r.config.GPUFabricClient,
 		"requestedTier": "T2", "purpose": []string{"financing_pre_review"},
 		"preEvaluation": map[string]any{
@@ -289,7 +432,7 @@ func (r *runner) createAssessment(ctx context.Context, input technicalInput) (as
 			} `json:"benchmarkPolicy"`
 		} `json:"technicalVerification"`
 	}
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments", body, credentials["client"], tenantRef, r.id("assessment"), http.StatusAccepted, &response); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments", body, r.config.Credentials["client"], r.config.TenantRef, r.id("assessment"), http.StatusAccepted, &response); err != nil {
 		return assessmentView{}, err
 	}
 	if response.Status != "evidence_pending" || response.TechnicalVerification.Status != "verified" || response.TechnicalVerification.BenchmarkPolicy.Status != "satisfied" {
@@ -306,7 +449,7 @@ func (r *runner) getAssessment(ctx context.Context, assessmentID string) (assess
 			AssetConfiguration assetConfiguration `json:"assetConfiguration"`
 		} `json:"technicalVerification"`
 	}
-	err := r.callService(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+url.PathEscape(assessmentID), nil, credentials["client"], tenantRef, r.id("get-assessment"), http.StatusOK, &response)
+	err := r.callService(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+url.PathEscape(assessmentID), nil, r.config.Credentials["client"], r.config.TenantRef, r.id("get-assessment"), http.StatusOK, &response)
 	return assessmentView{AssessmentID: response.AssessmentID, Status: response.Status, AssetConfiguration: response.TechnicalVerification.AssetConfiguration}, err
 }
 
@@ -348,7 +491,7 @@ func (r *runner) validateEvidenceNegativeGates(ctx context.Context, assessmentID
 	completionID := requestID + "-complete"
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/upload-completions", map[string]any{
 		"eventId": completionID, "contentLength": len(pdf), "sha256": strings.Repeat("0", sha256.Size*2),
-	}, credentials["storage"], tenantRef, completionID, http.StatusOK, &mismatch); err != nil {
+	}, r.config.Credentials["storage"], r.config.TenantRef, completionID, http.StatusOK, &mismatch); err != nil {
 		return err
 	}
 	if mismatch.Status != "rejected" || mismatch.VerificationCode != "EVIDENCE_HASH_MISMATCH" {
@@ -365,12 +508,12 @@ func (r *runner) validateEvidenceNegativeGates(ctx context.Context, assessmentID
 	completionID = requestID + "-complete"
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/upload-completions", map[string]any{
 		"eventId": completionID, "contentLength": len(eicar), "sha256": eicarDigest,
-	}, credentials["storage"], tenantRef, completionID, http.StatusOK, nil); err != nil {
+	}, r.config.Credentials["storage"], r.config.TenantRef, completionID, http.StatusOK, nil); err != nil {
 		return err
 	}
 	accessID := requestID + "-scan-access"
 	var access accessGrant
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-downloads", map[string]string{"clientRequestId": accessID}, credentials["scanner"], tenantRef, accessID, http.StatusCreated, &access); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-downloads", map[string]string{"clientRequestId": accessID}, r.config.Credentials["scanner"], r.config.TenantRef, accessID, http.StatusCreated, &access); err != nil {
 		return err
 	}
 	var scanned scanResult
@@ -379,7 +522,7 @@ func (r *runner) validateEvidenceNegativeGates(ctx context.Context, assessmentID
 		"downloadUrl": access.DownloadURL, "requiredHeaders": access.RequiredHeaders,
 		"expectedSha256": access.SHA256, "expectedContentType": access.ContentType,
 		"expectedContentLength": access.ContentLength, "fileName": "eicar-test.pdf",
-	}, map[string]string{"Authorization": "Bearer " + supportToken}, http.StatusOK, &scanned); err != nil {
+	}, map[string]string{"Authorization": "Bearer " + r.config.SupportToken}, http.StatusOK, &scanned); err != nil {
 		return err
 	}
 	if scanned.Status != "infected" || scanned.ReasonCode != "MALWARE_DETECTED" || scanned.SHA256 != eicarDigest {
@@ -390,7 +533,7 @@ func (r *runner) validateEvidenceNegativeGates(ctx context.Context, assessmentID
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-results", map[string]any{
 		"eventId": scanID, "status": scanned.Status, "detectedContentType": scanned.DetectedContentType,
 		"sha256": scanned.SHA256, "reasonCode": scanned.ReasonCode,
-	}, credentials["scanner"], tenantRef, scanID, http.StatusOK, &infected); err != nil {
+	}, r.config.Credentials["scanner"], r.config.TenantRef, scanID, http.StatusOK, &infected); err != nil {
 		return err
 	}
 	if infected.Status != "rejected" || infected.VerificationCode != "MALWARE_DETECTED" {
@@ -398,7 +541,7 @@ func (r *runner) validateEvidenceNegativeGates(ctx context.Context, assessmentID
 	}
 	return r.expectServiceError(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-results", map[string]any{
 		"eventId": scanID, "status": "clean", "detectedContentType": "application/pdf", "sha256": scanned.SHA256,
-	}, credentials["scanner"], tenantRef, scanID, http.StatusConflict, "IDEMPOTENCY_CONFLICT")
+	}, r.config.Credentials["scanner"], r.config.TenantRef, scanID, http.StatusConflict, "IDEMPOTENCY_CONFLICT")
 }
 
 func (r *runner) createEvidenceUpload(ctx context.Context, assessmentID, requestID, evidenceType, fileName string, content []byte, digest string) (uploadGrant, error) {
@@ -406,7 +549,7 @@ func (r *runner) createEvidenceUpload(ctx context.Context, assessmentID, request
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence-sessions", map[string]any{
 		"clientRequestId": requestID, "evidenceType": evidenceType, "contentType": "application/pdf",
 		"contentLength": len(content), "fileName": fileName, "sha256": digest,
-	}, credentials["client"], tenantRef, requestID, http.StatusCreated, &grant); err != nil {
+	}, r.config.Credentials["client"], r.config.TenantRef, requestID, http.StatusCreated, &grant); err != nil {
 		return uploadGrant{}, err
 	}
 	if err := r.putBytes(ctx, grant.UploadMethod, grant.UploadURL, grant.RequiredHeaders, content); err != nil {
@@ -425,7 +568,7 @@ func (r *runner) processEvidence(ctx context.Context, assessmentID, evidenceType
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence-sessions", map[string]any{
 		"clientRequestId": requestID, "evidenceType": evidenceType, "contentType": "application/pdf",
 		"contentLength": len(pdf), "fileName": strings.ReplaceAll(evidenceType, ".", "-") + ".pdf", "sha256": digest,
-	}, credentials["client"], tenantRef, requestID, http.StatusCreated, &grant); err != nil {
+	}, r.config.Credentials["client"], r.config.TenantRef, requestID, http.StatusCreated, &grant); err != nil {
 		return err
 	}
 	if err := r.putBytes(ctx, grant.UploadMethod, grant.UploadURL, grant.RequiredHeaders, pdf); err != nil {
@@ -434,12 +577,12 @@ func (r *runner) processEvidence(ctx context.Context, assessmentID, evidenceType
 	completionID := requestID + "-upload"
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/upload-completions", map[string]any{
 		"eventId": completionID, "contentLength": len(pdf), "sha256": digest,
-	}, credentials["storage"], tenantRef, completionID, http.StatusOK, nil); err != nil {
+	}, r.config.Credentials["storage"], r.config.TenantRef, completionID, http.StatusOK, nil); err != nil {
 		return err
 	}
 	scanAccessID := requestID + "-scan-access"
 	var scanAccess accessGrant
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-downloads", map[string]string{"clientRequestId": scanAccessID}, credentials["scanner"], tenantRef, scanAccessID, http.StatusCreated, &scanAccess); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-downloads", map[string]string{"clientRequestId": scanAccessID}, r.config.Credentials["scanner"], r.config.TenantRef, scanAccessID, http.StatusCreated, &scanAccess); err != nil {
 		return err
 	}
 	var scanned scanResult
@@ -448,7 +591,7 @@ func (r *runner) processEvidence(ctx context.Context, assessmentID, evidenceType
 		"downloadUrl": scanAccess.DownloadURL, "requiredHeaders": scanAccess.RequiredHeaders,
 		"expectedSha256": scanAccess.SHA256, "expectedContentType": scanAccess.ContentType,
 		"expectedContentLength": scanAccess.ContentLength, "fileName": evidenceType + ".pdf",
-	}, map[string]string{"Authorization": "Bearer " + supportToken}, http.StatusOK, &scanned); err != nil {
+	}, map[string]string{"Authorization": "Bearer " + r.config.SupportToken}, http.StatusOK, &scanned); err != nil {
 		return err
 	}
 	if scanned.Status != "clean" || scanned.SHA256 != digest || scanned.DetectedContentType != "application/pdf" || scanned.OCRSHA256 == "" || scanned.OCRText == "" {
@@ -457,12 +600,12 @@ func (r *runner) processEvidence(ctx context.Context, assessmentID, evidenceType
 	scanID := requestID + "-scan-result"
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/scan-results", map[string]any{
 		"eventId": scanID, "status": scanned.Status, "detectedContentType": scanned.DetectedContentType, "sha256": scanned.SHA256,
-	}, credentials["scanner"], tenantRef, scanID, http.StatusOK, nil); err != nil {
+	}, r.config.Credentials["scanner"], r.config.TenantRef, scanID, http.StatusOK, nil); err != nil {
 		return err
 	}
 	reviewAccessID := requestID + "-review-access"
 	var reviewAccess accessGrant
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/review-downloads", map[string]string{"clientRequestId": reviewAccessID}, credentials["evidence"], tenantRef, reviewAccessID, http.StatusCreated, &reviewAccess); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/review-downloads", map[string]string{"clientRequestId": reviewAccessID}, r.config.Credentials["evidence"], r.config.TenantRef, reviewAccessID, http.StatusCreated, &reviewAccess); err != nil {
 		return err
 	}
 	reviewBytes, err := r.getBytes(ctx, reviewAccess.DownloadURL, reviewAccess.RequiredHeaders)
@@ -477,7 +620,7 @@ func (r *runner) processEvidence(ctx context.Context, assessmentID, evidenceType
 			"commissionedAt": "2024-02-01T00:00:00Z", "warrantyUntil": time.Now().UTC().AddDate(1, 0, 0),
 		}
 	}
-	return r.callServiceWithReviewer(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/review-actions", reviewBody, credentials["evidence"], tenantRef, reviewID, "evidence-reviewer-local", http.StatusOK, nil)
+	return r.callServiceWithReviewer(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/evidence/"+grant.EvidenceID+"/review-actions", reviewBody, r.config.Credentials["evidence"], r.config.TenantRef, reviewID, "evidence-reviewer-local", http.StatusOK, nil)
 }
 
 func (r *runner) renderEvidence(ctx context.Context, evidenceType string) ([]byte, string, error) {
@@ -485,7 +628,7 @@ func (r *runner) renderEvidence(ctx context.Context, evidenceType string) ([]byt
 	var response struct{ PDFBase64, PDFSHA256 string }
 	if err := r.callEnvelope(ctx, http.MethodPost, r.config.SupportURL+"/internal/v1/pdf-renders", map[string]string{
 		"reportId": r.id("evidence-" + strings.ReplaceAll(evidenceType, ".", "-")), "html": html, "htmlSha256": sha256Hex([]byte(html)),
-	}, map[string]string{"Authorization": "Bearer " + supportToken}, http.StatusOK, &response); err != nil {
+	}, map[string]string{"Authorization": "Bearer " + r.config.SupportToken}, http.StatusOK, &response); err != nil {
 		return nil, "", err
 	}
 	pdf, err := base64.StdEncoding.DecodeString(response.PDFBase64)
@@ -513,7 +656,7 @@ func (r *runner) createMarketSnapshot(ctx context.Context, configuration assetCo
 			"aggregationPolicyVersion": "market_aggregation.v1",
 		}
 	}
-	if err := r.expectServiceError(ctx, http.MethodPost, "/internal/v1/market-price-snapshots", snapshotBody(r.id("market-insufficient")), credentials["snapshot"], tenantRef, r.id("market-insufficient"), http.StatusUnprocessableEntity, "MARKET_DATA_INSUFFICIENT"); err != nil {
+	if err := r.expectServiceError(ctx, http.MethodPost, "/internal/v1/market-price-snapshots", snapshotBody(r.id("market-insufficient")), r.config.Credentials["snapshot"], r.config.TenantRef, r.id("market-insufficient"), http.StatusUnprocessableEntity, "MARKET_DATA_INSUFFICIENT"); err != nil {
 		return marketResult{}, err
 	}
 	entries, err := os.ReadDir(r.config.FixtureDir)
@@ -533,9 +676,9 @@ func (r *runner) createMarketSnapshot(ctx context.Context, configuration assetCo
 		if err := json.Unmarshal(raw, &fixture); err != nil {
 			return marketResult{}, err
 		}
-		provider := credentials["market-a"]
+		provider := r.config.Credentials["market-a"]
 		if index == 1 {
-			provider = credentials["market-b"]
+			provider = r.config.Credentials["market-b"]
 		}
 		requestID := r.id("market-" + strconv.Itoa(index+1))
 		price := fixture.TransactionPriceMinor
@@ -549,13 +692,13 @@ func (r *runner) createMarketSnapshot(ctx context.Context, configuration assetCo
 			"transactionPriceMinor": price, "sourceRecordHash": sha256Hex([]byte(fixture.SourceRecordID)),
 			"evidenceSha256": sha256Hex(raw), "rawObjectRef": "s3://private-market-evidence/market/" + entry.Name(),
 			"retentionUntil": time.Now().UTC().Add(30 * 24 * time.Hour),
-		}, provider, tenantRef, requestID, http.StatusCreated, &observation); err != nil {
+		}, provider, r.config.TenantRef, requestID, http.StatusCreated, &observation); err != nil {
 			return marketResult{}, err
 		}
 		verifyID := requestID + "-verify"
 		if err := r.callService(ctx, http.MethodPost, "/internal/v1/market-observations/"+observation.ObservationID+"/verification-actions", map[string]any{
 			"eventId": verifyID, "action": "verify", "qualityScore": 85,
-		}, credentials["market-verify"], tenantRef, verifyID, http.StatusOK, nil); err != nil {
+		}, r.config.Credentials["market-verify"], r.config.TenantRef, verifyID, http.StatusOK, nil); err != nil {
 			return marketResult{}, err
 		}
 	}
@@ -565,7 +708,7 @@ func (r *runner) createMarketSnapshot(ctx context.Context, configuration assetCo
 		SampleCount, ProviderCount, ClosedDealCount int
 		Confidence                                  float64
 	}
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/market-price-snapshots", snapshotBody(finalID), credentials["snapshot"], tenantRef, finalID, http.StatusCreated, &snapshot); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/market-price-snapshots", snapshotBody(finalID), r.config.Credentials["snapshot"], r.config.TenantRef, finalID, http.StatusCreated, &snapshot); err != nil {
 		return marketResult{}, err
 	}
 	if snapshot.SampleCount < 3 || snapshot.ProviderCount < 2 || snapshot.ClosedDealCount < 3 || snapshot.Confidence < 0.5 {
@@ -587,13 +730,13 @@ func (r *runner) createPricingPolicy(ctx context.Context, configuration assetCon
 		"conditionAdjustments": map[string]float64{"good": 0.95},
 		"warrantyAdjustments":  map[string]float64{"covered": 1, "default": 0.9},
 		"liquidityAdjustments": map[string]float64{"US": 1}, "minimumConfidence": 0.5,
-	}, credentials["policy-author"], tenantRef, r.id("policy-create"), http.StatusCreated, &policy); err != nil {
+	}, r.config.Credentials["policy-author"], r.config.TenantRef, r.id("policy-create"), http.StatusCreated, &policy); err != nil {
 		return policyResult{}, err
 	}
 	approvalID := r.id("policy-approve")
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/pricing-policies/"+policy.PolicyID+"/approval-actions", map[string]string{
 		"eventId": approvalID, "approverRef": "pricing-approver-local-e2e",
-	}, credentials["policy-approve"], tenantRef, approvalID, http.StatusOK, &policy); err != nil {
+	}, r.config.Credentials["policy-approve"], r.config.TenantRef, approvalID, http.StatusOK, &policy); err != nil {
 		return policyResult{}, err
 	}
 	if policy.Status != "approved" {
@@ -613,7 +756,7 @@ func (r *runner) executeValuation(ctx context.Context, assessmentID, snapshotID,
 	}
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/valuation", map[string]string{
 		"technicalSnapshotId": snapshotID, "marketSnapshotId": marketID, "policyVersion": policyVersion, "method": "comparable",
-	}, credentials["valuation"], tenantRef, r.id("valuation"), http.StatusCreated, &result); err != nil {
+	}, r.config.Credentials["valuation"], r.config.TenantRef, r.id("valuation"), http.StatusCreated, &result); err != nil {
 		return valuationResult{}, err
 	}
 	if result.PointValueMinor == nil || result.LowValueMinor <= 0 || result.HighValueMinor < result.LowValueMinor || result.Currency != "USD" || result.Confidence < 0.5 {
@@ -626,7 +769,7 @@ func (r *runner) completeFormalReview(ctx context.Context, assessmentID, valuati
 	submitID := r.id("review-submit")
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/submit-review", map[string]string{
 		"clientRequestId": submitID, "valuationId": valuationID,
-	}, credentials["valuation"], tenantRef, submitID, http.StatusCreated, nil); err != nil {
+	}, r.config.Credentials["valuation"], r.config.TenantRef, submitID, http.StatusCreated, nil); err != nil {
 		return err
 	}
 	assignments := []struct{ role, reviewer, suffix string }{
@@ -637,14 +780,14 @@ func (r *runner) completeFormalReview(ctx context.Context, assessmentID, valuati
 		requestID := r.id(assignment.suffix)
 		if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/review-assignments", map[string]string{
 			"clientRequestId": requestID, "role": assignment.role, "reviewerRef": assignment.reviewer,
-		}, credentials["coordinator"], tenantRef, requestID, http.StatusOK, nil); err != nil {
+		}, r.config.Credentials["coordinator"], r.config.TenantRef, requestID, http.StatusOK, nil); err != nil {
 			return err
 		}
 		if index == 0 {
 			separationID := r.id("assign-secondary-same-reviewer")
 			if err := r.expectServiceError(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/review-assignments", map[string]string{
 				"clientRequestId": separationID, "role": "secondary", "reviewerRef": assignment.reviewer,
-			}, credentials["coordinator"], tenantRef, separationID, http.StatusConflict, "REVIEWER_SEPARATION_REQUIRED"); err != nil {
+			}, r.config.Credentials["coordinator"], r.config.TenantRef, separationID, http.StatusConflict, "REVIEWER_SEPARATION_REQUIRED"); err != nil {
 				return err
 			}
 		}
@@ -662,7 +805,7 @@ func (r *runner) completeFormalReview(ctx context.Context, assessmentID, valuati
 		}
 		if err := r.callServiceWithReviewer(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/review-actions", map[string]string{
 			"clientRequestId": requestID, "action": action.action, "reasonCode": action.reason,
-		}, credentials["workbench"], tenantRef, requestID, action.reviewer, http.StatusOK, &view); err != nil {
+		}, r.config.Credentials["workbench"], r.config.TenantRef, requestID, action.reviewer, http.StatusOK, &view); err != nil {
 			return err
 		}
 		if action.suffix == "review-secondary-approve" && view.Review.Status != "approved" {
@@ -706,7 +849,7 @@ func (r *runner) revokeAndAssert(ctx context.Context, reportID string) error {
 	var report reportResult
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/reports/"+reportID+"/revoke", map[string]string{
 		"clientRequestId": requestID, "reasonCode": "LOCAL_E2E_REVOCATION",
-	}, credentials["revoke"], tenantRef, requestID, http.StatusOK, &report); err != nil {
+	}, r.config.Credentials["revoke"], r.config.TenantRef, requestID, http.StatusOK, &report); err != nil {
 		return err
 	}
 	if report.Status != "revoked" {
@@ -715,7 +858,7 @@ func (r *runner) revokeAndAssert(ctx context.Context, reportID string) error {
 	downloadID := r.id("download-after-revoke")
 	return r.expectServiceError(ctx, http.MethodPost, "/internal/v1/reports/"+reportID+"/downloads", map[string]string{
 		"clientRequestId": downloadID,
-	}, credentials["download"], tenantRef, downloadID, http.StatusGone, "REPORT_DOWNLOAD_DENIED")
+	}, r.config.Credentials["download"], r.config.TenantRef, downloadID, http.StatusGone, "REPORT_DOWNLOAD_DENIED")
 }
 
 func (r *runner) expireAndAssert(ctx context.Context, report reportResult) error {
@@ -739,7 +882,7 @@ func (r *runner) expireAndAssert(ctx context.Context, report reportResult) error
 	var result struct {
 		ExpiredCount int `json:"expiredCount"`
 	}
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/report-expirations", map[string]int{"limit": 100}, credentials["expiry"], tenantRef, requestID, http.StatusOK, &result); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/report-expirations", map[string]int{"limit": 100}, r.config.Credentials["expiry"], r.config.TenantRef, requestID, http.StatusOK, &result); err != nil {
 		return err
 	}
 	if result.ExpiredCount < 1 {
@@ -748,7 +891,7 @@ func (r *runner) expireAndAssert(ctx context.Context, report reportResult) error
 	downloadID := r.id("download-after-expiry")
 	return r.expectServiceError(ctx, http.MethodPost, "/internal/v1/reports/"+report.ReportID+"/downloads", map[string]string{
 		"clientRequestId": downloadID,
-	}, credentials["download"], tenantRef, downloadID, http.StatusGone, "REPORT_DOWNLOAD_DENIED")
+	}, r.config.Credentials["download"], r.config.TenantRef, downloadID, http.StatusGone, "REPORT_DOWNLOAD_DENIED")
 }
 
 type callbackStats struct {
@@ -763,7 +906,7 @@ func (r *runner) validateCallbackFlow(ctx context.Context, expiredAssessmentID, 
 	for {
 		var stats callbackStats
 		if err := r.callEnvelope(ctx, http.MethodGet, r.config.SupportURL+"/internal/v1/callback-state", nil, map[string]string{
-			"Authorization": "Bearer " + supportToken,
+			"Authorization": "Bearer " + r.config.SupportToken,
 		}, http.StatusOK, &stats); err != nil {
 			return err
 		}
@@ -870,11 +1013,11 @@ type reportResult struct {
 func (r *runner) issueAndDownload(ctx context.Context, assessmentID string) (reportResult, []byte, error) {
 	freezeID := r.id("report-freeze")
 	var report reportResult
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/report-freezes", map[string]string{"clientRequestId": freezeID}, credentials["freeze"], tenantRef, freezeID, http.StatusCreated, &report); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments/"+assessmentID+"/report-freezes", map[string]string{"clientRequestId": freezeID}, r.config.Credentials["freeze"], r.config.TenantRef, freezeID, http.StatusCreated, &report); err != nil {
 		return reportResult{}, nil, err
 	}
 	issueID := r.id("report-issue")
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/reports/"+report.ReportID+"/issue", map[string]string{"clientRequestId": issueID}, credentials["issue"], tenantRef, issueID, http.StatusOK, &report); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/reports/"+report.ReportID+"/issue", map[string]string{"clientRequestId": issueID}, r.config.Credentials["issue"], r.config.TenantRef, issueID, http.StatusOK, &report); err != nil {
 		return reportResult{}, nil, err
 	}
 	if report.Status != "issued" || report.Signature == nil || report.IssuedAt == nil || report.ValidUntil == nil {
@@ -885,7 +1028,7 @@ func (r *runner) issueAndDownload(ctx context.Context, assessmentID string) (rep
 	}
 	downloadID := r.id("report-download")
 	var grant struct{ URL, Method string }
-	if err := r.callService(ctx, http.MethodPost, "/internal/v1/reports/"+report.ReportID+"/downloads", map[string]string{"clientRequestId": downloadID}, credentials["download"], tenantRef, downloadID, http.StatusCreated, &grant); err != nil {
+	if err := r.callService(ctx, http.MethodPost, "/internal/v1/reports/"+report.ReportID+"/downloads", map[string]string{"clientRequestId": downloadID}, r.config.Credentials["download"], r.config.TenantRef, downloadID, http.StatusCreated, &grant); err != nil {
 		return reportResult{}, nil, err
 	}
 	pdf, err := r.getBytes(ctx, grant.URL, nil)
@@ -1165,4 +1308,65 @@ func envDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func firstEnvironment(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func envBool(name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return value, nil
+}
+
+func validateServiceURL(raw string, allowContainerHTTP bool) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("invalid E2E service URL %q", raw)
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme != "http" {
+		return errors.New("E2E service URLs must use HTTP or HTTPS")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || (allowContainerHTTP && ip.IsPrivate()) {
+			return nil
+		}
+		return errors.New("plain HTTP E2E service URLs may not use a public IP address")
+	}
+	if allowContainerHTTP && !strings.Contains(hostname, ".") {
+		return nil
+	}
+	return errors.New("plain HTTP E2E service URLs require loopback or E2E_ALLOW_CONTAINER_HTTP=true with a private container host")
+}
+
+func isLoopbackHTTP(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" {
+		return false
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
