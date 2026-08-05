@@ -262,6 +262,8 @@ GET /internal/v2/technical-snapshots/{snapshotId}
 
 `assetConfiguration` 只在 GPU 清单完整、同构、逐卡显存一致且型号命中服务端规格目录时出现。Hash 输入为 `gpuf.asset_configuration.v1`、`canonicalModelId`、`deviceForm`、`gpuCount`、`memoryPerGpuBytes` 的固定换行协议，末尾包含换行；不得通过 JSON 重序列化计算。完整规则见 gpuf-s API 文档。
 
+规格目录是正式估值的前置条件。未命中目录时技术预评估仍会显式报告缺项，但 asset-assessment-service 不得在缺少 `assetConfiguration` 时继续市场估值。测试环境已收录 `Apple M1 Pro` 与设备上报别名 `Apple Apple M1 Pro`，统一映射为 `apple-m1-pro-gpu`；新增型号必须同时更新开发 schema 和生产增量 schema，并经过规格来源审核。
+
 完整 Schema 和示例：
 
 - [`technical-asset-snapshot.v2.schema.json`](../schema/technical-asset-snapshot.v2.schema.json)
