@@ -21,7 +21,7 @@ use crate::inference::{
         validate_session_id, CachePolicy, ChatCompletionRequest, ChatCompletionResponse,
         CompletionRequest, CompletionUsage, DeviceInfo, EmbeddingInput, EmbeddingRequest,
         ModelInfo, P2PResponseInfo, SessionRouteOutcome, SessionRouting, SophnetEmbeddingRequest,
-        SophnetEmbeddingResponse, SophnetEmbeddingUsage, StreamEvent,
+        SophnetEmbeddingResponse, SophnetEmbeddingUsage, StreamEvent, NO_AVAILABLE_COMPUTE_CLIENTS,
     },
 };
 use crate::util::protoc::ClientId;
@@ -349,6 +349,10 @@ fn session_routing_for_request(
 
 fn scheduler_error_response(error: &anyhow::Error) -> Response {
     let message = error.to_string();
+    let unavailable_client = message.contains(NO_AVAILABLE_COMPUTE_CLIENTS)
+        || message.contains("No available Android devices found")
+        || message.contains("No compatible client found")
+        || message.contains("No non-mobile embedding-capable client found");
     let status = if message.contains("session owner mismatch")
         || message.contains("no longer allowed")
     {
@@ -356,16 +360,18 @@ fn scheduler_error_response(error: &anyhow::Error) -> Response {
     } else if message.contains("unsupported encoding_format") || message.contains("embedding input")
     {
         StatusCode::BAD_REQUEST
-    } else if message.contains("No available Android devices found")
-        || message.contains("No compatible client found")
-        || message.contains("No non-mobile embedding-capable client found")
-    {
+    } else if unavailable_client {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
+    let public_message = if unavailable_client {
+        NO_AVAILABLE_COMPUTE_CLIENTS
+    } else {
+        message.as_str()
+    };
 
-    json_error(status, message, "api_error")
+    json_error(status, public_message, "api_error")
 }
 
 fn apply_route_headers(response: &mut Response, outcome: &SessionRouteOutcome) {
@@ -1612,5 +1618,29 @@ mod tests {
                 "fallback": false
             })
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_client_errors_are_platform_neutral() {
+        for internal_message in [
+            NO_AVAILABLE_COMPUTE_CLIENTS,
+            "No available Android devices found",
+            "No compatible client found",
+            "No non-mobile embedding-capable client found",
+        ] {
+            let response = scheduler_error_response(&anyhow::anyhow!(internal_message));
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error response body must be readable");
+            let value: Value =
+                serde_json::from_slice(&body).expect("error response must contain JSON");
+            assert_eq!(
+                value["error"]["message"],
+                Value::String(NO_AVAILABLE_COMPUTE_CLIENTS.to_string())
+            );
+            assert_eq!(value["error"]["code"], 503);
+        }
     }
 }

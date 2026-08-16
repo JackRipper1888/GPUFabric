@@ -14,7 +14,7 @@ use common::{
     format_bytes, format_duration, join_streams, read_command, write_command, Command, CommandV1,
     CommandV2, DownloadStatus, EngineType as ClientEngineType, Model, OsType, OutputPhase,
     P2PCandidate, P2PCandidateType, P2PConnectionType, P2PTransport, PodModel, SystemInfo,
-    MAX_MESSAGE_SIZE,
+    MAX_MESSAGE_SIZE, SERVER_CAPABILITY_GPU_HEALTH,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -476,7 +476,10 @@ fn derive_model_id_from_path(model_path: &str) -> String {
     base.to_string()
 }
 
+#[cfg(not(target_os = "android"))]
 const CURRENT_VERSION: u32 = common::CURRENT_COMMAND_V1_VERSION;
+#[cfg(target_os = "android")]
+const CURRENT_VERSION: u32 = common::COMMAND_V1_BASE_VERSION;
 
 impl ClientWorker {
     /// Execute inference task using local LLM engine (Android specific)
@@ -1109,6 +1112,19 @@ impl ClientWorker {
         let command = Command::V1(command);
         let mut writer = self.writer.lock().await;
         write_command(&mut *writer, &command).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    async fn send_command_v1_on_writer(
+        writer: Arc<Mutex<ControlWriter>>,
+        command: CommandV1,
+    ) -> Result<()> {
+        use common::{write_command, Command};
+
+        let mut writer = writer.lock().await;
+        write_command(&mut *writer, &Command::V1(command)).await?;
         writer.flush().await?;
         Ok(())
     }
@@ -2117,6 +2133,7 @@ impl ClientWorker {
                 notify: tokio::sync::Notify::new(),
             }),
             connection_closed: Arc::new(AtomicBool::new(false)),
+            gpu_health_started: Arc::new(AtomicBool::new(false)),
         };
         Ok(worker)
     }
@@ -3331,6 +3348,32 @@ impl WorkerHandle for ClientWorker {
                                     }
                                 }
                             }
+                            CommandV1::BenchmarkTask { task } => {
+                                #[cfg(not(target_os = "android"))]
+                                {
+                                    let engine = Arc::clone(&self.engine);
+                                    let writer = Arc::clone(&self.writer);
+                                    tokio::spawn(async move {
+                                        let task_id = task.task_id.clone();
+                                        let result = crate::benchmark::execute(task, engine).await;
+                                        if let Err(error) = Self::send_command_v1_on_writer(
+                                            writer,
+                                            CommandV1::BenchmarkResult { result },
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                "Failed to send optional benchmark result for {}: {}",
+                                                task_id, error
+                                            );
+                                        }
+                                    });
+                                }
+                                #[cfg(target_os = "android")]
+                                {
+                                    let _ = task;
+                                }
+                            }
                             _ => {
                                 warn!("Received unexpected CommandV1 variant; payload redacted");
                             }
@@ -3338,6 +3381,90 @@ impl WorkerHandle for ClientWorker {
                     }
                     Command::V2(cmd_v2) => {
                         match cmd_v2 {
+                            CommandV2::ServerCapabilities { capabilities } => {
+                                #[cfg(any(target_os = "android", target_os = "ios"))]
+                                {
+                                    let _ = capabilities;
+                                    continue;
+                                }
+                                #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
+                                {
+                                    if capabilities & SERVER_CAPABILITY_GPU_HEALTH == 0 {
+                                        continue;
+                                    }
+                                    if self
+                                        .gpu_health_started
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                        )
+                                        .is_err()
+                                    {
+                                        continue;
+                                    }
+
+                                    let client_id = self.client_id;
+                                    let writer = Arc::clone(&self.writer);
+                                    let connection_closed = Arc::clone(&self.connection_closed);
+                                    tokio::spawn(async move {
+                                        let mut interval = interval(Duration::from_secs(120));
+                                        loop {
+                                            interval.tick().await;
+                                            if connection_closed.load(Ordering::SeqCst) {
+                                                break;
+                                            }
+                                            let collected =
+                                                tokio::task::spawn_blocking(move || {
+                                                    crate::gpu_health::collect(client_id)
+                                                })
+                                                .await;
+                                            let snapshot = match collected {
+                                                Ok(Ok(snapshot))
+                                                    if !snapshot.devices.is_empty() =>
+                                                {
+                                                    snapshot
+                                                }
+                                                Ok(Ok(_)) => {
+                                                    warn!(
+                                                        "GPU health collection returned no devices"
+                                                    );
+                                                    continue;
+                                                }
+                                                Ok(Err(error)) => {
+                                                    warn!(
+                                                        "GPU health collection failed: {}",
+                                                        error
+                                                    );
+                                                    continue;
+                                                }
+                                                Err(error) => {
+                                                    warn!(
+                                                        "GPU health collection task failed: {}",
+                                                        error
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                            if let Err(error) = write_command(
+                                                &mut *writer.lock().await,
+                                                &Command::V2(CommandV2::GpuHealthSnapshot {
+                                                    snapshot,
+                                                }),
+                                            )
+                                            .await
+                                            {
+                                                warn!(
+                                                    "Failed to send GPU health snapshot: {}",
+                                                    error
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
                             CommandV2::ChatInferenceTask {
                                 task_id,
                                 session_id,

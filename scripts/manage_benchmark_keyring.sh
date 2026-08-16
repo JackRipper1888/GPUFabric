@@ -6,12 +6,14 @@ umask 077
 usage() {
     cat >&2 <<'USAGE'
 Usage:
-  manage_benchmark_keyring.sh issue KEY_ID PRIVATE_KEY KEYRING_JSON [VALID_DAYS]
+  manage_benchmark_keyring.sh issue KEY_ID PRIVATE_KEY KEYRING_JSON [VALID_DAYS] [PURPOSE]
   manage_benchmark_keyring.sh transition KEY_ID retired|revoked KEYRING_JSON
 
 issue creates an Ed25519 private key with mode 0600 and atomically adds an
 active managed public-key entry. transition is monotonic: active -> retired or
-revoked, and retired -> revoked. A revoked key cannot be reactivated.
+revoked, and retired -> revoked. PURPOSE is test_only by default and may be
+performance_claim only for an approved real benchmark runner. A revoked key
+cannot be reactivated.
 USAGE
     exit 2
 }
@@ -54,14 +56,19 @@ atomic_replace_keyring() {
 }
 
 issue_key() {
-    [[ $# -eq 3 || $# -eq 4 ]] || usage
+    [[ $# -ge 3 && $# -le 5 ]] || usage
     local key_id="$1"
     local private_key="$2"
     local keyring_file="$3"
     local valid_days="${4:-365}"
+    local purpose="${5:-test_only}"
     validate_key_id "$key_id"
     if [[ ! "$valid_days" =~ ^[1-9][0-9]*$ ]] || ((valid_days > 730)); then
         printf 'VALID_DAYS must be between 1 and 730\n' >&2
+        exit 2
+    fi
+    if [[ "$purpose" != test_only && "$purpose" != performance_claim ]]; then
+        printf 'PURPOSE must be test_only or performance_claim\n' >&2
         exit 2
     fi
     if [[ -e "$private_key" || -L "$private_key" ]]; then
@@ -121,9 +128,11 @@ issue_key() {
         --arg public_key "$public_key_base64" \
         --arg not_before "$not_before" \
         --arg not_after "$not_after" \
+        --arg purpose "$purpose" \
         '. + {($key_id): {
             publicKeyBase64: $public_key,
             status: "active",
+            purpose: $purpose,
             notBefore: $not_before,
             notAfter: $not_after
         }}' \
@@ -135,8 +144,8 @@ issue_key() {
 
     local fingerprint
     fingerprint="$(printf '%s' "$public_key_base64" | sha256sum | awk '{print $1}')"
-    printf 'issued keyId=%s privateKey=%s keyring=%s publicKeyBase64Sha256=%s notAfter=%s\n' \
-        "$key_id" "$private_key" "$keyring_file" "$fingerprint" "$not_after"
+    printf 'issued keyId=%s purpose=%s privateKey=%s keyring=%s publicKeyBase64Sha256=%s notAfter=%s\n' \
+        "$key_id" "$purpose" "$private_key" "$keyring_file" "$fingerprint" "$not_after"
 }
 
 transition_key() {

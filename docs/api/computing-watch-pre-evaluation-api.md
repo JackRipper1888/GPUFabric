@@ -75,8 +75,8 @@ BFF 从登录会话取得用户 ID，忽略浏览器提交的 `user_id`，并固
         "pre_evaluation_report": {
           "report_id": "PRE-2026-07-...",
           "generated_at": "2026-07-28T03:20:27.783964Z",
-          "preview_url": "/api/banking/provider/pre-evaluations/PRE-2026-07-.../html",
-          "download_url": "/api/banking/provider/pre-evaluations/PRE-2026-07-.../html?download=true"
+          "preview_url": "/api/banking/provider/pre-evaluations/PRE-2026-07-.../pdf",
+          "download_url": "/api/banking/provider/pre-evaluations/PRE-2026-07-.../pdf?download=true"
         }
       },
       {
@@ -106,14 +106,14 @@ GET /api/computing/watch/pre-evaluation/{reportId}/download
 1. 校验登录会话并从会话取得用户 ID。
 2. 回查该用户的有效设备，确认 `reportId` 属于其设备当前关联报告。
 3. 在服务端附加 Banking Token 请求 API Server。
-4. 重新计算响应 HTML 的 SHA-256，并与 `X-Content-SHA256` 比较。
-5. 以 `inline` 或 `attachment` 返回同源 HTML，且设置 `private, no-store` 与限制性安全响应头。
+4. 校验 `application/pdf`、`%PDF-` 文件头和响应 SHA-256。
+5. 以 `inline` 或 `attachment` 返回同源 PDF，并设置 `private, no-store`。
 
 Banking Token 只能配置在 BFF 服务端环境变量 `GPUF_BANKING_API_TOKEN` 中，不得写入前端构建变量、浏览器存储、URL 或日志。
 
 ### 3.2 API Server 内部接口
 
-`GET /api/banking/provider/pre-evaluations/{reportId}/html`
+`GET /api/banking/provider/pre-evaluations/{reportId}/pdf`
 
 #### Path 参数
 
@@ -137,25 +137,25 @@ Banking Token 只能配置在 BFF 服务端环境变量 `GPUF_BANKING_API_TOKEN`
 
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  "http://<gpuf-api-server>:18081/api/banking/provider/pre-evaluations/<reportId>/html"
+  "http://<gpuf-api-server>:18081/api/banking/provider/pre-evaluations/<reportId>/pdf"
 ```
 
 预览响应包含：
 
-- `Content-Type: text/html; charset=utf-8`
-- `Content-Disposition: inline; filename="pre-evaluation-<reportId>.html"`
+- `Content-Type: application/pdf`
+- `Content-Disposition: inline; filename="pre-evaluation-<reportId>.pdf"`
 - `X-Content-SHA256: <64-hex>`
 - `Cache-Control: private, no-store`
-- 限制性 CSP、`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`
+- `X-Content-Type-Options: nosniff`
 
 #### 内部下载请求
 
 ```bash
 curl -OJ -H "Authorization: Bearer <token>" \
-  "http://<gpuf-api-server>:18081/api/banking/provider/pre-evaluations/<reportId>/html?download=true"
+  "http://<gpuf-api-server>:18081/api/banking/provider/pre-evaluations/<reportId>/pdf?download=true"
 ```
 
-下载返回相同且经过 SHA-256 校验的 HTML 字节，响应使用 `Content-Disposition: attachment`。
+下载返回经过 PDF 文件头和 SHA-256 校验的 PDF 字节，响应使用 `Content-Disposition: attachment`。
 
 #### 状态码
 
@@ -166,7 +166,8 @@ curl -OJ -H "Authorization: Bearer <token>" \
 | `401` | 未提供令牌或令牌错误 |
 | `404` | 报告不存在 |
 | `500` | 数据库读取失败或冻结 HTML 的 SHA-256 校验失败 |
-| `503` | Banking 令牌未配置或配置无效 |
+| `502` | PDF 支撑服务不可用或返回的 PDF/Hash 无效 |
+| `503` | Banking 令牌或 PDF 支撑服务配置无效 |
 
 ## 4. 涉及的数据表
 
@@ -278,14 +279,14 @@ HTML 放入私有 OSS、S3 或 MinIO bucket，PostgreSQL 只保留报告元数�
 
 对象 bucket 必须为私有。不要把永久 OSS URL 或长期签名 URL 保存到列表响应或数据库。
 
-API 契约保持不变：
+源 HTML 存储可以迁移而不改变浏览器 PDF 契约：
 
 ```text
-GET /api/banking/provider/pre-evaluations/{reportId}/html
-GET /api/banking/provider/pre-evaluations/{reportId}/html?download=true
+GET /api/banking/provider/pre-evaluations/{reportId}/pdf
+GET /api/banking/provider/pre-evaluations/{reportId}/pdf?download=true
 ```
 
-API Server 负责鉴权、读取对象、验证 SHA-256，并设置预览或下载响应头。客户端不需要知道 HTML 位于 PostgreSQL 还是对象存储。
+API Server 负责鉴权、读取源 HTML、验证 SHA-256、调用 Chromium 渲染并校验 PDF。客户端不需要知道源 HTML 位于 PostgreSQL 还是对象存储。
 
 ### 7.5 推荐迁移步骤
 

@@ -653,7 +653,7 @@ internal 路径与现有 banking 路径共用鉴权、请求体限制、证据�
 
 ### POST `/api/banking/provider/benchmark-evidence`
 
-可信基准由受控 Benchmark Runner 先注册，再由预评估请求通过 `benchmarkEvidenceIds` 引用。注册接口使用独立 `GPUF_BENCHMARK_PRODUCER_TOKEN`，并按 `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` 中的 `keyId` 对 `payloadJson` 原始 UTF-8 字节执行 Ed25519 验签。生产必须设置 `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`；每个 key 条目包含 `publicKeyBase64`、`status=active|retired|revoked`、`notBefore` 和 `notAfter`。只有当前有效的 active key 能登记新证据；retired key 只允许其有效窗口内已登记证据继续用于新报告；revoked key 的证据立即禁止进入新报告。Payload 必须绑定 64 位十六进制 `sourceRef`、参数 SHA-256、测试时间和不超过 30 天的有效期；证据表 INSERT-only。
+可信基准由受控 Benchmark Runner 先注册，再由预评估请求通过 `benchmarkEvidenceIds` 引用。注册接口使用独立 `GPUF_BENCHMARK_PRODUCER_TOKEN`，并按 `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` 中的 `keyId` 对 `payloadJson` 原始 UTF-8 字节执行 Ed25519 验签。生产必须设置 `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`；每个 key 条目包含 `publicKeyBase64`、`status=active|retired|revoked`、`purpose=test_only|performance_claim`、`notBefore` 和 `notAfter`。缺少 purpose 时按 `test_only` 失败关闭；只有 `performance_claim` key 签名的证据可进入报告并参与评分，测试 key 仍可验证登记链路。只有当前有效的 active key 能登记新证据；retired key 只允许其有效窗口内已登记证据继续用于新报告；revoked key 的证据立即禁止进入新报告。Payload 必须绑定 64 位十六进制 `sourceRef`、参数 SHA-256、测试时间和不超过 30 天的有效期；证据表 INSERT-only。
 
 `benchmarkEvidenceIds` 非空时严格加载指定且 key 状态可用的证据；为空时服务端按当前技术 `sourceRef` 自动选择每个 metric 最新且未过期、未吊销的一条已验签证据。若同指标最新记录来自 revoked key，会回退到上一条仍可用的记录。`scripts/run_signed_ollama_benchmark.sh` 一次运行会分别登记 `tokens_per_second` 和 `sustained_throughput_percent`，用于满足 T2 的 LLM 类别和 T1/T2 的稳定性类别。自动选择不会跨设备、接受过期证据或执行任意调用方命令。
 
@@ -715,6 +715,13 @@ challenge 过期或重放均返回 HTTP `422`。最大 4 MiB。
 `runtime.serverObservationDays`。只有这个服务端计数达到 7 天才获得长期观测完整度和
 证据分；不足时报告保留 `SERVER_OBSERVATION_WINDOW_SHORT`，并返回后续动作
 `COLLECT_SERVER_RUNTIME_OBSERVATIONS`。
+
+在线 `from-client` 报告使用 `gpuf.online_heartbeat_history.v1` 计算采样质量。每个 UTC
+自然日只统计当天第一条到最后一条已存心跳之间的实际观测窗口，不假定设备全天在线；目标
+间隔读取 `heartbeat_config_daily`，无配置时为 120 秒，实际样本数使用
+`client_daily_stats` 去重采样桶，逐卡观测数使用 `device_daily_stats`，最大间隔由原始
+`heartbeat` 时间戳计算。只有时间戳记录与每日聚合能够关联时才输出采样覆盖率、缺失采样、
+最大采样间隔和缺失 GPU 观测；输入缺失或越界时保持 `null`。
 
 `gpuf.runtime_history.v1` 还把采样覆盖率、最大间隔、缺失样本/逐卡观测以及高温、
 接近功率上限、时钟限制、热/功率限频、硬件减速、驱动恢复动作、不可纠正 ECC 和待处理

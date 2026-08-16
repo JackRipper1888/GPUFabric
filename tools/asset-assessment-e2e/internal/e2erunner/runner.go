@@ -37,20 +37,21 @@ const (
 )
 
 type Config struct {
-	AssessmentURL   string
-	SupportURL      string
-	SupportToken    string
-	GPUFabricURL    string
-	GPUFabricToken  string
-	GPUFabricUser   string
-	GPUFabricClient string
-	TenantRef       string
-	Credentials     map[string]serviceCredential
-	CallbackMode    string
-	CallbackSecret  string
-	LifecycleMode   string
-	FixtureDir      string
-	OutputDir       string
+	AssessmentURL        string
+	SupportURL           string
+	SupportToken         string
+	GPUFabricURL         string
+	GPUFabricToken       string
+	GPUFabricUser        string
+	GPUFabricClient      string
+	ExistingAssessmentID string
+	TenantRef            string
+	Credentials          map[string]serviceCredential
+	CallbackMode         string
+	CallbackSecret       string
+	LifecycleMode        string
+	FixtureDir           string
+	OutputDir            string
 }
 
 func LoadConfig() (Config, error) {
@@ -69,20 +70,37 @@ func LoadConfig() (Config, error) {
 	if lifecycleMode == lifecycleModeSkip && callbackMode != callbackModeExternal {
 		return Config{}, errors.New("skipping report lifecycle gates requires E2E_CALLBACK_MODE=external")
 	}
+	existingAssessmentRaw := os.Getenv("E2E_EXISTING_ASSESSMENT_ID")
+	existingAssessmentID := strings.TrimSpace(existingAssessmentRaw)
+	if existingAssessmentRaw != existingAssessmentID {
+		return Config{}, errors.New("E2E_EXISTING_ASSESSMENT_ID may not contain surrounding whitespace")
+	}
+	if existingAssessmentID != "" {
+		if err := validateExistingAssessmentID(existingAssessmentID); err != nil {
+			return Config{}, err
+		}
+		if callbackMode != callbackModeExternal || lifecycleMode != lifecycleModeSkip {
+			return Config{}, errors.New("an existing assessment requires E2E_CALLBACK_MODE=external and E2E_REPORT_LIFECYCLE_MODE=skip")
+		}
+		if strings.TrimSpace(os.Getenv("E2E_TENANT_REF")) == "" {
+			return Config{}, errors.New("an existing assessment requires an explicit E2E_TENANT_REF")
+		}
+	}
 
 	config := Config{
-		AssessmentURL:   envDefault("E2E_ASSESSMENT_URL", "http://127.0.0.1:28092"),
-		SupportURL:      envDefault("E2E_SUPPORT_URL", "http://127.0.0.1:28180"),
-		GPUFabricURL:    envDefault("E2E_GPUFABRIC_URL", "http://127.0.0.1:18181"),
-		GPUFabricToken:  firstEnvironment("GPUF_TEST_BANKING_API_TOKEN", "ASSESSMENT_GPUFABRIC_TOKEN"),
-		GPUFabricUser:   envDefault("E2E_GPUFABRIC_USER_REF", "1"),
-		GPUFabricClient: envDefault("E2E_GPUFABRIC_CLIENT_REF", "bcbe19cbf6063d72f8253d22abad8bb6"),
-		TenantRef:       envDefault("E2E_TENANT_REF", defaultTenantRef),
-		CallbackMode:    callbackMode,
-		CallbackSecret:  firstEnvironment("ASSESSMENT_E2E_CALLBACK_SECRET", "ASSESSMENT_CALLBACK_SIGNING_SECRET"),
-		LifecycleMode:   lifecycleMode,
-		FixtureDir:      envDefault("E2E_MARKET_FIXTURE_DIR", "deploy/fixtures/market"),
-		OutputDir:       envDefault("E2E_OUTPUT_DIR", "/tmp/gpuf-asset-assessment-e2e-results"),
+		AssessmentURL:        envDefault("E2E_ASSESSMENT_URL", "http://127.0.0.1:28092"),
+		SupportURL:           envDefault("E2E_SUPPORT_URL", "http://127.0.0.1:28180"),
+		GPUFabricURL:         envDefault("E2E_GPUFABRIC_URL", "http://127.0.0.1:18181"),
+		GPUFabricToken:       firstEnvironment("GPUF_TEST_BANKING_API_TOKEN", "ASSESSMENT_GPUFABRIC_TOKEN"),
+		GPUFabricUser:        envDefault("E2E_GPUFABRIC_USER_REF", "1"),
+		GPUFabricClient:      envDefault("E2E_GPUFABRIC_CLIENT_REF", "bcbe19cbf6063d72f8253d22abad8bb6"),
+		ExistingAssessmentID: existingAssessmentID,
+		TenantRef:            envDefault("E2E_TENANT_REF", defaultTenantRef),
+		CallbackMode:         callbackMode,
+		CallbackSecret:       firstEnvironment("ASSESSMENT_E2E_CALLBACK_SECRET", "ASSESSMENT_CALLBACK_SIGNING_SECRET"),
+		LifecycleMode:        lifecycleMode,
+		FixtureDir:           envDefault("E2E_MARKET_FIXTURE_DIR", "deploy/fixtures/market"),
+		OutputDir:            envDefault("E2E_OUTPUT_DIR", "/tmp/gpuf-asset-assessment-e2e-results"),
 	}
 	if len(config.GPUFabricToken) < 32 || len(config.GPUFabricToken) > 4096 {
 		return Config{}, errors.New("GPUF_TEST_BANKING_API_TOKEN or ASSESSMENT_GPUFABRIC_TOKEN must contain 32 to 4096 bytes")
@@ -110,6 +128,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("ASSESSMENT_E2E_CALLBACK_SECRET must contain 32 to 4096 bytes")
 	}
 	credentialJSON := firstEnvironment("E2E_ASSESSMENT_CREDENTIALS_JSON", "ASSESSMENT_SERVICE_CREDENTIALS_JSON")
+	if config.ExistingAssessmentID != "" && credentialJSON == "" {
+		return Config{}, errors.New("an existing assessment requires explicit shared assessment credentials")
+	}
 	if credentialJSON == "" && !allLocal {
 		return Config{}, errors.New("shared E2E requires E2E_ASSESSMENT_CREDENTIALS_JSON or ASSESSMENT_SERVICE_CREDENTIALS_JSON")
 	}
@@ -258,7 +279,64 @@ func Run(ctx context.Context, config Config) (string, error) {
 		startedAt: time.Now().UTC(),
 		client:    &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{Proxy: nil}},
 	}
+	if config.ExistingAssessmentID != "" {
+		return r.runExisting(ctx)
+	}
 	return r.run(ctx)
+}
+
+func (r *runner) runExisting(ctx context.Context) (string, error) {
+	log.Printf("[%s] loading existing shared-test assessment %s", r.runID, r.config.ExistingAssessmentID)
+	assessment, err := r.getAssessment(ctx, r.config.ExistingAssessmentID)
+	if err != nil {
+		return "", err
+	}
+	if assessment.Status != "evidence_pending" || assessment.RequestedTier != "T2" ||
+		assessment.TechnicalStatus != "verified" || assessment.BenchmarkStatus != "satisfied" {
+		return "", fmt.Errorf("existing assessment is not at the verified T2 evidence gate: status=%s tier=%s technical=%s benchmark=%s",
+			assessment.Status, assessment.RequestedTier, assessment.TechnicalStatus, assessment.BenchmarkStatus)
+	}
+	technical, err := r.loadExistingTechnicalInput(ctx, assessment)
+	if err != nil {
+		return "", err
+	}
+	if err := r.expectServiceError(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+assessment.AssessmentID, nil,
+		r.config.Credentials["client"], "tenant-other", r.id("existing-tenant-denial"), http.StatusNotFound, "ASSESSMENT_NOT_FOUND"); err != nil {
+		return "", err
+	}
+	log.Printf("[%s] uploading, scanning, OCRing and reviewing existing assessment evidence", r.runID)
+	for _, evidenceType := range []string{"ownership.invoice", "asset.lifecycle", "ownership.contract"} {
+		if err := r.processEvidence(ctx, assessment.AssessmentID, evidenceType); err != nil {
+			return "", err
+		}
+	}
+	assessment, err = r.getAssessment(ctx, assessment.AssessmentID)
+	if err != nil || assessment.Status != "ready_for_valuation" {
+		return "", fmt.Errorf("existing assessment evidence gate did not reach ready_for_valuation: %s: %w", assessment.Status, err)
+	}
+	log.Printf("[%s] creating configuration-bound test market snapshot and independently approved policy", r.runID)
+	market, err := r.createMarketSnapshot(ctx, assessment.AssetConfiguration)
+	if err != nil {
+		return "", err
+	}
+	policy, err := r.createPricingPolicy(ctx, assessment.AssetConfiguration)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[%s] executing valuation and two-person formal review", r.runID)
+	valuation, err := r.executeValuation(ctx, assessment.AssessmentID, technical.SnapshotID, market.SnapshotID, policy.Version)
+	if err != nil {
+		return "", err
+	}
+	if err := r.completeFormalReview(ctx, assessment.AssessmentID, valuation.ValuationID); err != nil {
+		return "", err
+	}
+	log.Printf("[%s] freezing, rendering, test-HSM-signing, storing and downloading PDF", r.runID)
+	report, pdf, err := r.issueAndDownload(ctx, assessment.AssessmentID)
+	if err != nil {
+		return "", err
+	}
+	return r.archive(report, pdf, technical, market, valuation)
 }
 
 func (r *runner) run(ctx context.Context) (string, error) {
@@ -402,9 +480,51 @@ type assetConfiguration struct {
 }
 
 type assessmentView struct {
-	AssessmentID       string `json:"assessmentId"`
-	Status             string `json:"status"`
-	AssetConfiguration assetConfiguration
+	AssessmentID        string `json:"assessmentId"`
+	Status              string `json:"status"`
+	RequestedTier       string
+	TechnicalReportID   string
+	TechnicalSnapshotID string
+	TechnicalStatus     string
+	BenchmarkStatus     string
+	BenchmarkMetrics    []string
+	AssetConfiguration  assetConfiguration
+}
+
+type assessmentAPIResponse struct {
+	AssessmentID          string `json:"assessmentId"`
+	Status                string `json:"status"`
+	RequestedTier         string `json:"requestedTier"`
+	TechnicalVerification struct {
+		Status             string             `json:"status"`
+		ReportID           string             `json:"reportId"`
+		SnapshotID         string             `json:"snapshotId"`
+		AssetConfiguration assetConfiguration `json:"assetConfiguration"`
+		BenchmarkPolicy    struct {
+			Status   string `json:"status"`
+			Evidence []struct {
+				Metric string `json:"metric"`
+			} `json:"evidence"`
+		} `json:"benchmarkPolicy"`
+	} `json:"technicalVerification"`
+}
+
+func viewAssessment(response assessmentAPIResponse) assessmentView {
+	metrics := make([]string, 0, len(response.TechnicalVerification.BenchmarkPolicy.Evidence))
+	for _, evidence := range response.TechnicalVerification.BenchmarkPolicy.Evidence {
+		metrics = append(metrics, evidence.Metric)
+	}
+	return assessmentView{
+		AssessmentID:        response.AssessmentID,
+		Status:              response.Status,
+		RequestedTier:       response.RequestedTier,
+		TechnicalReportID:   response.TechnicalVerification.ReportID,
+		TechnicalSnapshotID: response.TechnicalVerification.SnapshotID,
+		TechnicalStatus:     response.TechnicalVerification.Status,
+		BenchmarkStatus:     response.TechnicalVerification.BenchmarkPolicy.Status,
+		BenchmarkMetrics:    metrics,
+		AssetConfiguration:  response.TechnicalVerification.AssetConfiguration,
+	}
 }
 
 func (r *runner) createAssessment(ctx context.Context, input technicalInput) (assessmentView, error) {
@@ -421,36 +541,62 @@ func (r *runner) createAssessment(ctx context.Context, input technicalInput) (as
 		},
 		"callback": map[string]string{"urlRef": ""},
 	}
-	var response struct {
-		AssessmentID          string `json:"assessmentId"`
-		Status                string `json:"status"`
-		TechnicalVerification struct {
-			Status             string             `json:"status"`
-			AssetConfiguration assetConfiguration `json:"assetConfiguration"`
-			BenchmarkPolicy    struct {
-				Status string `json:"status"`
-			} `json:"benchmarkPolicy"`
-		} `json:"technicalVerification"`
-	}
+	var response assessmentAPIResponse
 	if err := r.callService(ctx, http.MethodPost, "/internal/v1/asset-assessments", body, r.config.Credentials["client"], r.config.TenantRef, r.id("assessment"), http.StatusAccepted, &response); err != nil {
 		return assessmentView{}, err
 	}
 	if response.Status != "evidence_pending" || response.TechnicalVerification.Status != "verified" || response.TechnicalVerification.BenchmarkPolicy.Status != "satisfied" {
 		return assessmentView{}, errors.New("T2 technical verification gate was not satisfied")
 	}
-	return assessmentView{AssessmentID: response.AssessmentID, Status: response.Status, AssetConfiguration: response.TechnicalVerification.AssetConfiguration}, nil
+	return viewAssessment(response), nil
 }
 
 func (r *runner) getAssessment(ctx context.Context, assessmentID string) (assessmentView, error) {
-	var response struct {
-		AssessmentID          string `json:"assessmentId"`
-		Status                string `json:"status"`
-		TechnicalVerification struct {
-			AssetConfiguration assetConfiguration `json:"assetConfiguration"`
-		} `json:"technicalVerification"`
-	}
+	var response assessmentAPIResponse
 	err := r.callService(ctx, http.MethodGet, "/internal/v1/asset-assessments/"+url.PathEscape(assessmentID), nil, r.config.Credentials["client"], r.config.TenantRef, r.id("get-assessment"), http.StatusOK, &response)
-	return assessmentView{AssessmentID: response.AssessmentID, Status: response.Status, AssetConfiguration: response.TechnicalVerification.AssetConfiguration}, err
+	return viewAssessment(response), err
+}
+
+func (r *runner) loadExistingTechnicalInput(ctx context.Context, assessment assessmentView) (technicalInput, error) {
+	if assessment.TechnicalReportID == "" || assessment.TechnicalSnapshotID == "" ||
+		assessment.AssetConfiguration.ConfigurationHash == "" {
+		return technicalInput{}, errors.New("existing assessment technical references are incomplete")
+	}
+	if !contains(assessment.BenchmarkMetrics, "tokens_per_second") ||
+		!(contains(assessment.BenchmarkMetrics, "stability_pass_rate") || contains(assessment.BenchmarkMetrics, "sustained_throughput_percent")) {
+		return technicalInput{}, errors.New("existing assessment T2 benchmark categories are incomplete")
+	}
+	headers := map[string]string{"Authorization": "Bearer " + r.config.GPUFabricToken}
+	var report struct {
+		ReportID, SchemaVersion, ReportSHA256, ReportHTMLSHA256, HashProfile, HTMLHashProfile, ReportJSON string
+	}
+	if err := r.callEnvelope(ctx, http.MethodGet,
+		r.config.GPUFabricURL+"/internal/v1/technical-pre-evaluations/"+url.PathEscape(assessment.TechnicalReportID),
+		nil, headers, http.StatusOK, &report); err != nil {
+		return technicalInput{}, err
+	}
+	if report.ReportID != assessment.TechnicalReportID || report.HashProfile != "gpuf.report-json-bytes.v1" ||
+		report.HTMLHashProfile != "gpuf.report-html-bytes.v1" || sha256Hex([]byte(report.ReportJSON)) != report.ReportSHA256 {
+		return technicalInput{}, errors.New("existing GPUFabric technical report integrity failed")
+	}
+	var snapshot struct {
+		SnapshotID, SchemaVersion, SnapshotSHA256, HashProfile, SnapshotJSON string
+	}
+	if err := r.callEnvelope(ctx, http.MethodGet,
+		r.config.GPUFabricURL+"/internal/v2/technical-snapshots/"+url.PathEscape(assessment.TechnicalSnapshotID),
+		nil, headers, http.StatusOK, &snapshot); err != nil {
+		return technicalInput{}, err
+	}
+	if snapshot.SnapshotID != assessment.TechnicalSnapshotID || snapshot.HashProfile != "gpuf.snapshot-json-bytes.v2" ||
+		sha256Hex([]byte(snapshot.SnapshotJSON)) != snapshot.SnapshotSHA256 {
+		return technicalInput{}, errors.New("existing GPUFabric technical snapshot integrity failed")
+	}
+	return technicalInput{
+		ReportID: report.ReportID, ReportSHA256: report.ReportSHA256,
+		ReportHTMLSHA256: report.ReportHTMLSHA256, SchemaVersion: report.SchemaVersion,
+		SnapshotID: snapshot.SnapshotID, SnapshotSHA256: snapshot.SnapshotSHA256,
+		SnapshotSchemaVersion: snapshot.SchemaVersion, BenchmarkMetrics: assessment.BenchmarkMetrics,
+	}, nil
 }
 
 type uploadGrant struct {
@@ -1308,6 +1454,20 @@ func envDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func validateExistingAssessmentID(value string) error {
+	if len(value) < len("ASMT-")+1 || len(value) > 128 || !strings.HasPrefix(value, "ASMT-") {
+		return errors.New("E2E_EXISTING_ASSESSMENT_ID must be a bounded ASMT- identifier")
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return errors.New("E2E_EXISTING_ASSESSMENT_ID contains unsupported characters")
+	}
+	return nil
 }
 
 func firstEnvironment(names ...string) string {

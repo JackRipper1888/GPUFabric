@@ -1,0 +1,72 @@
+flowchart LR
+    classDef actor fill:#ffffff,stroke:#374151,color:#111827,stroke-width:1.5px
+    classDef entry fill:#e8f1fb,stroke:#2563eb,color:#172554,stroke-width:1.5px
+    classDef core fill:#eaf7ee,stroke:#15803d,color:#14532d,stroke-width:1.5px
+    classDef data fill:#f3f4f6,stroke:#4b5563,color:#111827,stroke-width:1.5px
+    classDef trust fill:#fff7e6,stroke:#d97706,color:#7c2d12,stroke-width:1.5px,stroke-dasharray: 6 4
+    classDef external fill:#fdf2f8,stroke:#be185d,color:#831843,stroke-width:1.5px
+
+    subgraph UX[调用方]
+        Browser[Provider 前端 / API Client]:::actor
+        Collector[hw-asset-collector<br/>现场采集与 Benchmark]:::actor
+        Operators[市场核验员 / 双人审核员]:::actor
+    end
+
+    subgraph ENTRY[new-api 接入层 - 保持现有镜像]
+        API1[new-api API 1]:::entry
+        API2[new-api API 2]:::entry
+        Worker[new-api Worker<br/>回调验签与状态投影]:::entry
+        NewDB[(PostgreSQL<br/>banking_* 表)]:::data
+    end
+
+    subgraph TECH[技术证据域]
+        GPUF[GPUFabric API<br/>预评估 / 不可变技术快照<br/>T1/T2 Benchmark 校验]:::core
+    end
+
+    subgraph ASSESS[评估编排域]
+        Assessment[asset-assessment-service<br/>证据门禁 / 市场快照 / 估值<br/>正式审核 / 报告生命周期]:::core
+        AssessDB[(PostgreSQL<br/>assessment / evidence / market<br/>valuation / review / report)]:::data
+    end
+
+    subgraph STORAGE[私有对象存储]
+        MinIO[(MinIO S3-compatible<br/>TLS + SSE-S3 + Versioning<br/>evidence 与 report PDF)]:::data
+    end
+
+    subgraph SUPPORT[仅测试环境 - 非生产信任]
+        TLSProxy[NGINX TLS 代理]:::trust
+        Support[E2E Support<br/>Chromium PDF / OCR<br/>SoftHSM2 测试签名]:::trust
+        ClamAV[ClamAV<br/>恶意文件扫描]:::trust
+        TestRoot[(测试 CA / 信任根)]:::trust
+    end
+
+    subgraph MARKET[外部数据源]
+        Feeds[BrokerBin / eBay / 人工样本<br/>正式环境替换为授权成交数据]:::external
+    end
+
+    Browser -->|1. 资产、预评估、正式评估 API| API1
+    Browser -->|负载均衡| API2
+    API1 <-->|OwnerScope / 状态 / reportId| NewDB
+    API2 <-->|OwnerScope / 状态 / reportId| NewDB
+    Worker <-->|幂等事件与投影| NewDB
+    API1 -->|2. 预评估请求| GPUF
+    API2 -->|2. 预评估请求| GPUF
+    Collector -->|challenge-bound 采集与签名 Benchmark| GPUF
+    API1 -->|3. 正式评估与材料授权| Assessment
+    API2 -->|3. 正式评估与材料授权| Assessment
+    Assessment -->|4. 回读技术报告并复算 Hash| GPUF
+    Assessment <-->|状态机与不可变审计| AssessDB
+    Assessment -->|短时 PUT/GET 授权<br/>服务端流式 SHA-256 核验| MinIO
+    Browser -->|5. 证据直传 / PDF 下载| MinIO
+    Feeds -->|6. 自动与人工市场样本| Assessment
+    Operators -->|7. 市场核验与双人正式审核| Assessment
+    Assessment -->|8. HTTPS: 渲染与签名| TLSProxy
+    TLSProxy --> Support
+    Support --> ClamAV
+    Support -->|PDF + 证书链 + detached signature| TLSProxy
+    TestRoot -->|仅测试环境信任| Assessment
+    Assessment -->|9. 私有保存签发 PDF| MinIO
+    Assessment -->|10. HMAC 签名状态回调| Worker
+    API1 -->|11. 最长 120 秒下载授权| Assessment
+    API2 -->|11. 最长 120 秒下载授权| Assessment
+
+    style SUPPORT fill:#fffaf0,stroke:#d97706,stroke-width:2px,stroke-dasharray: 8 5

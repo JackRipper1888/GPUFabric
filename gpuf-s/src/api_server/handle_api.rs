@@ -81,6 +81,10 @@ impl ApiServer {
                 get(pre_evaluation::get_report_html),
             )
             .route(
+                "/api/banking/provider/pre-evaluations/:report_id/pdf",
+                get(pre_evaluation::get_report_pdf),
+            )
+            .route(
                 "/api/banking/provider/pre-evaluations/:report_id/evidence",
                 delete(pre_evaluation::purge_report_evidence),
             )
@@ -142,6 +146,10 @@ impl ApiServer {
             .route("/api/models/get", get(models::get_models))
             // Points Management APIs
             .route("/api/user/points", get(points::get_user_points))
+            .route(
+                "/api/user/points/summary",
+                get(points::get_user_points_summary),
+            )
             // APK Management APIs
             .route("/api/apk/upsert", post(apk::upsert_apk))
             .route("/api/apk/get", get(apk::get_apk))
@@ -221,5 +229,17 @@ mod tests {
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::SERVICE_UNAVAILABLE
         ));
+    }
+
+    #[tokio::test]
+    async fn points_summary_route_is_registered() {
+        let mut router = test_server().create_api_router().await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/user/points/summary?user_id=1&client_id=invalid")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.call(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

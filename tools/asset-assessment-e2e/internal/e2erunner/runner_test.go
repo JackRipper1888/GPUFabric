@@ -61,6 +61,47 @@ func TestLoadConfigSharedEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadConfigExistingAssessmentSharedMode(t *testing.T) {
+	setSharedRunnerEnvironment(t)
+	t.Setenv("E2E_EXISTING_ASSESSMENT_ID", "ASMT-20260814-36289115ce03fc64")
+
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ExistingAssessmentID != "ASMT-20260814-36289115ce03fc64" {
+		t.Fatalf("existing assessment = %q", config.ExistingAssessmentID)
+	}
+}
+
+func TestLoadConfigExistingAssessmentFailsClosed(t *testing.T) {
+	for _, invalid := range []string{"assessment-1", "ASMT-../../etc", " ASMT-1", "ASMT-1 ", "ASMT-" + strings.Repeat("x", 124)} {
+		t.Run(invalid, func(t *testing.T) {
+			setSharedRunnerEnvironment(t)
+			t.Setenv("E2E_EXISTING_ASSESSMENT_ID", invalid)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("invalid existing assessment %q was accepted", invalid)
+			}
+		})
+	}
+	t.Run("full lifecycle", func(t *testing.T) {
+		setSharedRunnerEnvironment(t)
+		t.Setenv("E2E_REPORT_LIFECYCLE_MODE", lifecycleModeFull)
+		t.Setenv("E2E_EXISTING_ASSESSMENT_ID", "ASMT-existing-1")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("existing assessment with full lifecycle was accepted")
+		}
+	})
+	t.Run("implicit tenant", func(t *testing.T) {
+		setSharedRunnerEnvironment(t)
+		t.Setenv("E2E_TENANT_REF", "")
+		t.Setenv("E2E_EXISTING_ASSESSMENT_ID", "ASMT-existing-1")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("existing assessment without an explicit tenant was accepted")
+		}
+	})
+}
+
 func TestLoadRunnerCredentialsRejectsInvalidConfiguration(t *testing.T) {
 	clearRunnerEnvironment(t)
 	if _, err := loadRunnerCredentials(`{"new-api":{"token":"client-token"}}`, lifecycleModeSkip); err == nil {
@@ -147,6 +188,21 @@ func sharedCredentialJSON(t *testing.T) string {
 	return string(raw)
 }
 
+func setSharedRunnerEnvironment(t *testing.T) {
+	t.Helper()
+	clearRunnerEnvironment(t)
+	t.Setenv("ASSESSMENT_GPUFABRIC_TOKEN", strings.Repeat("g", 32))
+	t.Setenv("E2E_ASSESSMENT_URL", "http://asset-assessment-service:8092")
+	t.Setenv("E2E_SUPPORT_URL", "https://assessment-report-support")
+	t.Setenv("E2E_GPUFABRIC_URL", "http://gpuf-api-server:18081")
+	t.Setenv("E2E_ALLOW_CONTAINER_HTTP", "true")
+	t.Setenv("E2E_SUPPORT_TOKEN", strings.Repeat("s", 32))
+	t.Setenv("E2E_CALLBACK_MODE", callbackModeExternal)
+	t.Setenv("E2E_REPORT_LIFECYCLE_MODE", lifecycleModeSkip)
+	t.Setenv("E2E_TENANT_REF", "tenant-shared-test")
+	t.Setenv("E2E_ASSESSMENT_CREDENTIALS_JSON", sharedCredentialJSON(t))
+}
+
 func clearRunnerEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -155,6 +211,7 @@ func clearRunnerEnvironment(t *testing.T) {
 		"E2E_SUPPORT_TOKEN", "ASSESSMENT_PDF_RENDERER_TOKEN",
 		"E2E_CALLBACK_MODE", "ASSESSMENT_E2E_CALLBACK_SECRET", "ASSESSMENT_CALLBACK_SIGNING_SECRET",
 		"E2E_REPORT_LIFECYCLE_MODE", "E2E_TENANT_REF",
+		"E2E_EXISTING_ASSESSMENT_ID",
 		"E2E_ASSESSMENT_CREDENTIALS_JSON", "ASSESSMENT_SERVICE_CREDENTIALS_JSON",
 		"E2E_ASSESSMENT_SERVICE_TOKEN", "ASSESSMENT_SERVICE_TOKEN",
 		"E2E_ASSESSMENT_LEGACY_SERVICE_SUBJECT", "ASSESSMENT_LEGACY_SERVICE_SUBJECT",

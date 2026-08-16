@@ -245,7 +245,7 @@ async fn attach_pre_evaluation_reports(
         let source_id = pre_evaluation::online_source_id(&device.client_id);
         if let Some(report) = reports_by_source.get(&source_id) {
             let report_url = format!(
-                "/api/banking/provider/pre-evaluations/{}/html",
+                "/api/banking/provider/pre-evaluations/{}/pdf",
                 report.report_id
             );
             device.has_pre_evaluation_report = true;

@@ -3,6 +3,7 @@ pub mod banking_admin;
 pub mod benchmark_evidence;
 pub mod client;
 pub mod compute_map;
+pub mod gpu_health;
 pub mod gpu_model_specs;
 pub mod models;
 pub mod pre_evaluation;

@@ -86,6 +86,10 @@ static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 
 // Export modules
 #[cfg(not(target_os = "ios"))]
+#[cfg(not(target_os = "android"))]
+pub mod benchmark;
+#[cfg(all(not(target_os = "ios"), not(target_os = "android")))]
+pub mod gpu_health;
 pub mod handle;
 #[cfg(not(target_os = "ios"))]
 pub mod llm_engine;

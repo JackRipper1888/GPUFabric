@@ -35,6 +35,8 @@ pub struct StoredBenchmarkEvidence {
     pub parameters_sha256: String,
     pub key_id: String,
     pub payload_sha256: String,
+    pub payload_json: String,
+    pub signature_base64: String,
 }
 
 pub enum RegistrationResult {
@@ -97,7 +99,7 @@ pub async fn get(pool: &PgPool, evidence_id: &str) -> Result<Option<StoredBenchm
         r#"
         SELECT evidence_id, source_ref, suite, suite_version, task, metric,
                value, unit, tested_at, expires_at, parameters_sha256,
-               key_id, payload_sha256
+               key_id, payload_sha256, payload_json, signature_base64
         FROM benchmark_evidence
         WHERE evidence_id = $1
         "#,
@@ -124,7 +126,7 @@ where
         r#"
         SELECT evidence_id, source_ref, suite, suite_version, task, metric,
                value, unit, tested_at, expires_at, parameters_sha256,
-               key_id, payload_sha256
+               key_id, payload_sha256, payload_json, signature_base64
         FROM benchmark_evidence
         WHERE source_ref = $1 AND expires_at > $2 AND key_id = ANY($3)
         ORDER BY tested_at DESC, evidence_id DESC
@@ -134,6 +136,33 @@ where
     .bind(source_ref)
     .bind(now)
     .bind(allowed_key_ids)
+    .bind(limit)
+    .fetch_all(executor)
+    .await?)
+}
+
+pub async fn list_valid_for_source_all<'e, E>(
+    executor: E,
+    source_ref: &str,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<StoredBenchmarkEvidence>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    Ok(sqlx::query_as::<_, StoredBenchmarkEvidence>(
+        r#"
+        SELECT evidence_id, source_ref, suite, suite_version, task, metric,
+               value, unit, tested_at, expires_at, parameters_sha256,
+               key_id, payload_sha256, payload_json, signature_base64
+        FROM benchmark_evidence
+        WHERE source_ref = $1 AND expires_at > $2
+        ORDER BY tested_at DESC, evidence_id DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(source_ref)
+    .bind(now)
     .bind(limit)
     .fetch_all(executor)
     .await?)
@@ -162,6 +191,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use sqlx::postgres::PgPoolOptions;
 
     #[tokio::test]
@@ -188,7 +218,9 @@ mod tests {
                 expires_at TIMESTAMPTZ NOT NULL,
                 parameters_sha256 VARCHAR(64) NOT NULL,
                 key_id VARCHAR(64) NOT NULL,
-                payload_sha256 VARCHAR(64) NOT NULL
+                payload_sha256 VARCHAR(64) NOT NULL,
+                payload_json TEXT NOT NULL,
+                signature_base64 TEXT NOT NULL
             )",
         )
         .execute(&mut *transaction)
@@ -228,12 +260,12 @@ mod tests {
             ),
         ] {
             sqlx::query(
-                "INSERT INTO benchmark_evidence (
+                r#"INSERT INTO benchmark_evidence (
                     evidence_id, source_ref, suite, suite_version, task, metric,
                     value, unit, tested_at, expires_at, parameters_sha256,
-                    key_id, payload_sha256
+                    key_id, payload_sha256, payload_json, signature_base64
                 ) VALUES ($1, $2, 'suite', '1', 'task', $3, 1, 'unit',
-                          $4, $5, $6, $7, $8)",
+                          $4, $5, $6, $7, $8, '{}', '')"#,
             )
             .bind(evidence_id)
             .bind(&source_ref)
@@ -256,6 +288,10 @@ mod tests {
                 .await
                 .unwrap()
         );
+        let all = list_valid_for_source_all(&mut *transaction, &source_ref, now, 32)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
         let allowed = vec!["runner-active".to_string(), "runner-retired".to_string()];
         let evidence = list_valid_for_source(&mut *transaction, &source_ref, now, &allowed, 32)
             .await
@@ -273,5 +309,27 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GPUF_TEST_DATABASE_URL"]
+    async fn postgres_timestamptz_round_trip_uses_microsecond_precision() {
+        let database_url = std::env::var("GPUF_TEST_DATABASE_URL").expect("GPUF_TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let timestamp = DateTime::parse_from_rfc3339("2026-08-11T09:05:53.731468030Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stored: DateTime<Utc> = sqlx::query_scalar("SELECT $1::TIMESTAMPTZ")
+            .bind(timestamp)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(stored.nanosecond(), 731_468_000);
+        assert_ne!(stored, timestamp);
     }
 }

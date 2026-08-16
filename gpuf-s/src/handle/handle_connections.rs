@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::db::{
-    client,
+    client, gpu_health,
     models::{self, HotModelClass},
     token_usage::{insert_token_usage, TokenUsageInsert},
 };
@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use common::{
     format_bytes, os_type_str, CommandV2, DataPlaneSecret, DownloadStatus, Model, OsType,
-    P2PUsageTransport, PodModel, RedactedString,
+    P2PUsageTransport, PodModel, RedactedString, COMMAND_V1_GPU_HEALTH_VERSION,
+    SERVER_CAPABILITY_GPU_HEALTH,
 };
 use redis::AsyncCommands;
 use redis::Client as RedisClient;
@@ -171,6 +172,8 @@ async fn handle_single_client(
                 device_total_tflops,
                 devices_info,
             })) => {
+                let gpu_health_platform = matches!(&os_type, OsType::LINUX | OsType::WINDOWS);
+                let gpu_health_device_count = declared_gpu_device_count(&devices_info);
                 info!(
                     "Registration attempt for client {}",
                     ClientId(id).log_label()
@@ -222,6 +225,19 @@ async fn handle_single_client(
                 session_client_id = ClientId(id);
 
                 write_command(&mut *writer.lock().await, &Command::V1(validate_result)).await?;
+                if authed
+                    && version >= COMMAND_V1_GPU_HEALTH_VERSION
+                    && gpu_health_platform
+                    && gpu_health_device_count.is_some()
+                {
+                    write_command(
+                        &mut *writer.lock().await,
+                        &Command::V2(CommandV2::ServerCapabilities {
+                            capabilities: SERVER_CAPABILITY_GPU_HEALTH,
+                        }),
+                    )
+                    .await?;
+                }
             }
             // Device system status from client to server 120s
             Ok(Command::V1(CommandV1::Heartbeat {
@@ -258,6 +274,7 @@ async fn handle_single_client(
                 models,
                 auto_models_device,
             })) => {
+                let benchmark_models = models.clone();
                 info!(
                     "Model status received from client {} pod num {}",
                     ClientId(id).log_label(),
@@ -288,6 +305,38 @@ async fn handle_single_client(
                     }
                 };
                 write_command(&mut *writer.lock().await, &Command::V1(pods_model)).await?;
+                match server_state
+                    .online_benchmark
+                    .prepare_task(
+                        ClientId(id),
+                        connection_id,
+                        &benchmark_models,
+                        &active_clients,
+                    )
+                    .await
+                {
+                    Ok(Some(task)) => {
+                        let task_id = task.task_id.clone();
+                        if let Err(error) = write_command(
+                            &mut *writer.lock().await,
+                            &Command::V1(CommandV1::BenchmarkTask { task }),
+                        )
+                        .await
+                        {
+                            server_state
+                                .online_benchmark
+                                .cancel_task(ClientId(id), &task_id)
+                                .await;
+                            return Err(error);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => warn!(
+                        "Optional benchmark task was not issued for client {}: {}",
+                        ClientId(id).log_label(),
+                        error
+                    ),
+                }
             }
             Err(e) => {
                 info!("addr {} disconnected: {}", addr, e);
@@ -412,6 +461,38 @@ async fn handle_single_client(
                     )
                     .await;
             }
+            Ok(Command::V1(CommandV1::BenchmarkResult { result })) => {
+                if !authed {
+                    warn!("Ignoring optional benchmark result from unauthenticated connection");
+                    continue;
+                }
+                match server_state
+                    .online_benchmark
+                    .accept_result(session_client_id, connection_id, result)
+                    .await
+                {
+                    Ok(Some(accepted)) => {
+                        if let Err(error) = server_state
+                            .online_benchmark
+                            .persist_result(&db_pool, accepted)
+                            .await
+                        {
+                            warn!(
+                                "Failed to persist optional benchmark evidence for client {}: {}",
+                                session_client_id.log_label(),
+                                error
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => warn!(
+                        "Rejected optional benchmark result from client {}: {}",
+                        session_client_id.log_label(),
+                        error
+                    ),
+                }
+            }
+
             Ok(Command::V1(CommandV1::EmbeddingResult {
                 task_id,
                 success,
@@ -480,6 +561,45 @@ async fn handle_single_client(
                     error.as_deref(),
                 )
                 .await;
+            }
+
+            Ok(Command::V2(CommandV2::GpuHealthSnapshot { snapshot })) => {
+                if !authed {
+                    warn!("Ignoring GPU health snapshot before device login");
+                    continue;
+                }
+                let expected_device_count = {
+                    let clients = active_clients.lock().await;
+                    clients
+                        .get(&session_client_id)
+                        .filter(|client| client.connection_id == connection_id)
+                        .filter(|client| client.version >= COMMAND_V1_GPU_HEALTH_VERSION)
+                        .filter(|client| matches!(&client.os_type, OsType::LINUX | OsType::WINDOWS))
+                        .and_then(|client| declared_gpu_device_count(&client.devices_info))
+                };
+                let Some(expected_device_count) = expected_device_count else {
+                    warn!("Ignoring GPU health snapshot without a protocol-v4 capability grant");
+                    continue;
+                };
+                if snapshot.client_id != session_client_id.0 {
+                    warn!("Ignoring GPU health snapshot with mismatched client id");
+                    continue;
+                }
+                if let Err(error) = gpu_health::upsert_snapshot(
+                    &db_pool,
+                    &session_client_id,
+                    &snapshot,
+                    expected_device_count,
+                    Utc::now(),
+                )
+                .await
+                {
+                    warn!(
+                        "Ignoring invalid or unpersistable GPU health snapshot from {}: {}",
+                        session_client_id.log_label(),
+                        error
+                    );
+                }
             }
 
             Ok(Command::V2(CommandV2::P2PConsumerLogin {
@@ -1187,6 +1307,15 @@ async fn handle_p2p_usage_receipt(
     insert_finalized_p2p_usage(db_pool, server_state, connection_id, usage).await
 }
 
+fn declared_gpu_device_count(devices_info: &[common::DevicesInfo]) -> Option<usize> {
+    devices_info
+        .iter()
+        .try_fold(0_usize, |total, device| {
+            total.checked_add(usize::from(device.num))
+        })
+        .filter(|count| (1..=256).contains(count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1357,20 @@ mod tests {
     fn p2p_usage_requires_matching_receipt() {
         let (report, receipt) = usage_pair();
         assert!(p2p_usage_matches(&report, &receipt).is_ok());
+    }
+
+    #[test]
+    fn gpu_health_device_count_uses_login_inventory_totals() {
+        let mut first = common::DevicesInfo::default();
+        first.num = 3;
+        let mut second = common::DevicesInfo::default();
+        second.num = 2;
+        assert_eq!(declared_gpu_device_count(&[first, second]), Some(5));
+
+        let mut too_many = common::DevicesInfo::default();
+        too_many.num = 257;
+        assert_eq!(declared_gpu_device_count(&[too_many]), None);
+        assert_eq!(declared_gpu_device_count(&[]), None);
     }
 
     #[test]

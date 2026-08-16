@@ -128,6 +128,30 @@ CGO_ENABLED=0 go build -trimpath -o asset-assessment-e2e-runner ./cmd/runner
 Do not pass tokens on the command line or write them into runner logs. Inject
 them through a restricted environment file or the platform secret manager.
 
+### Continue an assessment created by new-api
+
+The shared runner can complete an assessment that new-api already created,
+without creating a duplicate technical report or assessment:
+
+```bash
+E2E_EXISTING_ASSESSMENT_ID=ASMT-2026-... \
+E2E_TENANT_REF=tenant:hmac:v1:... \
+E2E_CALLBACK_MODE=external \
+E2E_REPORT_LIFECYCLE_MODE=skip \
+asset-assessment-e2e-runner
+```
+
+This mode requires explicit shared service credentials and accepts only a
+bounded `ASMT-` identifier. It requires the existing task to be a technically
+verified T2 assessment at `evidence_pending`; otherwise it exits before creating
+evidence. It then exercises the three evidence types, configuration-bound test
+market data, independent policy approval, valuation, reviewer separation,
+ordered two-person approval, report freeze, test-HSM signing and private PDF
+download. The normal external outbox updates the matching new-api task.
+
+Use this mode only in a controlled test environment. The generated evidence,
+market observations, reviewer identities and signing chain are test fixtures.
+
 ### Shared Acceptance Record (2026-08-05)
 
 Run `20260805T050741-33e85650` completed the shared-environment report mainline

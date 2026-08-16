@@ -231,6 +231,37 @@ CREATE INDEX IF NOT EXISTS idx_device_daily_stats_date ON device_daily_stats (da
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_client_id ON device_daily_stats (client_id);
 CREATE INDEX IF NOT EXISTS idx_device_daily_stats_device_index ON device_daily_stats (device_index);
 
+CREATE TABLE IF NOT EXISTS device_gpu_health_daily_stats (
+    date DATE NOT NULL,
+    client_id BYTEA NOT NULL,
+    device_index SMALLINT NOT NULL,
+    supported_metrics BIGINT NOT NULL DEFAULT 0,
+    unsupported_metrics BIGINT NOT NULL DEFAULT 0,
+    total_observations BIGINT NOT NULL DEFAULT 0,
+    high_temperature_observation_count BIGINT NOT NULL DEFAULT 0,
+    near_power_limit_observation_count BIGINT NOT NULL DEFAULT 0,
+    clock_limit_observation_count BIGINT NOT NULL DEFAULT 0,
+    thermal_throttle_observation_count BIGINT NOT NULL DEFAULT 0,
+    power_throttle_observation_count BIGINT NOT NULL DEFAULT 0,
+    hardware_slowdown_observation_count BIGINT NOT NULL DEFAULT 0,
+    recovery_action_required_observation_count BIGINT NOT NULL DEFAULT 0,
+    uncorrected_ecc_error_observation_count BIGINT NOT NULL DEFAULT 0,
+    max_uncorrected_ecc_errors BIGINT,
+    pending_page_retirement_observation_count BIGINT NOT NULL DEFAULT 0,
+    pending_row_remap_observation_count BIGINT NOT NULL DEFAULT 0,
+    last_observation TIMESTAMPTZ NOT NULL,
+    last_observation_bucket BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (client_id, device_index, date),
+    CHECK (supported_metrics >= 0 AND supported_metrics < 1024),
+    CHECK (unsupported_metrics >= 0 AND unsupported_metrics < 1024),
+    CHECK ((supported_metrics & unsupported_metrics) = 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_gpu_health_daily_client_date
+ON device_gpu_health_daily_stats (client_id, date DESC);
+
 CREATE TABLE IF NOT EXISTS pre_evaluation_reports (
     report_id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64),
@@ -528,10 +559,10 @@ INSERT INTO gpu_model_specs (
      'Ada Lovelace', 4, 220, NULL, 36, NULL, NULL, 'PCIe 4.0', NULL,
      '["fp32", "fp16", "bf16", "fp8", "int8"]'::jsonb, '["llm", "diffusion", "graphics", "video"]'::jsonb,
      'https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/rtx-4070-family/', 'nvidia-2026-07-17'),
-    (26640, 2, 'apple-m1-pro-gpu', 'Apple M1 Pro GPU', 'appliance', '["Apple M1 Pro", "Apple Apple M1 Pro"]'::jsonb,
+    (26640, 2, 'apple-m1-pro-gpu', 'Apple M1 Pro GPU', 'appliance', '["Apple M1 Pro", "Apple M1 Pro GPU", "Apple Apple M1 Pro"]'::jsonb,
      'Apple M1 Pro', 5, NULL, NULL, NULL, NULL, 200, 'Unified memory', NULL,
      '["fp32", "fp16"]'::jsonb, '["llm", "graphics", "video"]'::jsonb,
-     'https://www.apple.com/newsroom/2021/10/apple-unleashes-m1-pro-and-m1-max-for-the-macbook-pro/', 'apple-2026-08-05'),
+     'https://www.apple.com/newsroom/2021/10/apple-unleashes-m1-pro-and-m1-max-for-the-macbook-pro/', 'apple-2026-08-13'),
     (4098, 5510, 'amd-ryzen-ai-max-plus-395-radeon-8060s', 'AMD Ryzen AI Max+ 395 / Radeon 8060S Graphics', 'appliance', '["AMD Ryzen AI Max+ 395", "Radeon 8060S Graphics"]'::jsonb,
      'RDNA 3.5', 4, NULL, 16, 8, NULL, NULL, 'Unified memory', NULL,
      '["fp32", "fp16", "bf16", "int8"]'::jsonb, '["llm", "diffusion"]'::jsonb,

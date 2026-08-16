@@ -603,7 +603,7 @@ async fn collect_device_info_wmi() -> Result<(DevicesInfo, u32)> {
 }
 
 // Linux sysfs-based device info collection
-#[cfg(all(target_os = "linux", not(feature = "nvml")))]
+#[cfg(all(target_os = "linux", not(feature = "cuda")))]
 async fn collect_device_info_sysfs() -> Result<(DevicesInfo, u32)> {
     use std::fs;
 
@@ -668,7 +668,7 @@ async fn collect_device_info_sysfs() -> Result<(DevicesInfo, u32)> {
 #[cfg(all(
     not(target_os = "macos"),
     not(target_os = "android"),
-    not(feature = "nvml")
+    not(feature = "cuda")
 ))]
 async fn collect_device_info_cpu() -> Result<(DevicesInfo, u32)> {
     let mut sys = System::new_all();

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,8 @@ func TestLiveSupportRenderAndHSMContract(t *testing.T) {
 		t.Skip("set E2E_SUPPORT_LIVE_URL and E2E_SUPPORT_LIVE_TOKEN")
 	}
 	client := &http.Client{Timeout: 90 * time.Second}
-	html := `<!doctype html><html><head><meta charset="utf-8"><title>Local E2E</title></head><body><h1>NON-PRODUCTION ASSESSMENT</h1><p>Chromium render contract.</p></body></html>`
+	const expectedPDFText = "算力资产技术预评估报告 暂无上报"
+	html := `<!doctype html><html><head><meta charset="utf-8"><title>Local E2E</title></head><body><h1>NON-PRODUCTION ASSESSMENT</h1><p>Chromium render contract.</p><p>` + expectedPDFText + `</p></body></html>`
 	htmlHash := sha256.Sum256([]byte(html))
 	renderBody, _ := json.Marshal(map[string]any{
 		"reportId": "AER-LIVE-SUPPORT", "html": html,
@@ -47,10 +49,11 @@ func TestLiveSupportRenderAndHSMContract(t *testing.T) {
 		render.Data.PDFSHA256 != hex.EncodeToString(pdfHash[:]) {
 		t.Fatalf("invalid live render response: success=%v bytes=%d hash=%s", render.Success, len(pdf), render.Data.PDFSHA256)
 	}
+	verifyLivePDFText(t, pdf, expectedPDFText)
 
 	signingDigest := sha256.Sum256([]byte("local-e2e-independent-signing-check"))
 	signBody, _ := json.Marshal(map[string]any{
-		"reportId": "AER-LIVE-SUPPORT",
+		"reportId":     "AER-LIVE-SUPPORT",
 		"digestSha256": hex.EncodeToString(signingDigest[:]),
 		"digestBase64": base64.StdEncoding.EncodeToString(signingDigest[:]),
 	})
@@ -60,6 +63,28 @@ func TestLiveSupportRenderAndHSMContract(t *testing.T) {
 	}
 	callLiveSupport(t, client, token, baseURL+"/internal/v1/report-signatures", signBody, &signed)
 	verifyLiveSignature(t, signed.Data, signingDigest[:])
+}
+
+func verifyLivePDFText(t *testing.T, pdf []byte, expected string) {
+	t.Helper()
+	file, err := os.CreateTemp(t.TempDir(), "live-render-*.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(pdf); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	extracted, err := exec.Command("pdftotext", "-layout", file.Name(), "-").CombinedOutput()
+	if err != nil {
+		t.Fatalf("extract rendered PDF text: %v: %s", err, extracted)
+	}
+	if !strings.Contains(string(extracted), expected) {
+		t.Fatalf("rendered PDF is missing CJK text %q; extracted text: %q", expected, extracted)
+	}
 }
 
 func callLiveSupport(t *testing.T, client *http.Client, token, endpoint string, body []byte, target any) {

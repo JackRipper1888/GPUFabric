@@ -1,0 +1,6 @@
+ARG BASE_IMAGE=GPUFabric/api_server:latest
+FROM ${BASE_IMAGE}
+
+ARG BIN=api_server
+COPY --chown=appuser:appuser ${BIN} /app/${BIN}
+ENV BIN=${BIN}

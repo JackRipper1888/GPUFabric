@@ -7,10 +7,11 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
     for gpu in &report.hardware.gpus {
         let _ = write!(
             gpu_rows,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             gpu.index,
             escape(&gpu.model),
             display_bytes(gpu.memory_bytes),
+            display_gpu_specifications(gpu),
             display_theoretical_performance(gpu),
             escape(gpu.specification_version.as_deref().unwrap_or("-")),
         );
@@ -48,7 +49,7 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
   <style>
     :root {{ --ink:#17202a; --muted:#5c6875; --line:#d5dce3; --canvas:#f4f6f8; --blue:#1759bb; --green:#0f766e; --amber:#b96508; }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; color:var(--ink); background:var(--canvas); font-family:Inter,"Noto Sans SC","Microsoft YaHei",Arial,sans-serif; font-size:14px; line-height:1.6; letter-spacing:0; }}
+    body {{ margin:0; color:var(--ink); background:var(--canvas); font-family:"Noto Sans CJK SC","Noto Sans SC",Inter,"Microsoft YaHei",Arial,sans-serif; font-size:14px; line-height:1.6; letter-spacing:0; }}
     header, main, footer {{ width:min(1120px,calc(100% - 32px)); margin:0 auto; }}
     header {{ padding:30px 0 22px; }}
     h1 {{ margin:0 0 8px; font-size:28px; }}
@@ -95,12 +96,14 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
       <div class="table-wrap"><table class="asset-table"><tbody>
         <tr><th>资产名称</th><td>{asset_name}</td><th>主要 GPU</th><td>{gpu_model}</td></tr>
         <tr><th>设备数量</th><td>{device_count}</td><th>来源类型</th><td>{source_type}</td></tr>
+        <tr><th>操作系统</th><td>{os}</td><th>CPU 型号</th><td>{cpu_model}</td></tr>
+        <tr><th>系统内存</th><td>{system_memory}</td><th>GPU 总显存</th><td>{gpu_memory}</td></tr>
         <tr><th>来源完整性</th><td>{integrity}</td><th>技术快照</th><td>{snapshot_id}</td></tr>
       </tbody></table></div>
     </section>
     <section>
       <h2>GPU 技术台账</h2>
-      <div class="table-wrap"><table><thead><tr><th>序号</th><th>型号</th><th>显存</th><th>理论性能</th><th>规格版本</th></tr></thead><tbody>{gpu_rows}</tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>序号</th><th>型号</th><th>显存</th><th>技术规格</th><th>理论性能</th><th>规格版本</th></tr></thead><tbody>{gpu_rows}</tbody></table></div>
     </section>
     <section>
       <h2>运行历史与健康观测</h2>
@@ -134,6 +137,10 @@ pub fn render(report: &Report, report_sha256: &str) -> String {
         asset_name = escape(&report.asset.name),
         gpu_model = escape(&report.asset.primary_gpu_model),
         device_count = report.asset.device_count,
+        os = display_optional_text(report.hardware.os.as_deref()),
+        cpu_model = display_optional_text(report.hardware.cpu_model.as_deref()),
+        system_memory = display_bytes_or_unavailable(report.hardware.system_memory_bytes),
+        gpu_memory = display_bytes_or_unavailable(report.hardware.gpu_memory_bytes),
         source_type = escape(report.source.source_type),
         integrity = escape(report.source.integrity_level),
         snapshot_id = escape(
@@ -151,8 +158,18 @@ fn runtime_rows(report: &Report) -> String {
     let Some(runtime) = report.runtime.as_ref() else {
         return "<tr><td colspan=\"4\">暂无运行历史</td></tr>".to_string();
     };
+    let macos = report.hardware.os.as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "mac" | "macos" | "darwin"
+        )
+    });
     format!(
-        "<tr><th>本地观测天数</th><td>{}</td><th>服务端观测天数</th><td>{}</td></tr>\
+        "<tr><th>CPU 使用率</th><td>{}</td><th>内存使用率</th><td>{}</td></tr>\
+         <tr><th>存储使用率</th><td>{}</td><th>GPU 利用率</th><td>{}</td></tr>\
+         <tr><th>GPU 显存使用率</th><td>{}</td><th>GPU 温度</th><td>{}</td></tr>\
+         <tr><th>GPU 功耗</th><td>{}</td><th>当前状态</th><td>{}</td></tr>\
+         <tr><th>本地观测天数</th><td>{}</td><th>服务端观测天数</th><td>{}</td></tr>\
          <tr><th>采样覆盖率</th><td>{}</td><th>最大采样间隔</th><td>{}</td></tr>\
          <tr><th>缺失采样</th><td>{}</td><th>缺失 GPU 观测</th><td>{}</td></tr>\
          <tr><th>高温观测</th><td>{}</td><th>接近功率上限</th><td>{}</td></tr>\
@@ -160,32 +177,88 @@ fn runtime_rows(report: &Report) -> String {
          <tr><th>功率限制</th><td>{}</td><th>硬件减速</th><td>{}</td></tr>\
          <tr><th>驱动要求恢复</th><td>{}</td><th>不可纠正 ECC 观测</th><td>{}</td></tr>\
          <tr><th>最大不可纠正 ECC</th><td>{}</td><th>待处理显存修复</th><td>{}</td></tr>",
+        display_optional_percent(runtime.cpu_usage_percent),
+        display_optional_percent(runtime.memory_usage_percent),
+        display_optional_percent(runtime.storage_usage_percent),
+        display_optional_percent(runtime.gpu_utilization_percent),
+        display_optional_percent(runtime.gpu_memory_usage_percent),
+        display_optional_number(runtime.gpu_temperature_c, " °C"),
+        display_power(runtime.gpu_power_usage_w, runtime.gpu_power_usage_percent),
+        display_online_status(runtime.online),
         display_number(runtime.observation_days),
         display_number(runtime.server_observation_days),
         runtime
             .sample_coverage_percent
             .map(|value| format!("{value:.2}%"))
-            .unwrap_or_else(|| "-".to_string()),
+            .unwrap_or_else(|| "暂无上报".to_string()),
         runtime
             .maximum_sample_gap_seconds
             .map(|value| format!("{value} 秒"))
-            .unwrap_or_else(|| "-".to_string()),
+            .unwrap_or_else(|| "暂无上报".to_string()),
         display_number(runtime.missing_sample_count),
         display_number(runtime.missing_gpu_observation_count),
-        display_number(runtime.high_temperature_observation_count),
-        display_number(runtime.near_power_limit_observation_count),
-        display_number(runtime.clock_limit_observation_count),
-        display_number(runtime.thermal_throttle_observation_count),
-        display_number(runtime.power_throttle_observation_count),
-        display_number(runtime.hardware_slowdown_observation_count),
-        display_number(runtime.recovery_action_required_observation_count),
-        display_number(runtime.uncorrected_ecc_error_observation_count),
-        display_number(runtime.max_uncorrected_ecc_errors),
-        display_number(
-            runtime
-                .pending_page_retirement_observation_count
-                .zip(runtime.pending_row_remap_observation_count)
-                .and_then(|(pages, rows)| pages.checked_add(rows)),
+        display_health_number(
+            runtime.high_temperature_observation_count,
+            runtime,
+            common::GPU_HEALTH_HIGH_TEMPERATURE,
+            macos,
+        ),
+        display_health_number(
+            runtime.near_power_limit_observation_count,
+            runtime,
+            common::GPU_HEALTH_NEAR_POWER_LIMIT,
+            macos,
+        ),
+        display_health_number(
+            runtime.clock_limit_observation_count,
+            runtime,
+            common::GPU_HEALTH_CLOCK_LIMIT,
+            macos,
+        ),
+        display_health_number(
+            runtime.thermal_throttle_observation_count,
+            runtime,
+            common::GPU_HEALTH_THERMAL_THROTTLE,
+            macos,
+        ),
+        display_health_number(
+            runtime.power_throttle_observation_count,
+            runtime,
+            common::GPU_HEALTH_POWER_THROTTLE,
+            macos,
+        ),
+        display_health_number(
+            runtime.hardware_slowdown_observation_count,
+            runtime,
+            common::GPU_HEALTH_HARDWARE_SLOWDOWN,
+            macos,
+        ),
+        display_health_number(
+            runtime.recovery_action_required_observation_count,
+            runtime,
+            common::GPU_HEALTH_RECOVERY_ACTION_REQUIRED,
+            macos,
+        ),
+        display_health_number(
+            runtime.uncorrected_ecc_error_observation_count,
+            runtime,
+            common::GPU_HEALTH_UNCORRECTED_ECC,
+            macos,
+        ),
+        display_health_number(
+            runtime.max_uncorrected_ecc_errors,
+            runtime,
+            common::GPU_HEALTH_UNCORRECTED_ECC,
+            macos,
+        ),
+        display_health_number(
+            sum_optional_counts(
+                runtime.pending_page_retirement_observation_count,
+                runtime.pending_row_remap_observation_count,
+            ),
+            runtime,
+            common::GPU_HEALTH_PENDING_PAGE_RETIREMENT | common::GPU_HEALTH_PENDING_ROW_REMAP,
+            macos,
         ),
     )
 }
@@ -193,7 +266,77 @@ fn runtime_rows(report: &Report) -> String {
 fn display_number<T: std::fmt::Display>(value: Option<T>) -> String {
     value
         .map(|value| value.to_string())
-        .unwrap_or_else(|| "-".to_string())
+        .unwrap_or_else(|| "暂无上报".to_string())
+}
+
+fn display_optional_text(value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(escape)
+        .unwrap_or_else(|| "暂无采集".to_string())
+}
+
+fn display_health_number<T: std::fmt::Display>(
+    value: Option<T>,
+    runtime: &super::pre_evaluation::Runtime,
+    metric: u64,
+    macos: bool,
+) -> String {
+    if let Some(value) = value {
+        return value.to_string();
+    }
+    if runtime
+        .health_unsupported_metrics
+        .is_some_and(|metrics| metrics & metric != 0)
+    {
+        return "设备或驱动不支持".to_string();
+    }
+    if macos {
+        "Mac 客户端暂不支持".to_string()
+    } else {
+        "客户端未提供".to_string()
+    }
+}
+
+fn display_bytes_or_unavailable(value: Option<u64>) -> String {
+    value
+        .map(|value| display_bytes(Some(value)))
+        .unwrap_or_else(|| "暂无采集".to_string())
+}
+
+fn display_optional_percent(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.2}%"))
+        .unwrap_or_else(|| "暂无上报".to_string())
+}
+
+fn display_optional_number(value: Option<f64>, unit: &str) -> String {
+    value
+        .map(|value| format!("{value:.2}{unit}"))
+        .unwrap_or_else(|| "暂无上报".to_string())
+}
+
+fn display_power(watts: Option<f64>, percent: Option<f64>) -> String {
+    match (watts, percent) {
+        (Some(watts), Some(percent)) => format!("{watts:.2} W ({percent:.2}%)"),
+        (Some(watts), None) => format!("{watts:.2} W"),
+        (None, Some(percent)) => format!("{percent:.2}%"),
+        (None, None) => "暂无上报".to_string(),
+    }
+}
+
+fn display_online_status(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "在线",
+        Some(false) => "离线",
+        None => "暂无上报",
+    }
+}
+
+fn sum_optional_counts(first: Option<u64>, second: Option<u64>) -> Option<u64> {
+    first
+        .zip(second)
+        .and_then(|(first, second)| first.checked_add(second))
 }
 
 fn code_list(values: &[String]) -> String {
@@ -213,6 +356,24 @@ fn display_bytes(value: Option<u64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn display_gpu_specifications(gpu: &super::pre_evaluation::Gpu) -> String {
+    let mut values = Vec::new();
+    if let Some(architecture) = gpu.architecture.as_deref() {
+        values.push(format!("架构: {}", escape(architecture)));
+    }
+    if let Some(process_nm) = gpu.process_nm {
+        values.push(format!("制程: {process_nm:.2} nm"));
+    }
+    if let Some(memory_bandwidth_gbps) = gpu.memory_bandwidth_gbps {
+        values.push(format!("显存带宽: {memory_bandwidth_gbps:.2} GB/s"));
+    }
+    if values.is_empty() {
+        "暂无可信规格".to_string()
+    } else {
+        values.join("<br>")
+    }
+}
+
 fn display_theoretical_performance(gpu: &super::pre_evaluation::Gpu) -> String {
     [
         (gpu.fp16_tflops, "FP16", "TFLOPS"),
@@ -224,7 +385,7 @@ fn display_theoretical_performance(gpu: &super::pre_evaluation::Gpu) -> String {
     .find_map(|(value, precision, unit)| {
         value.map(|value| format!("{precision} {value:.2} {unit}"))
     })
-    .unwrap_or_else(|| "-".to_string())
+    .unwrap_or_else(|| "暂无可信规格".to_string())
 }
 
 fn escape(value: &str) -> String {
@@ -243,5 +404,72 @@ mod tests {
     #[test]
     fn html_escape_covers_markup_and_quotes() {
         assert_eq!(escape("<&>\"'"), "&lt;&amp;&gt;&quot;&#39;");
+    }
+
+    #[test]
+    fn health_values_distinguish_zero_unsupported_and_missing() {
+        let supported_zero = super::super::pre_evaluation::Runtime {
+            high_temperature_observation_count: Some(0),
+            health_supported_metrics: Some(common::GPU_HEALTH_HIGH_TEMPERATURE),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_health_number(
+                supported_zero.high_temperature_observation_count,
+                &supported_zero,
+                common::GPU_HEALTH_HIGH_TEMPERATURE,
+                false,
+            ),
+            "0"
+        );
+
+        let unsupported = super::super::pre_evaluation::Runtime {
+            health_unsupported_metrics: Some(common::GPU_HEALTH_UNCORRECTED_ECC),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_health_number::<u64>(
+                None,
+                &unsupported,
+                common::GPU_HEALTH_UNCORRECTED_ECC,
+                false,
+            ),
+            "设备或驱动不支持"
+        );
+
+        let old_client = super::super::pre_evaluation::Runtime::default();
+        assert_eq!(
+            display_health_number::<u64>(
+                None,
+                &old_client,
+                common::GPU_HEALTH_HIGH_TEMPERATURE,
+                false,
+            ),
+            "客户端未提供"
+        );
+    }
+
+    #[test]
+    fn partial_memory_repair_support_does_not_render_as_zero() {
+        let runtime = super::super::pre_evaluation::Runtime {
+            pending_page_retirement_observation_count: Some(0),
+            health_supported_metrics: Some(common::GPU_HEALTH_PENDING_PAGE_RETIREMENT),
+            health_unsupported_metrics: Some(common::GPU_HEALTH_PENDING_ROW_REMAP),
+            ..Default::default()
+        };
+        let combined = sum_optional_counts(
+            runtime.pending_page_retirement_observation_count,
+            runtime.pending_row_remap_observation_count,
+        );
+        assert_eq!(combined, None);
+        assert_eq!(
+            display_health_number(
+                combined,
+                &runtime,
+                common::GPU_HEALTH_PENDING_PAGE_RETIREMENT | common::GPU_HEALTH_PENDING_ROW_REMAP,
+                false,
+            ),
+            "设备或驱动不支持"
+        );
     }
 }

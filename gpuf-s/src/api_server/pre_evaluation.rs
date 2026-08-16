@@ -20,7 +20,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    api_server::{benchmark_evidence, report_html, technical_snapshot as snapshot_api, ApiServer},
+    api_server::{
+        benchmark_evidence, report_html, report_pdf, technical_snapshot as snapshot_api, ApiServer,
+    },
     db::{gpu_model_specs, pre_evaluation, technical_snapshot},
     util::{msg::ApiResponse, protoc::ClientId},
 };
@@ -30,6 +32,7 @@ const COLLECTOR_SCHEMA_VERSION: &str = "gpuf.hw_asset_report.v3";
 const CHALLENGE_TTL_SECONDS: u64 = 300;
 const RUNTIME_OBSERVATION_CLOCK_TOLERANCE_SECONDS: u64 = 600;
 const RUNTIME_HISTORY_POLICY_VERSION: &str = "gpuf.runtime_history.v1";
+const ONLINE_HEARTBEAT_HISTORY_POLICY_VERSION: &str = "gpuf.online_heartbeat_history.v1";
 const MIN_RUNTIME_SAMPLE_COVERAGE_PERCENT: f64 = 90.0;
 const MAX_RUNTIME_SAMPLE_COUNT: u64 = 10_000_000;
 const MAX_RUNTIME_GPU_OBSERVATION_COUNT: u64 = 2_560_000_000;
@@ -291,6 +294,8 @@ pub struct Runtime {
     pub max_uncorrected_ecc_errors: Option<u64>,
     pub pending_page_retirement_observation_count: Option<u64>,
     pub pending_row_remap_observation_count: Option<u64>,
+    pub health_supported_metrics: Option<u64>,
+    pub health_unsupported_metrics: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -364,6 +369,33 @@ struct OnlineHistory {
     avg_memory_usage: Option<f64>,
 }
 
+#[derive(Default, FromRow)]
+struct OnlineHealthStats {
+    supported_metrics: Option<i64>,
+    unsupported_metrics: Option<i64>,
+    total_observations: Option<i64>,
+    high_temperature_observation_count: Option<i64>,
+    near_power_limit_observation_count: Option<i64>,
+    clock_limit_observation_count: Option<i64>,
+    thermal_throttle_observation_count: Option<i64>,
+    power_throttle_observation_count: Option<i64>,
+    hardware_slowdown_observation_count: Option<i64>,
+    recovery_action_required_observation_count: Option<i64>,
+    uncorrected_ecc_error_observation_count: Option<i64>,
+    max_uncorrected_ecc_errors: Option<i64>,
+    pending_page_retirement_observation_count: Option<i64>,
+    pending_row_remap_observation_count: Option<i64>,
+}
+
+#[derive(Default, FromRow)]
+struct OnlineSamplingStats {
+    sampling_interval_seconds: Option<i64>,
+    expected_sample_count: Option<i64>,
+    observed_sample_count: Option<i64>,
+    maximum_sample_gap_seconds: Option<i64>,
+    gpu_observation_count: Option<i64>,
+}
+
 pub async fn create_from_client(
     State(state): State<Arc<ApiServer>>,
     headers: HeaderMap,
@@ -422,6 +454,70 @@ pub async fn create_from_client(
     .fetch_all(&state.db_pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let health = sqlx::query_as::<_, OnlineHealthStats>(
+        r#"WITH per_device AS (
+               SELECT device_index,
+                      BIT_OR(supported_metrics) AS supported_metrics,
+                      BIT_OR(unsupported_metrics) AS unsupported_metrics,
+                      SUM(total_observations)::BIGINT AS total_observations,
+                      SUM(high_temperature_observation_count)::BIGINT
+                          AS high_temperature_observation_count,
+                      SUM(near_power_limit_observation_count)::BIGINT
+                          AS near_power_limit_observation_count,
+                      SUM(clock_limit_observation_count)::BIGINT
+                          AS clock_limit_observation_count,
+                      SUM(thermal_throttle_observation_count)::BIGINT
+                          AS thermal_throttle_observation_count,
+                      SUM(power_throttle_observation_count)::BIGINT
+                          AS power_throttle_observation_count,
+                      SUM(hardware_slowdown_observation_count)::BIGINT
+                          AS hardware_slowdown_observation_count,
+                      SUM(recovery_action_required_observation_count)::BIGINT
+                          AS recovery_action_required_observation_count,
+                      SUM(uncorrected_ecc_error_observation_count)::BIGINT
+                          AS uncorrected_ecc_error_observation_count,
+                      MAX(max_uncorrected_ecc_errors)::BIGINT
+                          AS max_uncorrected_ecc_errors,
+                      SUM(pending_page_retirement_observation_count)::BIGINT
+                          AS pending_page_retirement_observation_count,
+                      SUM(pending_row_remap_observation_count)::BIGINT
+                          AS pending_row_remap_observation_count
+               FROM device_gpu_health_daily_stats
+               WHERE client_id = $1
+                 AND date >= CURRENT_DATE - INTERVAL '30 days'
+               GROUP BY device_index
+           )
+           SELECT BIT_AND(supported_metrics)::BIGINT AS supported_metrics,
+                  BIT_OR(unsupported_metrics)::BIGINT AS unsupported_metrics,
+                  SUM(total_observations)::BIGINT AS total_observations,
+                  SUM(high_temperature_observation_count)::BIGINT
+                      AS high_temperature_observation_count,
+                  SUM(near_power_limit_observation_count)::BIGINT
+                      AS near_power_limit_observation_count,
+                  SUM(clock_limit_observation_count)::BIGINT
+                      AS clock_limit_observation_count,
+                  SUM(thermal_throttle_observation_count)::BIGINT
+                      AS thermal_throttle_observation_count,
+                  SUM(power_throttle_observation_count)::BIGINT
+                      AS power_throttle_observation_count,
+                  SUM(hardware_slowdown_observation_count)::BIGINT
+                      AS hardware_slowdown_observation_count,
+                  SUM(recovery_action_required_observation_count)::BIGINT
+                      AS recovery_action_required_observation_count,
+                  SUM(uncorrected_ecc_error_observation_count)::BIGINT
+                      AS uncorrected_ecc_error_observation_count,
+                  MAX(max_uncorrected_ecc_errors)::BIGINT
+                      AS max_uncorrected_ecc_errors,
+                  SUM(pending_page_retirement_observation_count)::BIGINT
+                      AS pending_page_retirement_observation_count,
+                  SUM(pending_row_remap_observation_count)::BIGINT
+                      AS pending_row_remap_observation_count
+           FROM per_device"#,
+    )
+    .bind(client_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let history = sqlx::query_as::<_, OnlineHistory>(
         r#"SELECT COUNT(DISTINCT date)::BIGINT AS observation_days,
                   AVG(avg_utilization)::FLOAT8 AS avg_utilization,
@@ -430,6 +526,74 @@ pub async fn create_from_client(
                   AVG(avg_memory_usage)::FLOAT8 AS avg_memory_usage
            FROM device_daily_stats
            WHERE client_id = $1 AND date >= CURRENT_DATE - INTERVAL '30 days'"#,
+    )
+    .bind(client_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let sampling = sqlx::query_as::<_, OnlineSamplingStats>(
+        r#"WITH raw_samples AS (
+               SELECT timestamp,
+                      (timestamp AT TIME ZONE 'UTC')::date AS sample_date,
+                      LAG(timestamp) OVER (
+                          PARTITION BY (timestamp AT TIME ZONE 'UTC')::date
+                          ORDER BY timestamp
+                      ) AS previous_timestamp
+               FROM heartbeat
+               WHERE client_id = $1
+                 AND timestamp >= CURRENT_DATE - INTERVAL '30 days'
+                 AND timestamp <= NOW()
+           ),
+           daily_windows AS (
+               SELECT sample_date,
+                      MIN(timestamp) AS first_sample,
+                      MAX(timestamp) AS last_sample,
+                      MAX(EXTRACT(EPOCH FROM timestamp - previous_timestamp))::BIGINT
+                          AS maximum_gap_seconds
+               FROM raw_samples
+               GROUP BY sample_date
+           ),
+           daily_sampling AS (
+               SELECT windows.sample_date,
+                      GREATEST(COALESCE(config.heartbeat_interval_secs, 120), 1)::BIGINT
+                          AS interval_seconds,
+                      GREATEST(stats.total_heartbeats, 0)::BIGINT AS observed_samples,
+                      GREATEST(
+                          GREATEST(stats.total_heartbeats, 0)::BIGINT,
+                          FLOOR(
+                              EXTRACT(EPOCH FROM windows.last_sample - windows.first_sample) /
+                              GREATEST(COALESCE(config.heartbeat_interval_secs, 120), 1)
+                          )::BIGINT + 1
+                      ) AS expected_samples,
+                      windows.maximum_gap_seconds
+               FROM daily_windows windows
+               JOIN client_daily_stats stats
+                 ON stats.client_id = $1 AND stats.date = windows.sample_date
+               LEFT JOIN heartbeat_config_daily config ON config.date = windows.sample_date
+           ),
+           gpu_observations AS (
+               SELECT COALESCE(SUM(GREATEST(devices.total_heartbeats, 0)), 0)::BIGINT
+                          AS observation_count
+               FROM device_daily_stats devices
+               JOIN daily_sampling sampling ON sampling.sample_date = devices.date
+               WHERE devices.client_id = $1
+           )
+           SELECT CASE
+                      WHEN COUNT(*) > 0 AND MIN(interval_seconds) = MAX(interval_seconds)
+                      THEN MIN(interval_seconds)
+                  END AS sampling_interval_seconds,
+                  CASE WHEN COUNT(*) > 0 THEN SUM(expected_samples)::BIGINT END
+                      AS expected_sample_count,
+                  CASE WHEN COUNT(*) > 0 THEN SUM(observed_samples)::BIGINT END
+                      AS observed_sample_count,
+                  CASE WHEN COUNT(*) > 0
+                       THEN COALESCE(MAX(maximum_gap_seconds), 0)::BIGINT
+                  END AS maximum_sample_gap_seconds,
+                  CASE WHEN COUNT(*) > 0
+                       THEN (SELECT observation_count FROM gpu_observations)
+                  END AS gpu_observation_count
+           FROM daily_sampling"#,
     )
     .bind(client_id)
     .fetch_one(&state.db_pool)
@@ -531,6 +695,13 @@ pub async fn create_from_client(
     if history.observation_days > 0 {
         sources.push("device_daily_stats".to_string());
     }
+    if health.total_observations.is_some_and(|value| value > 0) {
+        sources.push("device_gpu_health_daily_stats".to_string());
+    }
+    if sampling.expected_sample_count.is_some() {
+        sources.push("heartbeat".to_string());
+        sources.push("client_daily_stats".to_string());
+    }
     let asset_name_is_explicit = request.asset_name.is_some();
     let mut evidence = Normalized {
         source_type: "gpuf_online",
@@ -616,7 +787,12 @@ pub async fn create_from_client(
         missing_codes,
         warning_codes,
     };
+    if let Some(runtime) = evidence.runtime.as_mut() {
+        apply_online_sampling_stats(runtime, &sampling, device_count);
+        apply_online_health_stats(runtime, &health);
+    }
     enrich_with_gpu_specs(&state.db_pool, &mut evidence).await?;
+    enrich_apple_unified_host_inventory(&mut evidence);
     let benchmarks = benchmark_evidence::load_for_report(
         &state.db_pool,
         &benchmark_evidence_ids,
@@ -807,6 +983,49 @@ pub async fn get_report_html(
 fn report_content_disposition(report_id: &str, download: bool) -> String {
     let disposition = if download { "attachment" } else { "inline" };
     format!("{disposition}; filename=\"pre-evaluation-{report_id}.html\"")
+}
+
+pub async fn get_report_pdf(
+    State(state): State<Arc<ApiServer>>,
+    headers: HeaderMap,
+    Path(report_id): Path<String>,
+    Query(query): Query<ReportHtmlQuery>,
+) -> Result<Response<Body>, StatusCode> {
+    authorize_banking_request(&headers)?;
+    if !valid_report_id(&report_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let stored = pre_evaluation::get_stored_report_html(&state.db_pool, &report_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let (pdf, pdf_sha256) =
+        report_pdf::render(&report_id, &stored.report_html, &stored.report_html_sha256)
+            .await
+            .map_err(|error| match error {
+                report_pdf::RenderError::Configuration => StatusCode::SERVICE_UNAVAILABLE,
+                report_pdf::RenderError::Unavailable | report_pdf::RenderError::InvalidArtifact => {
+                    StatusCode::BAD_GATEWAY
+                }
+            })?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/pdf")
+        .header(CACHE_CONTROL, "private, no-store")
+        .header(
+            CONTENT_DISPOSITION,
+            report_pdf_content_disposition(&report_id, query.download),
+        )
+        .header(ETAG, format!("\"{}\"", pdf_sha256))
+        .header("x-content-sha256", pdf_sha256)
+        .header("x-content-type-options", "nosniff")
+        .body(Body::from(pdf))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn report_pdf_content_disposition(report_id: &str, download: bool) -> String {
+    let disposition = if download { "attachment" } else { "inline" };
+    format!("{disposition}; filename=\"pre-evaluation-{report_id}.pdf\"")
 }
 
 pub async fn get_internal_report(
@@ -1588,6 +1807,8 @@ fn normalize_offline_runtime(root: &Value) -> Option<Runtime> {
             "pending_row_remap_observation_count",
             MAX_RUNTIME_GPU_OBSERVATION_COUNT,
         ),
+        health_supported_metrics: None,
+        health_unsupported_metrics: None,
     })
 }
 
@@ -1753,6 +1974,212 @@ async fn enrich_with_gpu_specs(
         evidence.fp32_tflops = strict_sum(evidence.gpus.iter().map(|gpu| gpu.fp32_tflops));
     }
     Ok(())
+}
+
+fn valid_online_health_mask(value: Option<i64>) -> Option<u64> {
+    value
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| value & !common::GPU_HEALTH_ALL_METRICS == 0)
+}
+
+fn online_health_count(
+    value: Option<i64>,
+    supported_metrics: u64,
+    metric: u64,
+    maximum: u64,
+) -> Option<u64> {
+    if supported_metrics & metric != metric {
+        return None;
+    }
+    value
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value <= maximum)
+}
+
+fn apply_online_health_stats(runtime: &mut Runtime, stats: &OnlineHealthStats) {
+    let Some(total_observations) = stats
+        .total_observations
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| (1..=MAX_RUNTIME_GPU_OBSERVATION_COUNT).contains(value))
+    else {
+        return;
+    };
+    let Some(supported_metrics) = valid_online_health_mask(stats.supported_metrics) else {
+        return;
+    };
+    let unsupported_metrics = valid_online_health_mask(stats.unsupported_metrics)
+        .unwrap_or_default()
+        & !supported_metrics;
+
+    runtime.health_supported_metrics = Some(supported_metrics);
+    runtime.health_unsupported_metrics = Some(unsupported_metrics);
+    runtime.high_temperature_observation_count = online_health_count(
+        stats.high_temperature_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_HIGH_TEMPERATURE,
+        total_observations,
+    );
+    runtime.near_power_limit_observation_count = online_health_count(
+        stats.near_power_limit_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_NEAR_POWER_LIMIT,
+        total_observations,
+    );
+    runtime.clock_limit_observation_count = online_health_count(
+        stats.clock_limit_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_CLOCK_LIMIT,
+        total_observations,
+    );
+    runtime.thermal_throttle_observation_count = online_health_count(
+        stats.thermal_throttle_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_THERMAL_THROTTLE,
+        total_observations,
+    );
+    runtime.power_throttle_observation_count = online_health_count(
+        stats.power_throttle_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_POWER_THROTTLE,
+        total_observations,
+    );
+    runtime.hardware_slowdown_observation_count = online_health_count(
+        stats.hardware_slowdown_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_HARDWARE_SLOWDOWN,
+        total_observations,
+    );
+    runtime.recovery_action_required_observation_count = online_health_count(
+        stats.recovery_action_required_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_RECOVERY_ACTION_REQUIRED,
+        total_observations,
+    );
+    runtime.uncorrected_ecc_error_observation_count = online_health_count(
+        stats.uncorrected_ecc_error_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_UNCORRECTED_ECC,
+        total_observations,
+    );
+    runtime.max_uncorrected_ecc_errors = online_health_count(
+        stats.max_uncorrected_ecc_errors,
+        supported_metrics,
+        common::GPU_HEALTH_UNCORRECTED_ECC,
+        MAX_RUNTIME_ECC_ERRORS,
+    );
+    runtime.pending_page_retirement_observation_count = online_health_count(
+        stats.pending_page_retirement_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_PENDING_PAGE_RETIREMENT,
+        total_observations,
+    );
+    runtime.pending_row_remap_observation_count = online_health_count(
+        stats.pending_row_remap_observation_count,
+        supported_metrics,
+        common::GPU_HEALTH_PENDING_ROW_REMAP,
+        total_observations,
+    );
+}
+
+fn apply_online_sampling_stats(
+    runtime: &mut Runtime,
+    stats: &OnlineSamplingStats,
+    device_count: u32,
+) {
+    let Some(expected_sample_count) = stats
+        .expected_sample_count
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| (1..=MAX_RUNTIME_SAMPLE_COUNT).contains(value))
+    else {
+        return;
+    };
+    let Some(observed_sample_count) = stats
+        .observed_sample_count
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value <= MAX_RUNTIME_SAMPLE_COUNT)
+    else {
+        return;
+    };
+    let credited_sample_count = observed_sample_count.min(expected_sample_count);
+
+    runtime.history_policy_version = Some(ONLINE_HEARTBEAT_HISTORY_POLICY_VERSION.to_string());
+    runtime.sampling_interval_seconds = stats
+        .sampling_interval_seconds
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| (1..=MAX_RUNTIME_WINDOW_SECONDS).contains(value));
+    runtime.expected_sample_count = Some(expected_sample_count);
+    runtime.missing_sample_count = Some(expected_sample_count - credited_sample_count);
+    runtime.sample_coverage_percent =
+        Some(credited_sample_count as f64 * 100.0 / expected_sample_count as f64);
+    runtime.maximum_sample_gap_seconds = stats
+        .maximum_sample_gap_seconds
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value <= MAX_RUNTIME_WINDOW_SECONDS);
+
+    let Some(expected_gpu_count) = (1..=256).contains(&device_count).then_some(device_count) else {
+        return;
+    };
+    let Some(expected_gpu_observation_count) = expected_sample_count
+        .checked_mul(u64::from(expected_gpu_count))
+        .filter(|value| *value <= MAX_RUNTIME_GPU_OBSERVATION_COUNT)
+    else {
+        return;
+    };
+    let Some(gpu_observation_count) = stats
+        .gpu_observation_count
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value <= MAX_RUNTIME_GPU_OBSERVATION_COUNT)
+    else {
+        return;
+    };
+    runtime.expected_gpu_count = Some(expected_gpu_count);
+    runtime.gpu_observation_count = Some(gpu_observation_count);
+    runtime.missing_gpu_observation_count =
+        Some(expected_gpu_observation_count.saturating_sub(gpu_observation_count));
+}
+
+fn enrich_apple_unified_host_inventory(evidence: &mut Normalized) {
+    let is_macos = evidence.os.as_deref().is_some_and(|os| {
+        let os = os.trim();
+        os.eq_ignore_ascii_case("mac") || os.eq_ignore_ascii_case("macos")
+    });
+    if !is_macos || evidence.device_count != 1 || evidence.gpus.len() != 1 {
+        return;
+    }
+
+    let gpu = &evidence.gpus[0];
+    let audited_apple_unified = gpu
+        .canonical_model_id
+        .as_deref()
+        .is_some_and(|model| model.starts_with("apple-"))
+        && gpu
+            .interconnect
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("Unified memory"))
+        && gpu
+            .specification_source
+            .as_deref()
+            .is_some_and(|value| value.starts_with("https://www.apple.com/"));
+    if !audited_apple_unified {
+        return;
+    }
+
+    let Some(unified_memory_bytes) = evidence
+        .gpu_memory_bytes
+        .filter(|bytes| gpu.memory_bytes == Some(*bytes))
+    else {
+        return;
+    };
+    if evidence.cpu_model.is_none() {
+        evidence.cpu_model = gpu
+            .architecture
+            .as_deref()
+            .filter(|value| value.starts_with("Apple "))
+            .map(str::to_string);
+    }
+    if evidence.system_memory_bytes.is_none() {
+        evidence.system_memory_bytes = Some(unified_memory_bytes);
+    }
 }
 
 fn build_report(mut evidence: Normalized, benchmarks: Vec<Benchmark>) -> Report {
@@ -2475,6 +2902,201 @@ mod tests {
     }
 
     #[test]
+    fn mac_report_html_exposes_collected_metrics_and_marks_unsupported_health_metrics() {
+        let evidence = json!({
+            "hardware": {
+                "host": {"os": "mac"},
+                "gpus": [{
+                    "model": "Apple M1 Pro GPU",
+                    "vram_total_bytes": 17_179_869_184_u64
+                }],
+                "runtime_history": {
+                    "observation_count": 7,
+                    "observation_days": 1,
+                    "avg_gpu_utilization_percent": 13.228571428571428,
+                    "avg_temperature_c": 58.4,
+                    "avg_power_draw_w": 6.085714285714285
+                }
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+
+        let mut report = build_report(normalize_offline(&evidence, None).unwrap(), Vec::new());
+        let gpu = &mut report.hardware.gpus[0];
+        gpu.architecture = Some("Apple M1 Pro".to_string());
+        gpu.process_nm = Some(5.0);
+        gpu.memory_bandwidth_gbps = Some(200.0);
+        gpu.specification_version = Some("apple-2026-08-05".to_string());
+        let runtime = report.runtime.as_mut().unwrap();
+        runtime.online = Some(false);
+        runtime.cpu_usage_percent = Some(36.0);
+        runtime.memory_usage_percent = Some(88.0);
+        runtime.storage_usage_percent = Some(74.0);
+        runtime.gpu_memory_usage_percent = Some(88.0);
+        runtime.server_observation_days = Some(1);
+        apply_online_sampling_stats(
+            runtime,
+            &OnlineSamplingStats {
+                sampling_interval_seconds: Some(120),
+                expected_sample_count: Some(59),
+                observed_sample_count: Some(35),
+                maximum_sample_gap_seconds: Some(2_339),
+                gpu_observation_count: Some(35),
+            },
+            1,
+        );
+
+        let html = report_html::render(&report, "report-hash");
+        for expected in [
+            "CPU 使用率",
+            "36.00%",
+            "内存使用率",
+            "88.00%",
+            "存储使用率",
+            "74.00%",
+            "GPU 利用率",
+            "13.23%",
+            "GPU 温度",
+            "58.40 °C",
+            "GPU 功耗",
+            "6.09 W",
+            "59.32%",
+            "2339 秒",
+            "24",
+            "离线",
+            "Apple M1 Pro",
+            "5.00 nm",
+            "200.00 GB/s",
+            "暂无可信规格",
+            "Mac 客户端暂不支持",
+        ] {
+            assert!(
+                html.contains(expected),
+                "missing rendered value: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn online_sampling_stats_populate_coverage_gaps_and_gpu_observations() {
+        let stats = OnlineSamplingStats {
+            sampling_interval_seconds: Some(120),
+            expected_sample_count: Some(59),
+            observed_sample_count: Some(35),
+            maximum_sample_gap_seconds: Some(2_339),
+            gpu_observation_count: Some(35),
+        };
+        let mut runtime = Runtime::default();
+
+        apply_online_sampling_stats(&mut runtime, &stats, 1);
+
+        assert_eq!(
+            runtime.history_policy_version.as_deref(),
+            Some(ONLINE_HEARTBEAT_HISTORY_POLICY_VERSION)
+        );
+        assert_eq!(runtime.sampling_interval_seconds, Some(120));
+        assert_eq!(runtime.expected_sample_count, Some(59));
+        assert_eq!(runtime.missing_sample_count, Some(24));
+        assert!((runtime.sample_coverage_percent.unwrap() - 59.322_033_898_305_09).abs() < 1e-9);
+        assert_eq!(runtime.maximum_sample_gap_seconds, Some(2_339));
+        assert_eq!(runtime.expected_gpu_count, Some(1));
+        assert_eq!(runtime.gpu_observation_count, Some(35));
+        assert_eq!(runtime.missing_gpu_observation_count, Some(24));
+
+        let mut warnings = Vec::new();
+        let mut warning_codes = Vec::new();
+        append_runtime_health_warnings(Some(&runtime), &mut warnings, &mut warning_codes);
+        assert!(warning_codes.contains(&"RUNTIME_SAMPLE_COVERAGE_LOW".to_string()));
+        assert!(warning_codes.contains(&"GPU_OBSERVATION_INCOMPLETE".to_string()));
+    }
+
+    #[test]
+    fn online_sampling_stats_fail_closed_on_invalid_counts() {
+        let mut runtime = Runtime::default();
+        apply_online_sampling_stats(
+            &mut runtime,
+            &OnlineSamplingStats {
+                sampling_interval_seconds: Some(120),
+                expected_sample_count: Some(-1),
+                observed_sample_count: Some(1),
+                maximum_sample_gap_seconds: Some(0),
+                gpu_observation_count: Some(1),
+            },
+            1,
+        );
+        assert!(runtime.history_policy_version.is_none());
+        assert!(runtime.sample_coverage_percent.is_none());
+
+        apply_online_sampling_stats(
+            &mut runtime,
+            &OnlineSamplingStats {
+                sampling_interval_seconds: None,
+                expected_sample_count: Some(10),
+                observed_sample_count: Some(12),
+                maximum_sample_gap_seconds: Some(60),
+                gpu_observation_count: Some(12),
+            },
+            1,
+        );
+        assert_eq!(runtime.sample_coverage_percent, Some(100.0));
+        assert_eq!(runtime.missing_sample_count, Some(0));
+        assert_eq!(runtime.missing_gpu_observation_count, Some(0));
+    }
+
+    #[test]
+    fn apple_unified_memory_enriches_online_host_inventory() {
+        let evidence = json!({
+            "hardware": {
+                "host": {"os": "mac"},
+                "gpus": [{
+                    "model": "Apple M1 Pro GPU",
+                    "vram_total_bytes": 17_179_869_184_u64
+                }]
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+        let mut normalized = normalize_offline(&evidence, None).unwrap();
+        let gpu = &mut normalized.gpus[0];
+        gpu.canonical_model_id = Some("apple-m1-pro-gpu".to_string());
+        gpu.architecture = Some("Apple M1 Pro".to_string());
+        gpu.interconnect = Some("Unified memory".to_string());
+        gpu.specification_source = Some(
+            "https://www.apple.com/newsroom/2021/10/apple-unleashes-m1-pro-and-m1-max-for-the-macbook-pro/"
+                .to_string(),
+        );
+
+        enrich_apple_unified_host_inventory(&mut normalized);
+
+        assert_eq!(normalized.cpu_model.as_deref(), Some("Apple M1 Pro"));
+        assert_eq!(normalized.system_memory_bytes, Some(17_179_869_184_u64));
+    }
+
+    #[test]
+    fn apple_unified_memory_enrichment_fails_closed() {
+        let evidence = json!({
+            "hardware": {
+                "host": {"os": "Linux"},
+                "gpus": [{
+                    "model": "Apple M1 Pro GPU",
+                    "vram_total_bytes": 17_179_869_184_u64
+                }]
+            },
+            "attestation": {"payload_sha256": "abc123"}
+        });
+        let mut normalized = normalize_offline(&evidence, None).unwrap();
+        let gpu = &mut normalized.gpus[0];
+        gpu.canonical_model_id = Some("apple-m1-pro-gpu".to_string());
+        gpu.architecture = Some("Apple M1 Pro".to_string());
+        gpu.interconnect = Some("Unified memory".to_string());
+        gpu.specification_source = Some("https://www.apple.com/spec".to_string());
+
+        enrich_apple_unified_host_inventory(&mut normalized);
+
+        assert!(normalized.cpu_model.is_none());
+        assert!(normalized.system_memory_bytes.is_none());
+    }
+
+    #[test]
     fn unknown_runtime_policy_does_not_activate_health_metrics() {
         let evidence = json!({
             "hardware": {
@@ -2693,6 +3315,18 @@ mod tests {
         assert!(!query.download);
         let query: ReportHtmlQuery = serde_json::from_value(json!({"download": true})).unwrap();
         assert!(query.download);
+    }
+
+    #[test]
+    fn report_pdf_disposition_supports_preview_and_download() {
+        assert_eq!(
+            report_pdf_content_disposition("PRE-123", false),
+            "inline; filename=\"pre-evaluation-PRE-123.pdf\""
+        );
+        assert_eq!(
+            report_pdf_content_disposition("PRE-123", true),
+            "attachment; filename=\"pre-evaluation-PRE-123.pdf\""
+        );
     }
 
     #[test]

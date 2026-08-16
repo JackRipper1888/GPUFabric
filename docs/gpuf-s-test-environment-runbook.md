@@ -55,6 +55,18 @@ Edit `docker/.env.gpuf-s-test` before shared use:
 - `GPUF_TEST_POSTGRES_PASSWORD`: unique test DB password.
 - `GPUF_TEST_GATEWAY_TOKEN`: exactly 48 characters, used as Bearer token for
   the inference gateway seed row.
+- `GPUF_TEST_BANKING_API_TOKEN`: at least 32 characters, required by all
+  provider pre-evaluation endpoints.
+- `GPUF_TEST_BANKING_SERVICE_SUBJECT`: stable internal service subject used only
+  for hashed idempotency scope; do not put a user ID or tenant ID here.
+- `GPUF_TEST_BENCHMARK_PRODUCER_TOKEN`: separate token for the trusted
+  benchmark registration endpoint; never reuse the banking API token.
+- `GPUF_TEST_BENCHMARK_ED25519_PUBLIC_KEYS_JSON`: JSON object mapping approved
+  benchmark key IDs to base64 Ed25519 public keys; private keys remain in runners.
+- `GPUF_TEST_STORE_RAW_EVIDENCE`: keep `false` unless a reviewed retention need
+  requires temporary raw offline evidence.
+- `GPUF_TEST_RAW_EVIDENCE_TTL_DAYS`: raw evidence TTL from 1 to 90 days when
+  retention is enabled.
 - `GPUF_TEST_CLIENT_ID_HEX`: 32 hex characters, used by `gpuf-c --client-id`.
 
 Do not commit `docker/.env.gpuf-s-test`. The committed compose uses a dummy
@@ -119,7 +131,70 @@ docker compose --env-file docker/.env.gpuf-s-test \
   -f docker/gpuf_s_test_compose.yaml build gpuf-s api-server heartbeat-consumer
 ```
 
+To package a binary already built and tested on the local host, reuse the existing
+runtime image without compiling inside Docker:
+
+```bash
+cargo build --release -p gpuf-s --bin api_server
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+cp target/release/api_server "$STAGE/"
+docker build -f docker/Dockerfile.prebuilt-runtime \
+  --build-arg BASE_IMAGE=GPUFabric/api_server:latest \
+  --build-arg BIN=api_server \
+  -t GPUFabric/api_server:latest "$STAGE"
+```
+
+The local binary must be ABI-compatible with the runtime image. Run `ldd` and the
+API health check after packaging. This path changes only the binary layer and does
+not copy local environment files or credentials into the image.
+
 ## Deploy
+
+Apply the additive pre-evaluation migration before starting the new API binary:
+
+```bash
+set -a
+source docker/.env.gpuf-s-test
+set +a
+
+PGPASSWORD="$GPUF_TEST_POSTGRES_PASSWORD" psql \
+  -h 127.0.0.1 -p "$GPUF_TEST_POSTGRES_PORT" \
+  -U "$GPUF_TEST_POSTGRES_USER" -d "$GPUF_TEST_POSTGRES_DB" \
+  -f scripts/prod_schema_add_pre_evaluation_reports.sql
+
+PGPASSWORD="$GPUF_TEST_POSTGRES_PASSWORD" psql \
+  -h 127.0.0.1 -p "$GPUF_TEST_POSTGRES_PORT" \
+  -U "$GPUF_TEST_POSTGRES_USER" -d "$GPUF_TEST_POSTGRES_DB" \
+  -f scripts/prod_schema_add_technical_asset_snapshots_v2.sql
+
+PGPASSWORD="$GPUF_TEST_POSTGRES_PASSWORD" psql \
+  -h 127.0.0.1 -p "$GPUF_TEST_POSTGRES_PORT" \
+  -U "$GPUF_TEST_POSTGRES_USER" -d "$GPUF_TEST_POSTGRES_DB" \
+  -f scripts/prod_schema_complete_pre_evaluation_v1.sql
+
+PGPASSWORD="$GPUF_TEST_POSTGRES_PASSWORD" psql \
+  -h 127.0.0.1 -p "$GPUF_TEST_POSTGRES_PORT" \
+  -U "$GPUF_TEST_POSTGRES_USER" -d "$GPUF_TEST_POSTGRES_DB" \
+  -f scripts/prod_schema_add_gpu_health_daily_stats.sql
+```
+
+The API runtime account no longer creates or seeds these tables during startup.
+If an earlier experimental deployment contains JSONB snapshots or rows without
+`report_sha256`, the migration fails instead of marking those rows trustworthy.
+Export and review those legacy rows, then remove them through an approved test-data
+cleanup before rerunning the migration.
+
+Privacy defaults retain the offline evidence SHA-256 but not the original JSON.
+Existing raw evidence receives a 30-day transition expiry when this migration is
+applied, capped at 90 days from the original insert time. The API process sweeps
+expired evidence hourly. Operators can also run the equivalent cleanup manually:
+
+```sql
+UPDATE pre_evaluation_report_evidence
+SET evidence_json = NULL, retention_expires_at = NULL, purged_at = NOW()
+WHERE evidence_json IS NOT NULL AND retention_expires_at <= NOW();
+```
 
 ```bash
 docker compose --env-file docker/.env.gpuf-s-test \
@@ -191,14 +266,53 @@ target/debug/gpuf-c \
   --control-tls-server-name localhost
 ```
 
-Inference gateway request:
+Ollama proxy request:
 
 ```bash
-curl -sS -i http://127.0.0.1:18182/v1/completions \
-  -H "Authorization: Bearer $GPUF_TEST_GATEWAY_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "x-target-client-id: $GPUF_TEST_CLIENT_ID_HEX" \
-  -d '{"model":"qwen2.5-coder:3b","prompt":"Reply only: OK","max_tokens":8,"temperature":0.1,"stream":false}'
+curl -sS -i http://127.0.0.1:18180/v1/chat/completions -H "Authorization: Bearer $GPUF_TEST_GATEWAY_TOKEN" -H "Content-Type: application/json" -d "{\"model\":\"llama3.2:latest\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply only: OK\"}],\"max_tokens\":8,\"temperature\":0,\"stream\":false}"
+```
+
+Port `18180` validates the token, selects an online client that advertises the
+requested model, opens a temporary connection through the proxy port, and
+forwards the HTTP request to the client's configured local service. Use this path
+for `--engine-type ollama` clients.
+
+Port `18182` is the command-based inference gateway. Its completion, chat, and
+embedding tasks require a compatible `--engine-type llama` worker with a loaded
+model; it does not proxy requests to a local Ollama server. Existing clients may
+continue using either surface according to their configured engine type.
+
+## Optional Online Client Benchmark
+
+The online benchmark is disabled by default. Enable it only after setting the
+same HMAC identity for both `gpuf-s` and `api-server`:
+
+```dotenv
+GPUF_TEST_ONLINE_BENCHMARK_ENABLED=true
+GPUF_TEST_ONLINE_BENCHMARK_HMAC_SECRET=<shared-random-secret-at-least-32-bytes>
+GPUF_TEST_ONLINE_BENCHMARK_KEY_ID=gpuf-online-test-2026-08
+```
+
+Deploy the server components before the v3 desktop client. Protocol v1/v2
+clients never receive benchmark commands and continue to generate reports with
+no benchmark evidence. A v3 client receives at most one bounded task after it
+reports a local model. Missing models, task rejection, timeout, inference
+failure, invalid results, or evidence persistence failure are logged and never
+block heartbeat handling or report creation.
+
+Successful results create insert-only evidence for `tokens_per_second` and
+`sustained_throughput_percent`. The API revalidates the HMAC, stored payload,
+source reference, task claims, and raw trial counters whenever a new report is
+generated. Previously generated reports are immutable and are not rewritten.
+
+Build locally before updating the test services:
+
+```bash
+cargo test -p common --lib
+cargo test -p gpuf-c --lib benchmark::tests
+cargo test -p gpuf-s --lib
+cargo build --release -p gpuf-s --bin gpuf-s --bin api_server
+cargo build --release -p gpuf-c --bin gpuf-c --features metal
 ```
 
 ## Backup After Deploy

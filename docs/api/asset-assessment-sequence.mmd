@@ -2,117 +2,196 @@ sequenceDiagram
     autonumber
     actor User as Provider 浏览器
     participant N as new-api
+    participant C as gpuf-c / 受控离线采集器
     participant G as GPUFabric
-    participant C as hw-asset-collector
-    participant B as Benchmark Runner
     participant A as assessment-service
-    participant O as 对象存储
-    participant W as scanner/reviewer/signing
-    participant M as 市场提供方/核验器
+    participant O as 对象存储 / 事件桥
+    participant W as scanner / 审核工作台 / IAM
+    participant M as 市场数据 / 定价管理员
+    participant S as Renderer / Signer / TSA
 
-    User->>N: POST /assets，绑定在线引用或选择离线采集
+    Note over User,S: Beta 仅对白名单用户和资产开放；测试报告 testOnly=true、productionEligible=false
+
+    User->>N: POST /assets，绑定在线 client 或选择离线采集
     N->>N: 认证、OwnerScope、幂等、加密引用、保存 HMAC 摘要
     N-->>User: 201 assetRef
 
-    alt 在线预评估
-        User->>N: POST /pre-evaluations，assetRef + 少量 supplement
-        N->>G: POST /internal/v1/technical-pre-evaluations/from-client
-        G-->>N: 202 reportId
-        N-->>User: 202 taskRef，status=generating
-    else 离线预评估
-        User->>N: POST /pre-evaluations/offline-sessions
-        N->>G: challenge + 稳定 offlineAssetRef
-        G-->>N: collectorChallenge + expiresAt + sourceRef
-        N->>N: 保存 challenge SHA-256，校验稳定 sourceRef
-        N-->>User: 201 taskRef + collectorChallenge + benchmarkSourceRef
-        User->>C: challenge + 可选 runtime duration/interval
-        C->>C: 采集静态清单 + GPU 利用率/温度/功耗序列
-        C->>C: 追加 JSONL 历史并加载保留窗口，计算 observation_days
-        C-->>User: challenge-bound 原始 JSON
-        opt 提交前补齐可信 Benchmark
-            Note over N,B: sourceRef 经受控运维路径交付，浏览器不持有 producer Token/私钥
-            B->>B: 以 benchmarkSourceRef 运行至少 3 轮 workload
-            B->>G: 登记 Ed25519 签名的 LLM + 稳定性证据
-            G->>G: 按稳定 sourceRef 保存不可变 BenchmarkEvidence
+    rect rgb(235, 245, 255)
+        Note over C,G: 在线客户端内置采集与可信 Benchmark
+        C->>G: 认证连接，上报设备、模型、运行时和 GPU 健康观测
+        opt 协议 v3+ 且有可用模型
+            G->>C: 下发短时 challenge-bound BenchmarkTask
+            C->>C: 内置 Benchmark 模块执行至少 3 轮受控 workload
+            C->>G: BenchmarkResult + trial counters + parameters SHA-256
+            G->>G: 校验连接/challenge/时限并登记不可变 BenchmarkEvidence
         end
-        User->>N: POST /pre-evaluations/{taskRef}/evidence，原始采集 JSON
-        N->>G: from-evidence + 相同 offlineAssetRef
-        G->>G: 归一化 runtime；短于 7 天标记 SHORT_OBSERVATION_WINDOW
-        G->>G: 自动关联该 sourceRef 的有效签名 Benchmark
-        G-->>N: 202 不可变 reportId
-        N-->>User: 202 status=generating
+        Note over C,G: 旧客户端跳过可选 Benchmark，不影响连接和预评估；缺少有效 Benchmark 时正式评估会 technical_rejected
+
+        alt 在线预评估
+            User->>N: POST /pre-evaluations，assetRef + 少量 supplement
+            N->>G: POST /internal/v1/technical-pre-evaluations/from-client
+            G->>G: 归一化采样、健康观测和规格库，自动关联有效 Benchmark
+            G-->>N: 200 不可变 reportId、快照与 Hash
+            N-->>User: 202 taskRef，status=generating/generated
+        else 离线兼容路径
+            User->>N: POST /pre-evaluations/offline-sessions
+            N->>G: 请求 challenge + 稳定 offlineAssetRef
+            G-->>N: collectorChallenge + expiresAt + sourceRef
+            N->>N: 保存 challenge SHA-256，校验稳定 sourceRef
+            N-->>User: 201 taskRef + collectorChallenge
+            User->>C: challenge + runtime duration/interval
+            C->>C: 采集静态清单与利用率/温度/功耗序列
+            C-->>User: challenge-bound 原始 JSON
+            User->>N: POST /pre-evaluations/{taskRef}/evidence
+            N->>G: from-evidence + 相同 offlineAssetRef
+            G->>G: 归一化 runtime，关联同 sourceRef 的有效 Benchmark
+            G-->>N: 200 不可变 reportId、快照与 Hash
+            N-->>User: 202 status=generating/generated
+        end
+
+        loop 预评估查询
+            User->>N: GET /pre-evaluations/{taskRef}
+            N->>G: GET /internal/v1/technical-pre-evaluations/{reportId}
+            G-->>N: 状态、报告摘要、有效期和 reportSha256
+            N-->>User: 脱敏任务状态
+        end
+        opt 查看预评估 HTML
+            User->>N: GET /pre-evaluations/{taskRef}/html
+            N->>G: 获取冻结 HTML
+            G-->>N: HTML + X-Content-SHA256
+            N->>N: 限制大小、禁止重定向、重新计算 Hash
+            N-->>User: private, no-store HTML
+        end
     end
 
-    loop 预评估查询
-        User->>N: GET /pre-evaluations/{taskRef}
-        N->>G: GET /internal/v1/technical-pre-evaluations/{reportId}
-        G-->>N: 状态、报告摘要、reportSha256
-        N-->>User: 脱敏任务状态
-    end
-    opt 查看预评估 HTML
-        User->>N: GET /pre-evaluations/{taskRef}/html
-        N->>G: 获取冻结 HTML
-        G-->>N: HTML + X-Content-SHA256
-        N->>N: 限制大小、禁止重定向、重新计算 Hash
-        N-->>User: private, no-store HTML
-    end
+    rect rgb(239, 250, 242)
+        Note over User,A: 创建正式评估与材料上传
+        User->>N: POST /asset-assessments，preEvaluationTaskRef + T1/T2 + purpose
+        N->>N: 校验 generated、归属、Hash，派生 tenantRef/userRef
+        N->>A: POST /internal/v1/asset-assessments + Idempotency-Key
+        A->>G: 回读报告/快照并验证原始字节 Hash
+        A->>A: 重算 assetConfiguration Hash，执行分级 Benchmark 门禁
+        Note over A: T1 要求有效稳定性证据；T2 还要求有效 LLM 性能证据；估值和冻结时再次检查有效期
+        alt 技术与 Benchmark 门禁满足
+            A-->>N: 202 assessmentId，status=evidence_pending
+            N-->>User: 202 status=processing
+        else 缺失、过期或 Hash 不一致
+            A-->>N: 202 technical_rejected + errorCode
+            N-->>User: 终态失败和可重新采集提示
+        end
+        Note over User,A: 后续材料流程仅适用于门禁满足分支；technical_rejected 为终态
 
-    User->>N: POST /asset-assessments，preEvaluationTaskRef + T1/T2
-    N->>N: 校验 generated、归属、哈希，派生 tenantRef/userRef
-    N->>A: POST /internal/v1/asset-assessments，技术报告摘要 + 幂等键
-    A->>G: 读取报告/快照，验证字节 Hash
-    A->>A: 重算 assetConfiguration Hash，复核 Benchmark 分级
-    A-->>N: 201/202 assessmentId
-    N-->>User: 202 status=processing
+        A-->>N: signed callback，technical_* / evidence_pending
+        N->>N: 验签、事件去重、任务锁和状态投影
+        N-->>A: 200 EVENT_ACCEPTED
 
-    A-->>N: signed callback，technical_* / evidence_pending
-    N->>N: 验签、事件去重、锁任务、校验 assessmentId/clientRequestId/assetRef
-    N-->>A: 200 EVENT_ACCEPTED
-    User->>N: GET /asset-assessments/{id}
-    N-->>User: 当前 status、stage、progress、缺失项
+        User->>N: GET /{id}/evidence-requirements
+        N->>A: GET /internal/v1/asset-assessments/{id}/evidence-requirements
+        A-->>N: 材料类型、大小、MIME 和状态
+        N-->>User: 当前材料要求
+        loop 每个所需材料
+            User->>N: POST /{id}/evidence-sessions + SHA-256/length/MIME
+            N->>A: POST /internal/v1/asset-assessments/{id}/evidence-sessions
+            A->>A: 持久化 evidence session、对象 key、预期 Hash/长度和到期时间
+            A-->>N: evidenceId + 短时 PUT URL + requiredHeaders
+            N-->>User: 201 直传凭据；new-api 不持久化短时 URL
+            User->>O: PUT 文件并发送全部签名 Header
+            O->>A: HMAC 认证对象事件 + eventId/key/versionId/实际元数据
+            A->>A: 幂等入持久队列；校验租户/key/version/长度/MIME/SHA-256
+            Note over A,O: 失败自动重试并进入死信；积压告警；原生 S3/OSS 轮询作为恢复路径
+            A->>W: 私有短时扫描授权
+            W-->>A: 病毒、MIME、Hash 与 OCR 扫描结果
+        end
 
-    User->>N: GET /{id}/evidence-requirements
-    N->>A: GET /internal/v1/asset-assessments/{id}/evidence-requirements
-    A-->>N: 材料类型、大小、MIME、状态
-    N-->>User: 材料要求
-    User->>N: POST /{id}/evidence-sessions
-    N->>A: POST /internal/v1/asset-assessments/{id}/evidence-sessions
-    A-->>N: evidenceId + 短时 PUT URL + requiredHeaders
-    N-->>User: 201 直传凭据，不落库
-    User->>O: PUT 文件，使用校验后的 Header 和 SHA-256
-    O->>A: upload-completed 事件
-    A->>W: 扫描、Hash/MIME 校验、人工审核
-    W-->>A: clean + verify/reject；生命周期材料附 lifecycleFacts
-    A->>A: 保存成色/制造/启用/保修事实及 evidenceId
-    A-->>N: signed callback，evidence_reviewing / ready_for_valuation / changes_requested
-    N->>N: 更新本地状态投影和审计 outbox
-    N-->>A: 200 EVENT_ACCEPTED
-
-    M->>A: 写入授权市场样本 + 可复算 assetConfiguration Hash
-    M->>A: GET 待核验队列并读取私有原始对象
-    M->>A: verify/reject 市场样本
-    A->>A: 聚合至少 3 样本/2 来源的不可变市场快照
-    A->>A: 校验技术配置 = 市场配置，审核成色 = 快照成色
-
-    loop 估值、复核、冻结、签发
-        A-->>N: signed callback，valuating / review_pending / approved / issuing
-        User->>N: GET /asset-assessments/{id}
-        N-->>User: 当前阶段和进度
+        alt Beta 白名单测试自动化
+            A->>A: 自动核验测试材料并写入配置的 lifecycleFacts
+        else 生产材料审核
+            A->>W: 待审核队列 + 最小权限短时查看授权
+            W->>W: 实名身份、MFA/RBAC、OCR 对照和事实录入
+            W-->>A: verify/reject/request_changes；生命周期材料附 lifecycleFacts
+        end
+        A->>A: 保存成色、制造/启用/保修事实和 evidenceId 审计
+        A-->>N: signed callback，evidence_reviewing / ready_for_valuation / changes_requested
+        N-->>A: 200 EVENT_ACCEPTED
     end
 
-    A-->>N: signed callback，issued + report projection
-    N->>N: 保存 reportId 和 Hash，不保存报告 URL
-    User->>N: POST /{id}/downloads
-    N->>A: POST /internal/v1/reports/{reportId}/downloads
-    A->>O: 创建最长 120 秒 GET 授权
-    O-->>A: 短时下载 URL
-    A-->>N: URL + expiresAt
-    N->>N: 写入不含 URL 的下载审计，响应 no-store
-    N-->>User: 201 download grant
-    User->>O: GET 报告
-    O-->>User: PDF / 报告内容
+    rect rgb(255, 248, 235)
+        Note over A,M: 市场快照、策略审批与确定性估值
+        alt Beta 白名单测试数据
+            A->>A: 引用预置合成市场快照和已批准测试定价策略
+            A->>A: 将市场、策略和估值信任等级标记为 test_only
+        else 生产授权市场数据
+            M->>A: 写入授权成交/发票样本 + 原始对象引用
+            M->>A: 独立核验 verify/reject 市场样本
+            A->>A: 聚合至少 3 笔成交、2 个来源的不可变市场快照
+            M->>A: 创建 draft 定价策略
+            M->>A: 独立审批策略版本及生效范围
+        end
+        A->>A: 校验技术配置=市场配置、审核成色=快照成色
+        A->>A: 使用已存快照和已批准策略执行可复算估值
+        A->>A: 创建持久化正式审核任务
+        A-->>N: signed callback，valuating / review_pending
+    end
 
-    opt 撤销或过期
-        A-->>N: signed callback，revoked / expired
-        N->>N: 更新终态，后续下载拒绝
+    rect rgb(250, 242, 252)
+        Note over A,W: 双人正式审核和生产工作流边界
+        alt Beta 白名单测试自动化
+            A->>A: 分配两个不同测试 reviewer 并自动记录双人测试批准
+            Note over A: 仅允许 testOnly 报告，不得作为生产实名审核
+        else 生产工作流
+            A->>A: 持久任务、租约锁、幂等重试、超时升级和人工介入
+            W->>A: 使用企业 SSO/MFA/RBAC 查询并认领审核任务
+            W->>A: 管理员分配不同 primary / secondary reviewer
+            W->>A: primary 审核动作 + 授权快照
+            W->>A: secondary 独立审核动作 + 授权快照
+            Note over A,W: 生产 worker 只推进至人工审核，不自动越过实名双审
+        end
+        alt 双审批准且全部门禁仍满足
+            A->>A: 固化 collected/measured/catalog/reviewer/derived 来源与 trust level
+            A->>A: 再验 Benchmark、材料、估值和审核后冻结不可变 JSON/HTML
+            A-->>N: signed callback，approved / frozen / issuing
+        else 补件、拒绝或超时
+            A-->>N: signed callback，changes_requested / rejected / manual_intervention
+        end
+    end
+
+    rect rgb(245, 245, 245)
+        Note over A,S: 签发治理、可信签名与下载
+        alt 报告未冻结、补件、拒绝或需人工介入
+            A->>A: 不进入签发流程，保持当前受控状态
+        else 报告已冻结并申请签发
+            A->>S: 查询 Signer/TSA capability、证书链、key version 和健康状态
+            alt 签发授权、Signer 或 TSA 门禁不满足
+                A->>A: fail closed，保持 frozen，不生成 issued 报告
+                A-->>N: signed callback，frozen / issuance_failed
+            else 签发门禁全部满足
+                alt Beta 测试签发
+                    S-->>A: Chromium PDF + SoftHSM 签名 + 本地非可信时间戳
+                    A->>A: 校验测试签名并保持 productionEligible=false
+                else 生产签发
+                    S->>S: HSM/KMS/PKCS-11 不可导出私钥签名
+                    S->>S: RFC 3161 TSA 绑定签名摘要、nonce 和 policy OID
+                    S-->>A: PDF + detached signature + 证书链 + TSA token + 审计引用
+                    A->>A: 独立验证签名、证书链、TSA token 和能力快照一致性
+                end
+                A->>O: 私有保存已签发 PDF
+                A-->>N: signed callback，issued + reportId/Hash/validUntil
+                N->>N: 保存报告投影，不保存对象 key 或下载 URL
+
+                User->>N: POST /{id}/downloads
+                N->>A: POST /internal/v1/reports/{reportId}/downloads
+                A->>O: 创建最长 120 秒 GET 授权
+                O-->>A: 短时下载 URL
+                A-->>N: URL + expiresAt，响应 no-store
+                N-->>User: 201 download grant
+                User->>O: GET 报告
+                O-->>User: PDF / 报告内容
+            end
+        end
+
+        opt 紧急撤销或到期
+            Note over A,S: 撤销不依赖 Renderer、Signer 或 TSA 在线
+            A-->>N: signed callback，revoked / expired
+            N->>N: 更新终态，后续下载拒绝
+        end
     end

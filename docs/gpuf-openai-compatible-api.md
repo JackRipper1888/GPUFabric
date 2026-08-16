@@ -604,7 +604,7 @@ The gateway generally returns OpenAI-style error JSON:
 ```json
 {
   "error": {
-    "message": "No available Android devices found",
+    "message": "No available compute clients found",
     "type": "api_error",
     "code": 503
   }

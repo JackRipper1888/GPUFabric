@@ -4,7 +4,8 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
+use hmac::{Hmac, Mac};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ use std::{
 use crate::{
     api_server::{pre_evaluation, ApiServer},
     db::benchmark_evidence::{self, BenchmarkEvidenceInsert, RegistrationResult},
+    handle::online_benchmark::AcceptedBenchmark,
     util::msg::ApiResponse,
 };
 
@@ -33,6 +35,14 @@ enum BenchmarkKeyStatus {
     Revoked,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BenchmarkKeyPurpose {
+    #[default]
+    TestOnly,
+    PerformanceClaim,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManagedBenchmarkKeyConfig {
@@ -40,6 +50,8 @@ struct ManagedBenchmarkKeyConfig {
     status: BenchmarkKeyStatus,
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
+    #[serde(default)]
+    purpose: BenchmarkKeyPurpose,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +65,7 @@ enum BenchmarkKeyConfigValue {
 struct BenchmarkVerificationKey {
     public_key: Vec<u8>,
     status: BenchmarkKeyStatus,
+    purpose: BenchmarkKeyPurpose,
     not_before: Option<DateTime<Utc>>,
     not_after: Option<DateTime<Utc>>,
 }
@@ -64,6 +77,11 @@ impl BenchmarkVerificationKey {
 
     fn accepts_evidence_tested_at(&self, tested_at: &DateTime<Utc>) -> bool {
         self.status != BenchmarkKeyStatus::Revoked && self.valid_at(tested_at)
+    }
+
+    fn accepts_report_evidence_at(&self, tested_at: &DateTime<Utc>) -> bool {
+        self.purpose == BenchmarkKeyPurpose::PerformanceClaim
+            && self.accepts_evidence_tested_at(tested_at)
     }
 
     fn valid_at(&self, timestamp: &DateTime<Utc>) -> bool {
@@ -85,6 +103,31 @@ pub struct SignedBenchmarkEnvelope {
     pub signature_base64: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OnlineBenchmarkClaims {
+    protocol_version: u32,
+    model: String,
+    task_id: String,
+    challenge_sha256: String,
+    trials: Vec<OnlineBenchmarkTrialClaim>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OnlineBenchmarkTrialClaim {
+    completion_tokens: u32,
+    duration_ns: u64,
+    output_sha256: String,
+}
+
+struct OnlineBenchmarkConfig {
+    key_id: String,
+    secret: Vec<u8>,
+}
+
+type OnlineBenchmarkHmac = Hmac<Sha256>;
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BenchmarkPayload {
@@ -100,6 +143,8 @@ struct BenchmarkPayload {
     tested_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     parameters_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    online_claims: Option<OnlineBenchmarkClaims>,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +220,233 @@ pub async fn register(
     })))
 }
 
+pub async fn register_online_benchmark(
+    pool: &sqlx::PgPool,
+    accepted: &AcceptedBenchmark,
+) -> anyhow::Result<()> {
+    let config = configured_online_benchmark()
+        .map_err(|_| anyhow::anyhow!("invalid online benchmark HMAC configuration"))?
+        .ok_or_else(|| anyhow::anyhow!("online benchmark HMAC is disabled"))?;
+    let source_ref = crate::db::pre_evaluation::online_source_id(&accepted.client_id.to_string());
+    let parameters_sha256 = hex::encode(accepted.task.parameters_sha256);
+    let claims = OnlineBenchmarkClaims {
+        protocol_version: common::COMMAND_V1_ONLINE_BENCHMARK_VERSION,
+        model: accepted.task.workload.model.clone(),
+        task_id: accepted.task.task_id.clone(),
+        challenge_sha256: format!("{:x}", Sha256::digest(accepted.task.challenge)),
+        trials: accepted
+            .result
+            .trials
+            .iter()
+            .map(|trial| OnlineBenchmarkTrialClaim {
+                completion_tokens: trial.completion_tokens,
+                duration_ns: trial.duration_ns,
+                output_sha256: hex::encode(trial.output_sha256),
+            })
+            .collect(),
+    };
+    // PostgreSQL TIMESTAMPTZ stores microseconds. Sign the same timestamp that
+    // will be read back so row-to-payload verification remains exact.
+    let tested_at = postgres_timestamp_precision(accepted.tested_at);
+    let expires_at = tested_at + Duration::days(7);
+
+    for (suffix, metric, value, unit) in [
+        (
+            "tps",
+            "tokens_per_second",
+            accepted.tokens_per_second,
+            "tokens/s",
+        ),
+        (
+            "sustained",
+            "sustained_throughput_percent",
+            accepted.sustained_throughput_percent,
+            "percent",
+        ),
+    ] {
+        let evidence_id = format!("online-{}-{}", suffix, uuid::Uuid::new_v4().simple());
+        let payload = BenchmarkPayload {
+            schema_version: BENCHMARK_SCHEMA_VERSION.to_string(),
+            evidence_id: evidence_id.clone(),
+            source_ref: source_ref.clone(),
+            suite: "GPUFabric-Client-Online".to_string(),
+            suite_version: "1.0".to_string(),
+            task: "LLM generation".to_string(),
+            metric: metric.to_string(),
+            value,
+            unit: unit.to_string(),
+            tested_at,
+            expires_at,
+            parameters_sha256: parameters_sha256.clone(),
+            online_claims: Some(claims.clone()),
+        };
+        validate_payload(&payload)
+            .map_err(|_| anyhow::anyhow!("generated online benchmark payload is invalid"))?;
+        let payload_json = serde_json::to_string(&payload)?;
+        let payload_sha256 = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
+        let mut mac = <OnlineBenchmarkHmac as Mac>::new_from_slice(&config.secret)
+            .map_err(|_| anyhow::anyhow!("invalid online benchmark HMAC secret"))?;
+        mac.update(payload_json.as_bytes());
+        let signature_base64 = STANDARD.encode(mac.finalize().into_bytes());
+        let result = benchmark_evidence::register(
+            pool,
+            BenchmarkEvidenceInsert {
+                evidence_id: &evidence_id,
+                source_ref: &source_ref,
+                suite: &payload.suite,
+                suite_version: &payload.suite_version,
+                task: &payload.task,
+                metric: &payload.metric,
+                value: payload.value,
+                unit: &payload.unit,
+                tested_at: payload.tested_at,
+                expires_at: payload.expires_at,
+                parameters_sha256: &parameters_sha256,
+                key_id: &config.key_id,
+                payload_sha256: &payload_sha256,
+                payload_json: &payload_json,
+                signature_base64: &signature_base64,
+            },
+        )
+        .await?;
+        if matches!(result, RegistrationResult::Conflict) {
+            return Err(anyhow::anyhow!("online benchmark evidence id conflict"));
+        }
+    }
+    Ok(())
+}
+
+fn postgres_timestamp_precision(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    timestamp
+        .with_nanosecond(timestamp.nanosecond() / 1_000 * 1_000)
+        .expect("truncated nanoseconds are always valid")
+}
+
+fn configured_online_benchmark() -> Result<Option<OnlineBenchmarkConfig>, ()> {
+    let enabled = std::env::var("GPUF_ONLINE_BENCHMARK_ENABLED")
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if !enabled {
+        return Ok(None);
+    }
+    let secret = std::env::var("GPUF_ONLINE_BENCHMARK_HMAC_SECRET").map_err(|_| ())?;
+    let key_id = std::env::var("GPUF_ONLINE_BENCHMARK_KEY_ID").map_err(|_| ())?;
+    if secret.as_bytes().len() < 32
+        || !is_internal_key_id(&key_id)
+        || validate_identifier(&key_id, 64).is_err()
+    {
+        return Err(());
+    }
+    Ok(Some(OnlineBenchmarkConfig {
+        key_id,
+        secret: secret.into_bytes(),
+    }))
+}
+
+fn is_internal_key_id(key_id: &str) -> bool {
+    key_id.starts_with("gpuf-online-")
+}
+
+fn verify_online_evidence(evidence: &benchmark_evidence::StoredBenchmarkEvidence) -> bool {
+    let Ok(Some(config)) = configured_online_benchmark() else {
+        return false;
+    };
+    verify_online_evidence_with_config(evidence, &config)
+}
+
+fn verify_online_evidence_with_config(
+    evidence: &benchmark_evidence::StoredBenchmarkEvidence,
+    config: &OnlineBenchmarkConfig,
+) -> bool {
+    if evidence.key_id != config.key_id
+        || evidence.payload_sha256
+            != format!("{:x}", Sha256::digest(evidence.payload_json.as_bytes()))
+    {
+        return false;
+    }
+    let Ok(signature) = STANDARD.decode(evidence.signature_base64.as_bytes()) else {
+        return false;
+    };
+    let Ok(mut mac) = <OnlineBenchmarkHmac as Mac>::new_from_slice(&config.secret) else {
+        return false;
+    };
+    mac.update(evidence.payload_json.as_bytes());
+    if mac.verify_slice(&signature).is_err() {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_str::<BenchmarkPayload>(&evidence.payload_json) else {
+        return false;
+    };
+    if validate_payload(&payload).is_err()
+        || payload.evidence_id != evidence.evidence_id
+        || payload.source_ref != evidence.source_ref
+        || payload.suite != evidence.suite
+        || payload.suite_version != evidence.suite_version
+        || payload.task != evidence.task
+        || payload.metric != evidence.metric
+        || payload.value.to_bits() != evidence.value.to_bits()
+        || payload.unit != evidence.unit
+        || payload.tested_at != evidence.tested_at
+        || payload.expires_at != evidence.expires_at
+        || payload.parameters_sha256 != evidence.parameters_sha256
+    {
+        return false;
+    }
+    let Some(claims) = payload.online_claims.as_ref() else {
+        return false;
+    };
+    let Some((tokens_per_second, sustained_percent)) = online_metrics(claims) else {
+        return false;
+    };
+    let expected = match payload.metric.as_str() {
+        "tokens_per_second" if payload.unit == "tokens/s" => tokens_per_second,
+        "sustained_throughput_percent" if payload.unit == "percent" => sustained_percent,
+        _ => return false,
+    };
+    nearly_equal(payload.value, expected)
+}
+
+fn online_metrics(claims: &OnlineBenchmarkClaims) -> Option<(f64, f64)> {
+    if claims.protocol_version != common::COMMAND_V1_ONLINE_BENCHMARK_VERSION
+        || claims.model.trim().is_empty()
+        || claims.model.len() > 256
+        || claims.task_id.is_empty()
+        || claims.task_id.len() > 128
+        || !is_hex(&claims.challenge_sha256, 64)
+        || !(3..=5).contains(&claims.trials.len())
+    {
+        return None;
+    }
+    let mut rates = Vec::with_capacity(claims.trials.len());
+    for trial in &claims.trials {
+        if trial.completion_tokens == 0
+            || trial.duration_ns == 0
+            || trial.duration_ns > 5 * 60 * 1_000_000_000
+            || !is_hex(&trial.output_sha256, 64)
+        {
+            return None;
+        }
+        let rate = trial.completion_tokens as f64 * 1_000_000_000.0 / trial.duration_ns as f64;
+        if !rate.is_finite() || rate <= 0.0 {
+            return None;
+        }
+        rates.push(rate);
+    }
+    rates.sort_by(|left, right| left.total_cmp(right));
+    let middle = rates.len() / 2;
+    let median = if rates.len() % 2 == 0 {
+        (rates[middle - 1] + rates[middle]) / 2.0
+    } else {
+        rates[middle]
+    };
+    let sustained = rates[0] / rates[rates.len() - 1] * 100.0;
+    Some((median, sustained))
+}
+
+fn nearly_equal(left: f64, right: f64) -> bool {
+    (left - right).abs() <= 1e-9_f64.max(right.abs() * 1e-9)
+}
+
 pub async fn load_for_report(
     pool: &sqlx::PgPool,
     evidence_ids: &[String],
@@ -188,39 +460,40 @@ pub async fn load_for_report(
         {
             return Ok(Vec::new());
         }
-        let keyring = configured_keyring()?;
-        let allowed_key_ids: Vec<_> = keyring
-            .iter()
-            .filter(|(_, key)| key.status != BenchmarkKeyStatus::Revoked)
-            .map(|(key_id, _)| key_id.clone())
-            .collect();
-        let candidates = benchmark_evidence::list_valid_for_source(
+        let candidates = benchmark_evidence::list_valid_for_source_all(
             pool,
             source_ref,
             now,
-            &allowed_key_ids,
             MAX_EVIDENCE_CANDIDATES,
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let keyring = configured_keyring().unwrap_or_default();
         return Ok(select_benchmarks_for_report(candidates, &keyring)
             .into_iter()
             .map(to_report_benchmark)
             .collect());
     }
-    let keyring = configured_keyring()?;
+    let mut keyring = None;
     let mut benchmarks = Vec::with_capacity(evidence_ids.len());
     for evidence_id in evidence_ids {
         let evidence = benchmark_evidence::get(pool, evidence_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-        if evidence.source_ref != source_ref
-            || evidence.expires_at <= now
-            || !keyring
-                .get(&evidence.key_id)
-                .is_some_and(|key| key.accepts_evidence_tested_at(&evidence.tested_at))
-        {
+        let trusted = if verify_online_evidence(&evidence) {
+            true
+        } else {
+            if keyring.is_none() {
+                keyring = Some(configured_keyring()?);
+            }
+            keyring.as_ref().is_some_and(|keyring| {
+                keyring
+                    .get(&evidence.key_id)
+                    .is_some_and(|key| key.accepts_report_evidence_at(&evidence.tested_at))
+            })
+        };
+        if evidence.source_ref != source_ref || evidence.expires_at <= now || !trusted {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
         benchmarks.push(to_report_benchmark(evidence));
@@ -236,9 +509,10 @@ fn select_benchmarks_for_report(
     candidates
         .into_iter()
         .filter(|evidence| {
-            keyring
-                .get(&evidence.key_id)
-                .is_some_and(|key| key.accepts_evidence_tested_at(&evidence.tested_at))
+            verify_online_evidence(evidence)
+                || keyring
+                    .get(&evidence.key_id)
+                    .is_some_and(|key| key.accepts_report_evidence_at(&evidence.tested_at))
         })
         .filter(|evidence| selected_metrics.insert(evidence.metric.to_lowercase()))
         .take(MAX_EVIDENCE_IDS)
@@ -325,10 +599,14 @@ fn parse_keyring(
     let mut public_keys = BTreeSet::new();
     for (key_id, value) in encoded {
         validate_identifier(&key_id, 64).map_err(|_| ())?;
-        let (public_key_base64, status, not_before, not_after) = match value {
-            BenchmarkKeyConfigValue::Legacy(public_key_base64) if !require_metadata => {
-                (public_key_base64, BenchmarkKeyStatus::Active, None, None)
-            }
+        let (public_key_base64, status, purpose, not_before, not_after) = match value {
+            BenchmarkKeyConfigValue::Legacy(public_key_base64) if !require_metadata => (
+                public_key_base64,
+                BenchmarkKeyStatus::Active,
+                BenchmarkKeyPurpose::TestOnly,
+                None,
+                None,
+            ),
             BenchmarkKeyConfigValue::Legacy(_) => return Err(()),
             BenchmarkKeyConfigValue::Managed(config) => {
                 if config.not_after <= config.not_before {
@@ -337,6 +615,7 @@ fn parse_keyring(
                 (
                     config.public_key_base64,
                     config.status,
+                    config.purpose,
                     Some(config.not_before),
                     Some(config.not_after),
                 )
@@ -353,6 +632,7 @@ fn parse_keyring(
             BenchmarkVerificationKey {
                 public_key,
                 status,
+                purpose,
                 not_before,
                 not_after,
             },
@@ -420,6 +700,15 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    #[test]
+    fn online_timestamps_are_normalized_to_postgres_precision() {
+        let timestamp = timestamp("2026-08-11T09:05:53.731468030Z");
+        let normalized = postgres_timestamp_precision(timestamp);
+
+        assert_eq!(normalized.to_rfc3339(), "2026-08-11T09:05:53.731468+00:00");
+        assert_eq!(normalized.nanosecond() % 1_000, 0);
+    }
+
     fn stored_evidence(
         evidence_id: &str,
         metric: &str,
@@ -440,6 +729,8 @@ mod tests {
             parameters_sha256: "b".repeat(64),
             key_id: key_id.to_string(),
             payload_sha256: "c".repeat(64),
+            payload_json: String::new(),
+            signature_base64: String::new(),
         }
     }
 
@@ -537,24 +828,34 @@ mod tests {
     #[test]
     fn automatic_selection_skips_revoked_latest_evidence_and_falls_back() {
         let tested_at = timestamp("2026-07-27T00:00:00Z");
-        let valid_key = |status| BenchmarkVerificationKey {
+        let valid_key = |status, purpose| BenchmarkVerificationKey {
             public_key: vec![1_u8; 32],
             status,
+            purpose,
             not_before: Some(timestamp("2026-07-01T00:00:00Z")),
             not_after: Some(timestamp("2027-07-01T00:00:00Z")),
         };
         let keyring = BTreeMap::from([
             (
                 "runner-revoked".to_string(),
-                valid_key(BenchmarkKeyStatus::Revoked),
+                valid_key(
+                    BenchmarkKeyStatus::Revoked,
+                    BenchmarkKeyPurpose::PerformanceClaim,
+                ),
             ),
             (
                 "runner-retired".to_string(),
-                valid_key(BenchmarkKeyStatus::Retired),
+                valid_key(
+                    BenchmarkKeyStatus::Retired,
+                    BenchmarkKeyPurpose::PerformanceClaim,
+                ),
             ),
             (
                 "runner-active".to_string(),
-                valid_key(BenchmarkKeyStatus::Active),
+                valid_key(
+                    BenchmarkKeyStatus::Active,
+                    BenchmarkKeyPurpose::PerformanceClaim,
+                ),
             ),
         ]);
         let selected = select_benchmarks_for_report(
@@ -590,6 +891,164 @@ mod tests {
     }
 
     #[test]
+    fn report_selection_rejects_test_only_keys_by_default() {
+        let tested_at = timestamp("2026-07-27T00:00:00Z");
+        let keyring_json = json!({
+            "runner-test": {
+                "publicKeyBase64": STANDARD.encode([1_u8; 32]),
+                "status": "active",
+                "notBefore": "2026-07-01T00:00:00Z",
+                "notAfter": "2027-07-01T00:00:00Z"
+            },
+            "runner-claim": {
+                "publicKeyBase64": STANDARD.encode([2_u8; 32]),
+                "status": "active",
+                "purpose": "performance_claim",
+                "notBefore": "2026-07-01T00:00:00Z",
+                "notAfter": "2027-07-01T00:00:00Z"
+            }
+        })
+        .to_string();
+        let keyring = parse_keyring(&keyring_json, true).unwrap();
+
+        assert_eq!(
+            keyring["runner-test"].purpose,
+            BenchmarkKeyPurpose::TestOnly
+        );
+        assert!(!keyring["runner-test"].accepts_report_evidence_at(&tested_at));
+        assert!(keyring["runner-claim"].accepts_report_evidence_at(&tested_at));
+
+        let selected = select_benchmarks_for_report(
+            vec![
+                stored_evidence("bench-test", "tokens_per_second", "runner-test", tested_at),
+                stored_evidence(
+                    "bench-claim",
+                    "tokens_per_second",
+                    "runner-claim",
+                    tested_at - Duration::minutes(1),
+                ),
+            ],
+            &keyring,
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].evidence_id, "bench-claim");
+    }
+
+    #[test]
+    fn automatic_selection_skips_external_evidence_without_a_valid_keyring() {
+        let selected = select_benchmarks_for_report(
+            vec![stored_evidence(
+                "bench-external",
+                "tokens_per_second",
+                "runner-unconfigured",
+                timestamp("2026-07-27T00:00:00Z"),
+            )],
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    fn signed_online_evidence() -> (
+        benchmark_evidence::StoredBenchmarkEvidence,
+        OnlineBenchmarkConfig,
+    ) {
+        let tested_at = postgres_timestamp_precision(Utc::now());
+        let claims = OnlineBenchmarkClaims {
+            protocol_version: common::COMMAND_V1_ONLINE_BENCHMARK_VERSION,
+            model: "qwen3:8b".to_string(),
+            task_id: "online-test".to_string(),
+            challenge_sha256: "d".repeat(64),
+            trials: vec![
+                OnlineBenchmarkTrialClaim {
+                    completion_tokens: 40,
+                    duration_ns: 1_000_000_000,
+                    output_sha256: "1".repeat(64),
+                },
+                OnlineBenchmarkTrialClaim {
+                    completion_tokens: 45,
+                    duration_ns: 1_000_000_000,
+                    output_sha256: "2".repeat(64),
+                },
+                OnlineBenchmarkTrialClaim {
+                    completion_tokens: 50,
+                    duration_ns: 1_000_000_000,
+                    output_sha256: "3".repeat(64),
+                },
+            ],
+        };
+        let payload = BenchmarkPayload {
+            schema_version: BENCHMARK_SCHEMA_VERSION.to_string(),
+            evidence_id: "online-tps-test".to_string(),
+            source_ref: "a".repeat(64),
+            suite: "GPUFabric-Client-Online".to_string(),
+            suite_version: "1.0".to_string(),
+            task: "LLM generation".to_string(),
+            metric: "tokens_per_second".to_string(),
+            value: 45.0,
+            unit: "tokens/s".to_string(),
+            tested_at,
+            expires_at: tested_at + Duration::days(7),
+            parameters_sha256: "b".repeat(64),
+            online_claims: Some(claims),
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let config = OnlineBenchmarkConfig {
+            key_id: "gpuf-online-test".to_string(),
+            secret: b"test-only-online-benchmark-hmac-secret".to_vec(),
+        };
+        let mut mac = <OnlineBenchmarkHmac as Mac>::new_from_slice(&config.secret).unwrap();
+        mac.update(payload_json.as_bytes());
+        let signature_base64 = STANDARD.encode(mac.finalize().into_bytes());
+        (
+            benchmark_evidence::StoredBenchmarkEvidence {
+                evidence_id: payload.evidence_id,
+                source_ref: payload.source_ref,
+                suite: payload.suite,
+                suite_version: payload.suite_version,
+                task: payload.task,
+                metric: payload.metric,
+                value: payload.value,
+                unit: payload.unit,
+                tested_at: payload.tested_at,
+                expires_at: payload.expires_at,
+                parameters_sha256: payload.parameters_sha256,
+                key_id: config.key_id.clone(),
+                payload_sha256: format!("{:x}", Sha256::digest(payload_json.as_bytes())),
+                payload_json,
+                signature_base64,
+            },
+            config,
+        )
+    }
+
+    #[test]
+    fn normalized_online_evidence_survives_postgres_timestamp_round_trip() {
+        let (mut evidence, config) = signed_online_evidence();
+
+        evidence.tested_at = postgres_timestamp_precision(evidence.tested_at);
+        evidence.expires_at = postgres_timestamp_precision(evidence.expires_at);
+
+        assert!(verify_online_evidence_with_config(&evidence, &config));
+    }
+    #[test]
+    fn internal_hmac_evidence_is_reverified_against_row_and_claims() {
+        let (mut evidence, config) = signed_online_evidence();
+        assert!(verify_online_evidence_with_config(&evidence, &config));
+
+        evidence.value = 44.0;
+        assert!(!verify_online_evidence_with_config(&evidence, &config));
+
+        let (mut evidence, config) = signed_online_evidence();
+        evidence.signature_base64 = STANDARD.encode([0_u8; 32]);
+        assert!(!verify_online_evidence_with_config(&evidence, &config));
+
+        let (mut evidence, config) = signed_online_evidence();
+        evidence.payload_json.push(' ');
+        assert!(!verify_online_evidence_with_config(&evidence, &config));
+    }
+
+    #[test]
     fn stored_evidence_maps_to_report_reference() {
         let tested_at = Utc::now();
         let report = to_report_benchmark(benchmark_evidence::StoredBenchmarkEvidence {
@@ -606,6 +1065,8 @@ mod tests {
             parameters_sha256: "b".repeat(64),
             key_id: "runner-key".to_string(),
             payload_sha256: "c".repeat(64),
+            payload_json: String::new(),
+            signature_base64: String::new(),
         });
         assert_eq!(report.evidence_id, "bench-1");
         assert_eq!(report.metric, "tokens_per_second");

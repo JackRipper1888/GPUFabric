@@ -101,18 +101,22 @@ GPUFabric 从 `device_daily_stats` 聚合出的至少 7 个自然日在线观测
 `runtime.serverObservationDays` 给出后者/前者的服务端计数；本地文件覆盖范围继续由
 `runtime.observationDays` 表示，两者不得混用。
 
-collector 从 `gpuf.runtime_history.v1` 起提供以下采样质量和 GPU 健康事实。GPUFabric
-只在 `runtime.historyPolicyVersion` 精确匹配该版本时接收这些字段；`null` 表示旧
-collector、驱动不支持或输入越界，`0` 表示支持该指标且未观察到事件。
+离线 collector 从 `gpuf.runtime_history.v1` 起提供以下采样质量和 GPU 健康事实。在线
+`from-client` 报告使用 `gpuf.online_heartbeat_history.v1`，按每个 UTC 自然日第一条至
+最后一条已存心跳的实际窗口计算采样质量，不假定设备全天在线。目标间隔来自
+`heartbeat_config_daily`（默认 120 秒），节点/GPU 实际观测分别来自去重后的
+`client_daily_stats` / `device_daily_stats`，最大间隔来自原始 `heartbeat` 时间戳。
+在线旧协议尚未提供下表中的 GPU 健康事件，因此只填充采样质量和逐卡缺口字段。
+`null` 表示来源数据不足、驱动不支持或输入越界，`0` 表示支持该指标且未观察到事件。
 
 | 报告字段 | 含义 |
 | --- | --- |
-| `historyPolicyVersion` | 运行历史统计口径，当前为 `gpuf.runtime_history.v1` |
-| `samplingIntervalSeconds` | collector 配置的目标采样间隔 |
+| `historyPolicyVersion` | 运行历史统计口径：离线为 `gpuf.runtime_history.v1`，在线为 `gpuf.online_heartbeat_history.v1` |
+| `samplingIntervalSeconds` | collector 配置或服务端每日心跳配置的目标采样间隔；跨日配置不一致时可为 `null` |
 | `expectedSampleCount` / `missingSampleCount` | 按窗口和目标间隔推导的应采次数及缺失次数 |
-| `sampleCoveragePercent` | `min(observationCount, expectedSampleCount) / expectedSampleCount`，低于 90% 产生 `RUNTIME_SAMPLE_COVERAGE_LOW` |
-| `maximumSampleGapSeconds` | 相邻有效样本之间的最大时间差 |
-| `expectedGpuCount` / `gpuObservationCount` / `missingGpuObservationCount` | `nvidia-smi` 可见 GPU 数、实际逐卡观测数及缺失数；缺失数大于 0 产生 `GPU_OBSERVATION_INCOMPLETE` |
+| `sampleCoveragePercent` | `min(observedSampleCount, expectedSampleCount) / expectedSampleCount`，低于 90% 产生 `RUNTIME_SAMPLE_COVERAGE_LOW` |
+| `maximumSampleGapSeconds` | 同一 UTC 自然日内相邻有效样本之间的最大时间差 |
+| `expectedGpuCount` / `gpuObservationCount` / `missingGpuObservationCount` | 可见 GPU 数、实际逐卡观测数及缺失数；缺失数大于 0 产生 `GPU_OBSERVATION_INCOMPLETE` |
 | `highTemperatureObservationCount` | 达到 GPU T.Limit 的逐卡观测数；驱动不提供 T.Limit 时使用 85 C |
 | `nearPowerLimitObservationCount` | 功耗达到 enforced power limit 95% 的逐卡观测数；高负载下可为正常事实，不单独产生告警 |
 | `clockLimitObservationCount` | 除 GPU idle 外存在活动时钟限制原因的逐卡观测数 |
@@ -146,7 +150,7 @@ internal 离线请求示例：
 POST /api/banking/provider/benchmark-evidence
 ```
 
-只接受 Ed25519 签名的原始 `payloadJson`，并验证设备 `sourceRef`、参数 SHA-256、测试时间和有效期。报告只能引用已登记、未过期、key 状态可用且与技术来源一致的证据。`scripts/run_signed_ollama_benchmark.sh` 最少执行 3 轮，并分别登记 LLM 吞吐和持续吞吐百分比两条证据。
+只接受 Ed25519 签名的原始 `payloadJson`，并验证设备 `sourceRef`、参数 SHA-256、测试时间和有效期。报告只能引用已登记、未过期、key 状态可用、用途为 `performance_claim` 且与技术来源一致的证据。`test_only` key 登记的证据仅用于链路测试，不进入报告也不参与评分。`scripts/run_signed_ollama_benchmark.sh` 最少执行 3 轮，并分别登记 LLM 吞吐和持续吞吐百分比两条证据。
 
 生产配置使用 managed keyring，并设置 `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`：
 
@@ -155,13 +159,14 @@ POST /api/banking/provider/benchmark-evidence
   "runner-prod-2026q3": {
     "publicKeyBase64": "<32-byte Ed25519 public key, base64>",
     "status": "active",
+    "purpose": "performance_claim",
     "notBefore": "2026-07-01T00:00:00Z",
     "notAfter": "2027-07-01T00:00:00Z"
   }
 }
 ```
 
-`active` 可登记和引用，`retired` 禁止新登记但保留有效期内旧证据引用，`revoked`
+`active` 可登记，只有 `performance_claim` 用途可被报告引用；`retired` 禁止新登记但保留有效期内旧证据引用，`revoked`
 立即禁止该 key 的证据进入新报告。使用
 `scripts/manage_benchmark_keyring.sh issue KEY_ID PRIVATE_KEY KEYRING_JSON` 签发，
 使用 `transition KEY_ID retired|revoked KEYRING_JSON` 单向变更状态。常规轮换先部署

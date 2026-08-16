@@ -85,6 +85,8 @@ fn command_label(command: &Command) -> &'static str {
             CommandV1::InferenceResult { .. } => "v1.inference_result",
             CommandV1::InferenceResultChunk { .. } => "v1.inference_result_chunk",
             CommandV1::EmbeddingResult { .. } => "v1.embedding_result",
+            CommandV1::BenchmarkTask { .. } => "v1.benchmark_task",
+            CommandV1::BenchmarkResult { .. } => "v1.benchmark_result",
             CommandV1::ModelDownloadProgress { .. } => "v1.model_download_progress",
         },
         Command::V2(_) => "v2.command",

@@ -11,7 +11,22 @@ use zeroize::Zeroize;
 
 pub const COMMAND_V1_BASE_VERSION: u32 = 1;
 pub const COMMAND_V1_EMBEDDING_TASKS_VERSION: u32 = 2;
-pub const CURRENT_COMMAND_V1_VERSION: u32 = COMMAND_V1_EMBEDDING_TASKS_VERSION;
+pub const COMMAND_V1_ONLINE_BENCHMARK_VERSION: u32 = 3;
+pub const COMMAND_V1_GPU_HEALTH_VERSION: u32 = 4;
+pub const CURRENT_COMMAND_V1_VERSION: u32 = COMMAND_V1_GPU_HEALTH_VERSION;
+pub const SERVER_CAPABILITY_GPU_HEALTH: u64 = 1 << 0;
+
+pub const GPU_HEALTH_HIGH_TEMPERATURE: u64 = 1 << 0;
+pub const GPU_HEALTH_NEAR_POWER_LIMIT: u64 = 1 << 1;
+pub const GPU_HEALTH_CLOCK_LIMIT: u64 = 1 << 2;
+pub const GPU_HEALTH_THERMAL_THROTTLE: u64 = 1 << 3;
+pub const GPU_HEALTH_POWER_THROTTLE: u64 = 1 << 4;
+pub const GPU_HEALTH_HARDWARE_SLOWDOWN: u64 = 1 << 5;
+pub const GPU_HEALTH_RECOVERY_ACTION_REQUIRED: u64 = 1 << 6;
+pub const GPU_HEALTH_UNCORRECTED_ECC: u64 = 1 << 7;
+pub const GPU_HEALTH_PENDING_PAGE_RETIREMENT: u64 = 1 << 8;
+pub const GPU_HEALTH_PENDING_ROW_REMAP: u64 = 1 << 9;
+pub const GPU_HEALTH_ALL_METRICS: u64 = (1 << 10) - 1;
 
 #[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
 pub struct Model {
@@ -19,6 +34,71 @@ pub struct Model {
     pub object: String,
     pub created: u64,
     pub owned_by: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+pub struct GpuHealthDeviceSnapshot {
+    pub device_index: u16,
+    pub supported_metrics: u64,
+    pub unsupported_metrics: u64,
+    pub observed_events: u64,
+    pub uncorrected_ecc_errors: Option<u64>,
+}
+
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+pub struct GpuHealthSnapshot {
+    pub client_id: [u8; 16],
+    pub devices: Vec<GpuHealthDeviceSnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone, PartialEq)]
+pub struct BenchmarkWorkload {
+    pub model: String,
+    pub prompt: String,
+    pub trial_count: u8,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub top_k: u32,
+    pub top_p: f32,
+    pub repeat_penalty: f32,
+    pub repeat_last_n: i32,
+    pub min_keep: u32,
+}
+
+impl BenchmarkWorkload {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        let config = bincode_config::standard()
+            .with_big_endian()
+            .with_fixed_int_encoding();
+        bincode::encode_to_vec(self, config)
+    }
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone, PartialEq)]
+pub struct BenchmarkTask {
+    pub task_id: String,
+    pub challenge: [u8; 32],
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub parameters_sha256: [u8; 32],
+    pub workload: BenchmarkWorkload,
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone, PartialEq, Eq)]
+pub struct BenchmarkTrial {
+    pub completion_tokens: u32,
+    pub duration_ns: u64,
+    pub output_sha256: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone, PartialEq, Eq)]
+pub struct BenchmarkResult {
+    pub task_id: String,
+    pub challenge: [u8; 32],
+    pub parameters_sha256: [u8; 32],
+    pub success: bool,
+    pub trials: Vec<BenchmarkTrial>,
+    pub error: Option<String>,
 }
 
 // Device information from client to server
@@ -363,6 +443,16 @@ pub enum CommandV1 {
         error: Option<String>,
         prompt_tokens: u32,
     },
+
+    // Optional server-driven benchmark commands require login version 3.
+    // Keep these variants at the end to preserve all previous discriminants.
+    BenchmarkTask {
+        task: BenchmarkTask,
+    },
+
+    BenchmarkResult {
+        result: BenchmarkResult,
+    },
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -587,6 +677,13 @@ pub enum CommandV2 {
         error: Option<String>,
         output_sha256: Option<[u8; 32]>,
     },
+
+    /// Optional capabilities granted by a protocol-v4 server. New clients must
+    /// receive this message before sending any v4 telemetry to an older peer.
+    ServerCapabilities { capabilities: u64 },
+
+    /// Point-in-time GPU health observations from an authenticated v4 client.
+    GpuHealthSnapshot { snapshot: GpuHealthSnapshot },
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
@@ -1385,4 +1482,133 @@ async fn test_embedding_task_result_roundtrip() {
         }
         _ => panic!("unexpected embedding result variant"),
     }
+}
+
+#[test]
+fn command_v1_previous_discriminants_are_stable() {
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+    let task = Command::V1(CommandV1::EmbeddingTask {
+        task_id: String::new(),
+        model: String::new(),
+        input: Vec::new(),
+        normalize: false,
+    });
+    let result = Command::V1(CommandV1::EmbeddingResult {
+        task_id: String::new(),
+        success: false,
+        embeddings: Vec::new(),
+        error: None,
+        prompt_tokens: 0,
+    });
+
+    let task_bytes = bincode::encode_to_vec(task, config).unwrap();
+    let result_bytes = bincode::encode_to_vec(result, config).unwrap();
+    assert_eq!(&task_bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 13]);
+    assert_eq!(&result_bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 14]);
+}
+
+#[test]
+fn benchmark_task_result_roundtrip() {
+    let workload = BenchmarkWorkload {
+        model: "qwen3:8b".to_string(),
+        prompt: "Write a deterministic benchmark response.".to_string(),
+        trial_count: 3,
+        max_tokens: 64,
+        temperature: 0.0,
+        top_k: 1,
+        top_p: 1.0,
+        repeat_penalty: 1.0,
+        repeat_last_n: 0,
+        min_keep: 1,
+    };
+    let task = BenchmarkTask {
+        task_id: "benchmark-1".to_string(),
+        challenge: [7; 32],
+        issued_at_unix_ms: 1_700_000_000_000,
+        expires_at_unix_ms: 1_700_000_300_000,
+        parameters_sha256: [8; 32],
+        workload: workload.clone(),
+    };
+    let result = BenchmarkResult {
+        task_id: task.task_id.clone(),
+        challenge: task.challenge,
+        parameters_sha256: task.parameters_sha256,
+        success: true,
+        trials: vec![BenchmarkTrial {
+            completion_tokens: 64,
+            duration_ns: 1_000_000_000,
+            output_sha256: [9; 32],
+        }],
+        error: None,
+    };
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+
+    let task_command = Command::V1(CommandV1::BenchmarkTask { task: task.clone() });
+    let result_command = Command::V1(CommandV1::BenchmarkResult {
+        result: result.clone(),
+    });
+    let task_bytes = bincode::encode_to_vec(task_command, config).unwrap();
+    let result_bytes = bincode::encode_to_vec(result_command, config).unwrap();
+    let (decoded_task, _) = bincode::decode_from_slice::<Command, _>(&task_bytes, config).unwrap();
+    let (decoded_result, _) =
+        bincode::decode_from_slice::<Command, _>(&result_bytes, config).unwrap();
+
+    assert!(matches!(
+        decoded_task,
+        Command::V1(CommandV1::BenchmarkTask { task: decoded }) if decoded == task
+    ));
+    assert!(matches!(
+        decoded_result,
+        Command::V1(CommandV1::BenchmarkResult { result: decoded }) if decoded == result
+    ));
+    assert!(!workload.canonical_bytes().unwrap().is_empty());
+}
+
+#[test]
+fn gpu_health_protocol_v4_roundtrip_and_prior_discriminants_are_stable() {
+    let config = bincode_config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+    let previous = Command::V2(CommandV2::P2PUsageReceipt {
+        source_client_id: [0; 16],
+        target_client_id: [0; 16],
+        connection_id: [0; 16],
+        task_id: String::new(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        analysis_tokens: 0,
+        final_tokens: 0,
+        success: true,
+        error: None,
+        output_sha256: None,
+    });
+    let snapshot = GpuHealthSnapshot {
+        client_id: [4; 16],
+        devices: vec![GpuHealthDeviceSnapshot {
+            device_index: 0,
+            supported_metrics: GPU_HEALTH_ALL_METRICS,
+            unsupported_metrics: 0,
+            observed_events: GPU_HEALTH_POWER_THROTTLE,
+            uncorrected_ecc_errors: Some(2),
+        }],
+    };
+    let health = Command::V2(CommandV2::GpuHealthSnapshot {
+        snapshot: snapshot.clone(),
+    });
+
+    let previous_bytes = bincode::encode_to_vec(previous, config).unwrap();
+    assert_eq!(&previous_bytes[..8], &[0, 0, 0, 1, 0, 0, 0, 20]);
+
+    let health_bytes = bincode::encode_to_vec(health, config).unwrap();
+    let (decoded, _) = bincode::decode_from_slice::<Command, _>(&health_bytes, config).unwrap();
+    assert!(matches!(
+        decoded,
+        Command::V2(CommandV2::GpuHealthSnapshot { snapshot: decoded })
+            if decoded == snapshot
+    ));
 }

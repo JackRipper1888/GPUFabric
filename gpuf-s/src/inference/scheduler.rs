@@ -17,6 +17,8 @@ use common::{
     OutputPhase, COMMAND_V1_EMBEDDING_TASKS_VERSION,
 };
 
+pub(crate) const NO_AVAILABLE_COMPUTE_CLIENTS: &str = "No available compute clients found";
+
 // Type aliases for easier function signatures
 // Note: Can't create type alias for enum variants in Rust
 
@@ -1568,7 +1570,7 @@ impl InferenceScheduler {
         }
     }
 
-    /// Select best Android device for inference
+    /// Select the best authenticated client for inference.
     async fn select_best_device(
         &self,
         allowed_client_ids: Option<&[ClientId]>,
@@ -1580,12 +1582,12 @@ impl InferenceScheduler {
 
         let mut consider_device =
             |client_id: &ClientId, client_info: &crate::handle::ClientInfo| {
-                // Only consider authenticated Android devices
+                // Only authenticated clients can receive inference tasks.
                 if !client_info.authed {
                     return;
                 }
 
-                // Check if device has system info (Android devices should have this)
+                // System information is required for load-aware selection.
                 let Some(system_info) = &client_info.system_info else {
                     return;
                 };
@@ -1625,7 +1627,7 @@ impl InferenceScheduler {
             );
             Ok(client_id)
         } else {
-            Err(anyhow!("No available Android devices found"))
+            Err(anyhow!(NO_AVAILABLE_COMPUTE_CLIENTS))
         }
     }
 
@@ -1960,6 +1962,18 @@ mod tests {
             CachePolicy::Reset
         );
         assert!(CachePolicy::parse(Some("force")).is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_client_pool_reports_platform_neutral_error() {
+        let scheduler = InferenceScheduler::new(Arc::new(Mutex::new(HashMap::new())));
+
+        let error = scheduler
+            .select_best_device(None)
+            .await
+            .expect_err("an empty client pool must be unavailable");
+
+        assert_eq!(error.to_string(), NO_AVAILABLE_COMPUTE_CLIENTS);
     }
 
     #[test]

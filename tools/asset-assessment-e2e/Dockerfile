@@ -18,12 +18,16 @@ RUN sed -i "s|http://deb.debian.org|http://${APT_MIRROR}|g" /etc/apt/sources.lis
         clamav \
         clamav-daemon \
         curl \
+        fontconfig \
         fonts-liberation \
+        fonts-noto-cjk \
         libsofthsm2 \
         opensc \
         poppler-utils \
         softhsm2 \
         tesseract-ocr \
+    && fc-cache -f \
+    && fc-match 'Noto Sans CJK SC' | grep -q 'NotoSansCJK' \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/e2e-support /usr/local/bin/e2e-support

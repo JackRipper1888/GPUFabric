@@ -577,6 +577,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 🔒 Security
 
+- Review the [security policy](SECURITY.md) before production deployment or vulnerability reporting
+- Review the [pre-evaluation privacy and threat model](docs/pre-evaluation-privacy-and-threat-model.md) before enabling asset reports
 - Loopback defaults for local management APIs and explicit public-listen deployment choices
 - Database-backed authentication with token validation
 - Redis caching for performance without compromising security

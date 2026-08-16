@@ -1,6 +1,6 @@
 [package]
 name = "gpuf-c"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 
 [lib]
@@ -104,7 +104,7 @@ multimodal = ["llama-cpp-2/mtmd"]
 cpu = ["llama-cpp-2/openmp", "multimodal"]
 
 # CUDA support (NVIDIA GPU)
-cuda = ["llama-cpp-2/cuda", "multimodal", "nvml-wrapper"]
+cuda = ["llama-cpp-2/cuda", "multimodal", "nvml"]
 
 # Metal support (Apple GPU - iOS/macOS)
 metal = ["llama-cpp-2/metal", "multimodal"]

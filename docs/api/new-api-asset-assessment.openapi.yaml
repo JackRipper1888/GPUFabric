@@ -228,21 +228,45 @@ paths:
       - $ref: '#/components/parameters/TaskRef'
     get:
       tags: [Banking Pre-evaluations]
-      summary: Get integrity-checked frozen HTML
+      summary: Legacy path alias returning a verified PDF
       operationId: getPreEvaluationHtml
       parameters:
         - $ref: '#/components/parameters/NewApiUser'
       responses:
         '200':
-          description: Frozen report HTML
+          description: Rendered PDF report (legacy path alias)
           headers:
             Cache-Control:
               schema: {type: string, example: 'private, no-store'}
-            Content-Security-Policy:
-              schema: {type: string}
+            X-Content-SHA256:
+              schema: {$ref: '#/components/schemas/Sha256'}
           content:
-            text/html:
-              schema: {type: string}
+            application/pdf:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/banking/provider/pre-evaluations/{taskRef}/pdf:
+    parameters:
+      - $ref: '#/components/parameters/TaskRef'
+    get:
+      tags: [Banking Pre-evaluations]
+      summary: Get a verified PDF pre-evaluation report
+      operationId: getPreEvaluationPdf
+      parameters:
+        - $ref: '#/components/parameters/NewApiUser'
+      responses:
+        '200':
+          description: Rendered PDF report
+          headers:
+            Cache-Control:
+              schema: {type: string, example: 'private, no-store'}
+            X-Content-SHA256:
+              schema: {$ref: '#/components/schemas/Sha256'}
+          content:
+            application/pdf:
+              schema: {type: string, format: binary}
         '404': {$ref: '#/components/responses/NotFound'}
         '502': {$ref: '#/components/responses/BadGateway'}
         '503': {$ref: '#/components/responses/Unavailable'}

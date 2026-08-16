@@ -1275,7 +1275,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gpuf-c"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "android_logger",
  "anyhow",

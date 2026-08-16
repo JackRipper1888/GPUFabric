@@ -1,5 +1,6 @@
 pub mod handle_agent;
 pub mod handle_connections;
+pub mod online_benchmark;
 
 use crate::db::{models::ClientModelClass, models::HotModelClass};
 use crate::inference::InferenceScheduler;
@@ -181,6 +182,7 @@ pub struct ServerState {
     #[allow(dead_code)] // Kafka producer
     pub producer: Arc<FutureProducer>,
     pub inference_scheduler: Arc<InferenceScheduler>,
+    pub online_benchmark: online_benchmark::OnlineBenchmarkCoordinator,
     pub client_model: Arc<ClientModelClass>,
     pub hot_models: Arc<HotModelClass>,
     pub cert_chain: Arc<Vec<CertificateDer<'static>>>,
@@ -271,6 +273,7 @@ pub async fn new_server_state(args: &cmd::Args) -> Result<ServerState, anyhow::E
         priv_key: Arc::new(priv_key),
         hot_models: Arc::new(HotModelClass::new(db_pool.clone())),
         client_model: Arc::new(ClientModelClass::new(db_pool.clone())),
+        online_benchmark: online_benchmark::OnlineBenchmarkCoordinator::new(),
         inference_scheduler,
     };
     // If monitor flag is set, just print monitoring data and exit

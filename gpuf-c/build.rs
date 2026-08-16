@@ -233,18 +233,25 @@ fn main() {
         println!("cargo:rerun-if-env-changed=CUDA_HOME");
         println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
-        let cuda_roots = env::var("CUDA_HOME")
-            .ok()
+        let mut cuda_roots: Vec<String> = ["CUDA_HOME", "CUDA_PATH"]
             .into_iter()
-            .chain(env::var("CUDA_PATH").ok())
-            .chain([
-                "/usr/local/cuda".to_string(),
-                "/usr/local/cuda-13".to_string(),
-                "/usr/local/cuda-13.0".to_string(),
-            ]);
+            .filter_map(|name| env::var(name).ok())
+            .collect();
+        if cuda_roots.is_empty() {
+            cuda_roots = [
+                "/usr/local/cuda",
+                "/usr/local/cuda-13",
+                "/usr/local/cuda-13.0",
+                "/usr",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        }
+        cuda_roots.dedup();
 
         for root in cuda_roots {
-            for suffix in ["lib64", "targets/x86_64-linux/lib"] {
+            for suffix in ["lib64", "targets/x86_64-linux/lib", "lib/x86_64-linux-gnu"] {
                 let lib_dir = PathBuf::from(&root).join(suffix);
                 if lib_dir.join("libcudart.so").exists() {
                     println!("cargo:rustc-link-search=native={}", lib_dir.display());

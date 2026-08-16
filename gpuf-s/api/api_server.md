@@ -900,7 +900,7 @@ SHA-256-derived scope is persisted.
 
 ### POST `/api/banking/provider/benchmark-evidence`
 
-A controlled benchmark runner registers signed evidence before a pre-evaluation references it through `benchmarkEvidenceIds`. Registration uses a separate `GPUF_BENCHMARK_PRODUCER_TOKEN`. The server selects `keyId` from `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` and verifies the exact UTF-8 `payloadJson` bytes with Ed25519. Production must set `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`; each managed entry contains `publicKeyBase64`, `status=active|retired|revoked`, `notBefore`, and `notAfter`. Only a currently valid active key can register evidence. Retired keys retain already registered evidence signed within their validity window, while revoked-key evidence is immediately excluded from new reports. The payload binds a 64-hex technical `sourceRef`, parameter SHA-256, test time, and a maximum 30-day validity window. Evidence rows are insert-only.
+A controlled benchmark runner registers signed evidence before a pre-evaluation references it through `benchmarkEvidenceIds`. Registration uses a separate `GPUF_BENCHMARK_PRODUCER_TOKEN`. The server selects `keyId` from `GPUF_BENCHMARK_ED25519_PUBLIC_KEYS_JSON` and verifies the exact UTF-8 `payloadJson` bytes with Ed25519. Production must set `GPUF_BENCHMARK_REQUIRE_KEY_METADATA=true`; each managed entry contains `publicKeyBase64`, `status=active|retired|revoked`, `purpose=test_only|performance_claim`, `notBefore`, and `notAfter`. Missing purpose fails closed as `test_only`. Only evidence signed by a `performance_claim` key may enter a report or contribute to its score; test-only keys can exercise registration without creating performance claims. Only a currently valid active key can register evidence. Retired keys retain already registered evidence signed within their validity window, while revoked-key evidence is immediately excluded from new reports. The payload binds a 64-hex technical `sourceRef`, parameter SHA-256, test time, and a maximum 30-day validity window. Evidence rows are insert-only.
 
 When `benchmarkEvidenceIds` is non-empty, the server loads exactly those evidence records and rejects an unavailable key status. An empty list auto-selects the latest unexpired, non-revoked signed record for each metric under the current technical `sourceRef`; if the newest record was revoked it falls back to the prior usable record for that metric. `scripts/run_signed_ollama_benchmark.sh` registers separate `tokens_per_second` and `sustained_throughput_percent` records in one run. Auto-selection never crosses devices, accepts expired evidence, or executes caller-supplied commands.
 
@@ -965,6 +965,16 @@ count receives the seven-day long-observation completeness/score credit. Until
 then the report includes `SERVER_OBSERVATION_WINDOW_SHORT` and the next action
 `COLLECT_SERVER_RUNTIME_OBSERVATIONS`.
 
+Online `from-client` reports use `gpuf.online_heartbeat_history.v1` for sampling
+quality. For each UTC day, the evaluated window starts at the first stored heartbeat
+and ends at the last stored heartbeat; it does not assume that the client was online
+for the rest of the day. The target interval comes from `heartbeat_config_daily`
+(default 120 seconds), observed samples come from the deduplicated
+`client_daily_stats` buckets, and per-GPU observations come from
+`device_daily_stats`. Raw heartbeat timestamps provide the maximum within-day gap.
+GPUFabric emits these fields only when the timestamped and daily records can be joined;
+invalid or incomplete inputs fail closed to `null`.
+
 For `gpuf.runtime_history.v1`, the normalized `runtime` object and frozen HTML
 also expose sampling coverage/gaps, missing per-GPU observations, temperature
 and power thresholds, clock/thermal/power slowdown events, driver recovery
@@ -990,6 +1000,20 @@ SHA-256 is checked before returning the document. Missing reports return HTTP `4
 
 Returns the frozen technical pre-evaluation HTML bytes. `Content-Type` is `text/html; charset=utf-8`; `ETag` and `X-Content-SHA256` declare the `gpuf.report-html-bytes.v1` byte hash. Reads recompute the hash and fail with HTTP `500` on mismatch. The HTML contains technical facts, trusted benchmarks, and structured gaps only.
 Service callers send `Authorization: Bearer <GPUF_BANKING_API_TOKEN>` and use the URL without a query string for `Content-Disposition: inline`, or add `?download=true` for `attachment`. Both modes return `Cache-Control: private, no-store`, a restrictive CSP, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: SAMEORIGIN`. The `preview_url` and `download_url` fields from `/api/user/client_list` target these modes. Browsers must use a session-authenticated BFF that verifies report ownership and adds the token server-side; do not expose the banking token to browser code.
+
+### GET `/api/banking/provider/pre-evaluations/{reportId}/pdf`
+
+Renders the immutable HTML through `assessment-report-support` Chromium and
+returns a real PDF. The endpoint verifies the renderer response, `%PDF-` magic,
+size, and SHA-256 before returning `Content-Type: application/pdf`. The default
+disposition is `inline`; `?download=true` returns `attachment`. Both include
+`X-Content-SHA256` and `Cache-Control: private, no-store`.
+
+Required server configuration is `GPUF_REPORT_SUPPORT_URL`,
+`GPUF_REPORT_SUPPORT_RENDERER_TOKEN`, and optionally
+`GPUF_REPORT_SUPPORT_RENDERER_SUBJECT` (default `asset-assessment-service`).
+`/api/user/client_list` now exposes this PDF endpoint in `preview_url` and
+`download_url`; the HTML endpoint remains for internal compatibility only.
 
 
 ### GET `/internal/v1/technical-pre-evaluations/{reportId}`
@@ -1196,8 +1220,44 @@ Get model download progress from Redis.
 
 # Points APIs
 
+## GET `/api/user/points/summary`
+Query cumulative, current-day, and current-month points earned by a user's devices.
+The summary can optionally be narrowed to a client, client name, GPU model, or one
+physical device. The unfiltered request supplies the points-center summary card.
+
+"Today" and "current month" use the PostgreSQL session's `CURRENT_DATE`. Deployments
+must configure the database session timezone to the product's accounting timezone.
+
+### Query Parameters
+| Param | Type | Optional | Notes |
+|---|---:|:---:|---|
+| user_id | string | No | 1..64 characters; joins via `gpu_assets.user_id` |
+| client_id | string | Yes | client id **hex string (32 chars)**; exact client |
+| client_name | string | Yes | fuzzy match using `ILIKE '%...%'` |
+| device_id | number | Yes | GPU model/device type id |
+| device_index | number | Yes | physical device index within a client; combine with `client_id` for an exact device |
+
+### Response `ApiResponse<PointsSummaryResponse>`
+| Field | Type | Notes |
+|---|---:|---|
+| total_points | number | cumulative positive points through `as_of_date` |
+| today_points | number | positive points on `as_of_date` |
+| month_points | number | positive points from the first day of the current month through `as_of_date` |
+| as_of_date | string | database accounting date, `YYYY-MM-DD` |
+
+Point totals are truncated, not rounded, to two decimal places, matching the existing
+device-points list.
+
+### Example
+```bash
+curl "http://<host>:18081/api/user/points/summary?user_id=1"
+curl "http://<host>:18081/api/user/points/summary?user_id=1&client_id=<client-id-32-hex>&device_index=0"
+```
+
+---
+
 ## GET `/api/user/points`
-Query a user’s points list (based on materialized view `device_points_daily`).
+Query a user's device points records, aggregated by device and accounting date from the `device_points_daily` table.
 
 ### Query Parameters
 | Param | Type | Optional | Notes |
@@ -1206,6 +1266,7 @@ Query a user’s points list (based on materialized view `device_points_daily`).
 | client_id | string | Yes | client id **hex string (32 chars)**; filters by exact client |
 | client_name | string | Yes | fuzzy match by `gpu_assets.client_name` using `ILIKE '%...%'` |
 | device_id | number | Yes | `INT` device id |
+| device_index | number | Yes | physical device index within a client; combine with `client_id` for an exact device |
 | start_date | string | Yes | `YYYY-MM-DD` |
 | end_date | string | Yes | `YYYY-MM-DD` |
 | page | number | Yes | 1..100, default 1 |
@@ -1230,6 +1291,9 @@ Query a user’s points list (based on materialized view `device_points_daily`).
 | total_heartbeats | number |
 | device_name | string |
 | device_id | number |
+| device_index | number |
+| contributed_hours | number | accounted contribution hours for this date |
+| tflops | number\|null | configured device compute capacity |
 | points | number |
 
 ### Example

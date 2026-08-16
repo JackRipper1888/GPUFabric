@@ -8,6 +8,7 @@ pub mod models;
 pub mod points;
 pub mod pre_evaluation;
 pub mod report_html;
+pub mod report_pdf;
 pub mod technical_snapshot;
 
 use anyhow::Result;

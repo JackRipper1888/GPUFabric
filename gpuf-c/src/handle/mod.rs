@@ -65,6 +65,7 @@ pub struct ClientWorker {
     args: Args,
     cancel_state: Arc<CancelState>,
     connection_closed: Arc<AtomicBool>,
+    gpu_health_started: Arc<AtomicBool>,
     #[cfg(not(target_os = "android"))]
     engine: Arc<Mutex<Option<AnyEngine>>>,
     #[cfg(target_os = "android")]

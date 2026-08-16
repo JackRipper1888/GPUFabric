@@ -258,7 +258,10 @@ async fn parse_request(
                 .and_then(|h| h.strip_prefix("Bearer "))
                 .map(str::to_string);
 
-            info!("authorization api_key: {:?}", api_key);
+            debug!(
+                authorization_present = api_key.is_some(),
+                "Parsed public proxy authorization header"
+            );
             // Get Content-Length
             let content_length = req
                 .headers
@@ -611,8 +614,10 @@ async fn extract_chat_info<R: AsyncRead + Unpin>(
         .map(|s| s.to_string());
 
     debug!(
-        "api_key: {:?}, request_id: {:?}, content_type: {:?}",
-        api_key, request_id, content_type
+        authorization_present = api_key.is_some(),
+        request_id_present = request_id.is_some(),
+        content_type = content_type.as_deref().unwrap_or("none"),
+        "Parsed public proxy request headers"
     );
 
     debug!("buffer.len: {} body_start: {} ", buffer.len(), body_start);
