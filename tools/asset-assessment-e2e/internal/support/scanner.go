@@ -41,14 +41,21 @@ type OCRExtractor interface {
 }
 
 type CLIExtractor struct {
+	pdfToText string
 	pdfToPPM  string
 	tesseract string
 	timeout   time.Duration
 	runner    commandRunner
 }
 
-func NewCLIExtractor(pdfToPPM, tesseract string, timeout time.Duration) *CLIExtractor {
-	return &CLIExtractor{pdfToPPM: pdfToPPM, tesseract: tesseract, timeout: timeout, runner: execCommandRunner{}}
+func NewCLIExtractor(pdfToText, pdfToPPM, tesseract string, timeout time.Duration) *CLIExtractor {
+	return &CLIExtractor{
+		pdfToText: pdfToText,
+		pdfToPPM:  pdfToPPM,
+		tesseract: tesseract,
+		timeout:   timeout,
+		runner:    execCommandRunner{},
+	}
 }
 
 func (extractor *CLIExtractor) Extract(ctx context.Context, content []byte, contentType string) (string, error) {
@@ -65,6 +72,13 @@ func (extractor *CLIExtractor) Extract(ctx context.Context, content []byte, cont
 	}
 	ocrPath := inputPath
 	if canonicalContentType(contentType) == "application/pdf" {
+		text, textErr := extractor.runner.Run(ctx, nil, nil, extractor.pdfToText,
+			"-f", "1", "-l", "1", "-nopgbrk", inputPath, "-")
+		if textErr == nil {
+			if text = []byte(strings.TrimSpace(string(text))); len(text) > 0 {
+				return string(text), nil
+			}
+		}
 		prefix := filepath.Join(directory, "page")
 		if _, err := extractor.runner.Run(ctx, nil, nil, extractor.pdfToPPM,
 			"-f", "1", "-singlefile", "-r", "150", "-png", inputPath, prefix); err != nil {

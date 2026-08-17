@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("initialize non-production HSM identity: %v", err)
 	}
 	malware := support.NewClamDClient(config.ClamAVAddr, config.ScanTimeout)
-	ocr := support.NewCLIExtractor(config.PDFToPPMPath, config.TesseractPath, config.ScanTimeout)
+	ocr := support.NewCLIExtractor(config.PDFToTextPath, config.PDFToPPMPath, config.TesseractPath, config.ScanTimeout)
 	scanner := support.NewEvidenceScanner(malware, ocr, config.AllowedDownloadHosts, config.MaxEvidenceBytes, config.ScanTimeout)
 	renderer := support.NewChromiumRenderer(config.ChromiumPath, config.RenderTimeout)
 	callback := support.NewCallbackSink(config.CallbackSecret)

@@ -26,6 +26,7 @@ type Config struct {
 	KeyLabel             string
 	KeyVersion           string
 	ClamAVAddr           string
+	PDFToTextPath        string
 	PDFToPPMPath         string
 	TesseractPath        string
 	AllowedDownloadHosts map[string]struct{}
@@ -70,6 +71,7 @@ func LoadConfig() (Config, error) {
 		KeyLabel:             envDefault("E2E_HSM_KEY_LABEL", "assessment-report-signing"),
 		KeyVersion:           envDefault("E2E_HSM_KEY_VERSION", "local-e2e-p256-v1"),
 		ClamAVAddr:           envDefault("E2E_CLAMAV_ADDR", "clamav:3310"),
+		PDFToTextPath:        envDefault("E2E_PDFTOTEXT_PATH", "/usr/bin/pdftotext"),
 		PDFToPPMPath:         envDefault("E2E_PDFTOPPM_PATH", "/usr/bin/pdftoppm"),
 		TesseractPath:        envDefault("E2E_TESSERACT_PATH", "/usr/bin/tesseract"),
 		AllowedDownloadHosts: parseHosts(envDefault("E2E_ALLOWED_DOWNLOAD_HOSTS", "minio:9000")),

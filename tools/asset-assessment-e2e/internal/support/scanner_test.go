@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -31,6 +33,55 @@ func (extractor fakeOCRExtractor) Extract(context.Context, []byte, string) (stri
 	return extractor.text, extractor.err
 }
 
+type recordingCommandRunner struct {
+	outputs map[string][]byte
+	errors  map[string]error
+	calls   []string
+}
+
+func (runner *recordingCommandRunner) Run(_ context.Context, _ []string, _ []byte, name string, _ ...string) ([]byte, error) {
+	runner.calls = append(runner.calls, name)
+	return runner.outputs[name], runner.errors[name]
+}
+
+func TestCLIExtractorUsesEmbeddedPDFTextBeforeOCR(t *testing.T) {
+	runner := &recordingCommandRunner{outputs: map[string][]byte{
+		"pdftotext": []byte("  ownership invoice\n"),
+	}}
+	extractor := NewCLIExtractor("pdftotext", "pdftoppm", "tesseract", time.Second)
+	extractor.runner = runner
+
+	text, err := extractor.Extract(context.Background(), []byte("%PDF-1.7"), "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "ownership invoice" {
+		t.Fatalf("unexpected text %q", text)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"pdftotext"}) {
+		t.Fatalf("unexpected command calls: %v", runner.calls)
+	}
+}
+
+func TestCLIExtractorFallsBackToPDFOCR(t *testing.T) {
+	runner := &recordingCommandRunner{
+		outputs: map[string][]byte{"tesseract": []byte(" scanned invoice\n")},
+		errors:  map[string]error{"pdftotext": errors.New("no embedded text")},
+	}
+	extractor := NewCLIExtractor("pdftotext", "pdftoppm", "tesseract", time.Second)
+	extractor.runner = runner
+
+	text, err := extractor.Extract(context.Background(), []byte("%PDF-1.7"), "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "scanned invoice" {
+		t.Fatalf("unexpected text %q", text)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"pdftotext", "pdftoppm", "tesseract"}) {
+		t.Fatalf("unexpected command calls: %v", runner.calls)
+	}
+}
 func TestEvidenceScannerValidatesBytesAndRunsOCR(t *testing.T) {
 	content := []byte("%PDF-1.7\nlocal fixture\n%%EOF")
 	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
