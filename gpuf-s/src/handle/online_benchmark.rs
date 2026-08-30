@@ -72,7 +72,7 @@ impl OnlineBenchmarkCoordinator {
         models: &[common::Model],
         active_clients: &ActiveClients,
     ) -> Result<Option<BenchmarkTask>> {
-        if !online_benchmark_configured() {
+        if !online_benchmark_configured() || !online_benchmark_client_allowed(&client_id) {
             return Ok(None);
         }
         let eligible = {
@@ -331,6 +331,21 @@ fn online_benchmark_configured() -> bool {
     enabled && secret_valid && key_valid
 }
 
+fn online_benchmark_client_allowed(client_id: &ClientId) -> bool {
+    match std::env::var("GPUF_ONLINE_BENCHMARK_CLIENT_ALLOWLIST") {
+        Ok(raw) => online_benchmark_allowlist_matches(&raw, client_id),
+        Err(_) => true,
+    }
+}
+
+fn online_benchmark_allowlist_matches(raw: &str, client_id: &ClientId) -> bool {
+    let expected = client_id.to_string();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .any(|value| value.eq_ignore_ascii_case(&expected))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +433,23 @@ mod tests {
         let slowest = rates.iter().copied().fold(f64::INFINITY, f64::min);
         let fastest = rates.iter().copied().fold(0.0_f64, f64::max);
         assert_eq!(slowest / fastest * 100.0, 80.0);
+    }
+
+    #[test]
+    fn client_allowlist_limits_benchmark_targets() {
+        let client = ClientId([0x12; 16]);
+        assert!(online_benchmark_allowlist_matches(
+            "00112233445566778899aabbccddeeff, 12121212121212121212121212121212",
+            &client,
+        ));
+        assert!(online_benchmark_allowlist_matches(
+            "12121212121212121212121212121212",
+            &client,
+        ));
+        assert!(!online_benchmark_allowlist_matches("", &client));
+        assert!(!online_benchmark_allowlist_matches(
+            "00112233445566778899aabbccddeeff",
+            &client,
+        ));
     }
 }

@@ -15,6 +15,7 @@ type Config struct {
 	StateDir             string
 	TrustRootExportPath  string
 	ChromiumPath         string
+	FontMatchPath        string
 	SoftHSMUtilPath      string
 	PKCS11ToolPath       string
 	PKCS11ModulePath     string
@@ -60,6 +61,7 @@ func LoadConfig() (Config, error) {
 		StateDir:             envDefault("E2E_STATE_DIR", "/state"),
 		TrustRootExportPath:  envDefault("E2E_TRUST_ROOT_EXPORT_PATH", "/public-trust/local-e2e-root-ca.pem"),
 		ChromiumPath:         envDefault("E2E_CHROMIUM_PATH", "/usr/bin/chromium"),
+		FontMatchPath:        envDefault("E2E_FONT_MATCH_PATH", "/usr/bin/fc-match"),
 		SoftHSMUtilPath:      envDefault("E2E_SOFTHSM_UTIL_PATH", "/usr/bin/softhsm2-util"),
 		PKCS11ToolPath:       envDefault("E2E_PKCS11_TOOL_PATH", "/usr/bin/pkcs11-tool"),
 		PKCS11ModulePath:     envDefault("E2E_PKCS11_MODULE_PATH", "/usr/lib/softhsm/libsofthsm2.so"),

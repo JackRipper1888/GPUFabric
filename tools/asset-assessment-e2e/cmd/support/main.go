@@ -20,6 +20,11 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	fontCheckContext, fontCheckCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer fontCheckCancel()
+	if err := support.ValidateCJKFont(fontCheckContext, config.FontMatchPath); err != nil {
+		log.Fatal(err)
+	}
 	signer, err := support.InitializePKCS11Signer(ctx, config)
 	if err != nil {
 		log.Fatalf("initialize non-production HSM identity: %v", err)

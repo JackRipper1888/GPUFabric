@@ -317,6 +317,11 @@ async fn handle_single_client(
                 {
                     Ok(Some(task)) => {
                         let task_id = task.task_id.clone();
+                        info!(
+                            "Issuing optional benchmark task {} to client {}",
+                            task_id,
+                            ClientId(id).log_label()
+                        );
                         if let Err(error) = write_command(
                             &mut *writer.lock().await,
                             &Command::V1(CommandV1::BenchmarkTask { task }),
@@ -462,6 +467,13 @@ async fn handle_single_client(
                     .await;
             }
             Ok(Command::V1(CommandV1::BenchmarkResult { result })) => {
+                info!(
+                    "Received optional benchmark result {} from client {} (success={}, trials={})",
+                    result.task_id,
+                    session_client_id.log_label(),
+                    result.success,
+                    result.trials.len()
+                );
                 if !authed {
                     warn!("Ignoring optional benchmark result from unauthenticated connection");
                     continue;
@@ -481,6 +493,11 @@ async fn handle_single_client(
                                 "Failed to persist optional benchmark evidence for client {}: {}",
                                 session_client_id.log_label(),
                                 error
+                            );
+                        } else {
+                            info!(
+                                "Persisted optional benchmark evidence for client {}",
+                                session_client_id.log_label()
                             );
                         }
                     }

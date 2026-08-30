@@ -66,3 +66,9 @@ security-release-evidence/*
 !security-release-evidence/mobile-sdk/
 !security-release-evidence/mobile-sdk/**
 backups/
+
+# Local build, test and delivery outputs.
+/build/
+/tmp/
+/deliverables/
+complete-assessment-evidence.tmp.sh

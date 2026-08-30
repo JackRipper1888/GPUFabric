@@ -1,0 +1,157 @@
+{
+  "demoMetadata": {
+    "nonProductionExample": true,
+    "dataStatus": "synthetic_demo_with_official_spec_baseline",
+    "actualEightGpuNodeMeasured": false,
+    "syntheticRuntimeAndBenchmarkValues": true,
+    "mayBeUsedForCreditOrValuation": false,
+    "basisDate": "2026-07-22",
+    "scenario": "DGX H100-like 8x H100 SXM 80GB training/inference node",
+    "officialSources": [
+      "https://www.nvidia.com/en-us/data-center/h100/",
+      "https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/nvidia-dgx-h100-datasheet.pdf",
+      "https://docs.nvidia.com/dgx/dgxh100-user-guide/introduction-to-dgxh100.html"
+    ],
+    "syntheticValuesMustBeReplacedBy": [
+      "hw-asset-collector output from the target machine",
+      "authenticated seven-day-or-longer runtime history",
+      "signed benchmarks bound to the same asset sourceRef",
+      "reviewed ownership, lifecycle, market, and valuation evidence"
+    ]
+  },
+  "schemaVersion": "gpuf.pre_evaluation.demo.v1",
+  "reportId": "DEMO-H100-SXM-8-20260722-001",
+  "reportStatus": "demo_generated",
+  "generatedAt": "2026-07-22T09:00:00Z",
+  "assessmentBasisDate": "2026-07-22",
+  "validUntil": "2027-01-18T09:00:00Z",
+  "source": {
+    "sourceType": "demo_synthetic",
+    "sourceId": "demo-h100-sxm-8-static-fixture",
+    "payloadSha256": null,
+    "integrityLevel": "synthetic_demo_not_attestable"
+  },
+  "asset": {
+    "name": "演示节点 DGX-H100-TRAIN-01",
+    "ownershipStatus": "demo_only_unverified",
+    "deviceCount": 8,
+    "primaryGpuModel": "NVIDIA H100 SXM 80GB"
+  },
+  "hardware": {
+    "os": "Ubuntu 22.04.5 LTS",
+    "cpuModel": "2x Intel Xeon Platinum 8480C, 112 cores total",
+    "systemMemoryBytes": 2199023255552,
+    "gpuMemoryBytes": 687194767360,
+    "architecture": "NVIDIA Hopper",
+    "processNm": 4,
+    "tdpPerDeviceW": 700,
+    "interconnect": "4x fourth-generation NVSwitch / NVLink",
+    "supportedWorkloads": ["ai_training", "ai_inference", "high_performance_computing"],
+    "specificationSource": "NVIDIA official H100 and DGX H100 documentation",
+    "specificationVersion": "official-pages-verified-2026-07-22",
+    "gpus": [
+      {"index":0,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":1,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":2,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":3,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":4,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":5,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":6,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"},
+      {"index":7,"model":"NVIDIA H100 SXM 80GB","canonicalModelId":"nvidia-h100-sxm-80gb","deviceForm":"sxm","vendorId":"0x10de","deviceId":"0x2330","memoryBytes":85899345920,"powerLimitW":700,"pcieLink":"PCIe Gen5 x16 host link","fp16Tflops":1979,"fp32Tflops":67,"int8Tops":3958,"int4Tops":null,"architecture":"NVIDIA Hopper","processNm":4,"tdpW":700,"memoryBandwidthGbps":3350,"interconnect":"NVLink/NVSwitch","interconnectBandwidthGbps":900,"supportedPrecisions":["fp64","fp32","tf32","bf16","fp16","fp8","int8"],"supportedWorkloads":["ai_training","ai_inference"],"specificationSource":"NVIDIA official H100 documentation","specificationVersion":"2026-07"}
+    ]
+  },
+  "runtime": {
+    "online": true,
+    "uptimeDays": 30,
+    "cpuUsagePercent": 41.7,
+    "memoryUsagePercent": 58.2,
+    "storageUsagePercent": 46.1,
+    "gpuUtilizationPercent": 64.9,
+    "gpuMemoryUsagePercent": 48.9,
+    "gpuTemperatureC": 52.4,
+    "gpuPowerUsagePercent": 68.6,
+    "gpuPowerUsageW": 480.2,
+    "observationDays": 30
+  },
+  "performance": {
+    "theoreticalFp16Tflops": 15832,
+    "theoreticalFp32Tflops": 536,
+    "theoreticalInt8Tops": 31664,
+    "theoreticalInt4Tops": null,
+    "memoryBandwidthPerDeviceGbps": 3350,
+    "interconnectBandwidthPerDeviceGbps": 900,
+    "benchmarkCount": 8,
+    "llmTokensPerSecond": 13840,
+    "ttftMs": 42.8,
+    "sustainedThroughputPercent": 94.2
+  },
+  "demoMeasuredPerGpu": [
+    {"index":0,"utilizationPercent":68.4,"memoryUsedPercent":51.2,"temperatureC":53.1,"powerW":493.6,"smClockMHz":1710,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":1,"utilizationPercent":66.7,"memoryUsedPercent":49.8,"temperatureC":52.4,"powerW":486.2,"smClockMHz":1702,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":2,"utilizationPercent":65.9,"memoryUsedPercent":48.9,"temperatureC":51.8,"powerW":481.7,"smClockMHz":1695,"memoryClockMHz":2619,"eccCorrected":1,"eccUncorrected":0,"xidEvents":0},
+    {"index":3,"utilizationPercent":64.1,"memoryUsedPercent":47.3,"temperatureC":51.1,"powerW":474.9,"smClockMHz":1688,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":4,"utilizationPercent":64.8,"memoryUsedPercent":48.1,"temperatureC":52.0,"powerW":478.5,"smClockMHz":1692,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":5,"utilizationPercent":63.7,"memoryUsedPercent":47.9,"temperatureC":52.7,"powerW":476.8,"smClockMHz":1685,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":6,"utilizationPercent":63.1,"memoryUsedPercent":48.4,"temperatureC":53.3,"powerW":482.1,"smClockMHz":1689,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0},
+    {"index":7,"utilizationPercent":62.7,"memoryUsedPercent":49.6,"temperatureC":52.8,"powerW":468.0,"smClockMHz":1679,"memoryClockMHz":2619,"eccCorrected":0,"eccUncorrected":0,"xidEvents":0}
+  ],
+  "demoRuntimeSeriesSummary": {
+    "samplingIntervalSeconds": 60,
+    "sampleCount": 43200,
+    "windowStart": "2026-06-22T09:00:00Z",
+    "windowEnd": "2026-07-22T09:00:00Z",
+    "gpuUtilizationPercent": {"average":64.9,"p50":67.1,"p95":96.1,"peak":100.0},
+    "gpuMemoryUsagePercent": {"average":48.9,"p95":73.8,"peak":81.5},
+    "gpuTemperatureC": {"average":52.4,"p95":64.9,"peak":69.8},
+    "gpuPowerW": {"average":480.2,"p95":612.7,"peak":684.1},
+    "stability": {"dcgmDiagnostic":"pass","gpuDropoutEvents":0,"xidEvents":0,"nvlinkErrorEvents":0,"nvswitchErrorEvents":0,"pcieReplayEvents":0,"eccCorrectedTotal":1,"eccUncorrectedTotal":0}
+  },
+  "benchmarks": [
+    {"evidenceId":"demo-bench-nccl-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"NCCL","version":"2.21-demo","task":"8-GPU all-reduce","metric":"algorithm_bandwidth","value":653.4,"unit":"GB/s","testedAt":"2026-07-22T07:30:00Z","expiresAt":"2026-08-21T07:30:00Z"},
+    {"evidenceId":"demo-bench-fp8-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"cuBLASLt","version":"12.4-demo","task":"FP8 GEMM","metric":"throughput","value":30420,"unit":"TFLOPS","testedAt":"2026-07-22T07:40:00Z","expiresAt":"2026-08-21T07:40:00Z"},
+    {"evidenceId":"demo-bench-bf16-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"cuBLASLt","version":"12.4-demo","task":"BF16 GEMM","metric":"throughput","value":7350,"unit":"TFLOPS","testedAt":"2026-07-22T07:50:00Z","expiresAt":"2026-08-21T07:50:00Z"},
+    {"evidenceId":"demo-bench-hbm-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"DCGM","version":"4.2-demo","task":"HBM bandwidth","metric":"effective_bandwidth","value":24.6,"unit":"TB/s","testedAt":"2026-07-22T08:00:00Z","expiresAt":"2026-08-21T08:00:00Z"},
+    {"evidenceId":"demo-bench-llm-tps-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"TensorRT-LLM","version":"0.12-demo","task":"Llama-3.1-70B FP8, TP8, batch16","metric":"tokens_per_second","value":13840,"unit":"tokens/s","testedAt":"2026-07-22T08:10:00Z","expiresAt":"2026-08-21T08:10:00Z"},
+    {"evidenceId":"demo-bench-llm-ttft-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"TensorRT-LLM","version":"0.12-demo","task":"Llama-3.1-70B FP8, TP8, batch16","metric":"ttft","value":42.8,"unit":"ms","testedAt":"2026-07-22T08:10:00Z","expiresAt":"2026-08-21T08:10:00Z"},
+    {"evidenceId":"demo-bench-sustained-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"DCGM","version":"4.2-demo","task":"24-hour mixed workload","metric":"sustained_throughput","value":94.2,"unit":"percent_of_baseline","testedAt":"2026-07-22T08:20:00Z","expiresAt":"2026-08-21T08:20:00Z"},
+    {"evidenceId":"demo-bench-dcgm-20260722","evidenceSha256":null,"keyId":"demo-key","parametersSha256":null,"suite":"DCGM","version":"4.2-demo","task":"diagnostic","metric":"pass_rate","value":100,"unit":"percent","testedAt":"2026-07-22T08:30:00Z","expiresAt":"2026-08-21T08:30:00Z"}
+  ],
+  "assessment": {
+    "evidenceScore": 85,
+    "grade": "A",
+    "completenessPercent": 90,
+    "calculationStatus": "synthetic_demo_not_recomputed",
+    "gradeBand": {"minimumInclusive":80,"maximumInclusive":89},
+    "eligibleForListing": false,
+    "eligibleForCreditPrecheck": false,
+    "objectiveExplanation": "A 表示技术证据评分位于 80 至 89 分，仅评价硬件、运行、Benchmark 和来源完整性等技术证据覆盖度，不评价权属、市场价值、剩余寿命或授信风险。本例 85 分仅用于界面演示，未从真实设备证据复算。",
+    "conclusion": "演示数据集展示 A 档技术证据页面；正式业务必须以目标资产的签名采集、审核材料和实时市场快照替换本数据后重新计算。"
+  },
+  "formalAssessmentDemo": {
+    "requestedTier": "T2",
+    "tierStatus": "requested_not_completed",
+    "objectiveExplanation": "T2 是正式评估证据和程序层级，不是技术性能等级。只有稳定性与 LLM 签名 Benchmark、发票、权属合同、生命周期事实、市场快照、审核和签发门禁全部通过后，才能称为已完成 T2；T2 不替代银行最终审批。",
+    "tierCatalog": {
+      "T0": {"producer":"GPUFabric","formalRequestValue":false,"scope":"技术预评估、快速筛选和补证提示"},
+      "T1": {"producer":"asset-assessment-service","formalRequestValue":true,"scope":"定价预评估和融资预审参考"},
+      "T2": {"producer":"asset-assessment-service","formalRequestValue":true,"scope":"完整证据、审核和签发门禁下的正式资产评估"}
+    },
+    "purpose": ["credit", "insurance"],
+    "technicalVerification": {"status":"demo_only","reportId":"DEMO-H100-SXM-8-20260722-001","snapshotId":"DEMO-SNAPSHOT-H100-20260722"},
+    "benchmarkPolicy": {"requiredCategories":["stability","llm_performance"],"status":"demo_only_not_satisfied_by_production_evidence"},
+    "ownership": {"status":"demo_only","requiredEvidenceCodes":["ownership.invoice","ownership.contract"],"source":"synthetic_demo"},
+    "assetCondition": {"status":"demo_only_unreviewed","condition":"good","manufacturedAt":"2024-02-15","commissionedAt":"2024-04-01","warrantyUntil":"2027-04-01","source":"synthetic_demo"},
+    "marketSnapshot": {"status":"demo_only","currency":"CNY","asOf":"2026-07-22","perGpuReferenceValue":1480000,"eightGpuReferenceValue":11840000,"source":"synthetic_market_fixture"},
+    "valuation": {"status":"demo_only","referenceValueCny":11840000,"lowValueCny":10064000,"highValueCny":13024000,"collateralRatio":0.55,"creditReferenceCny":6512000,"riskLevel":"medium"},
+    "report": {"reportStatus":"demo_generated_not_issued","reportJsonSha256":null,"reportHtmlSha256":null,"reportPdfSha256":null,"downloadAvailable":false}
+  },
+  "evidence": {
+    "sources":["NVIDIA official catalog","synthetic collector fixture","synthetic signed benchmark fixture","synthetic lifecycle fixture","synthetic market fixture"],
+    "missingEvidence":["Real challenge-bound payload","Real signed evidence hashes","Real ownership documents","Real market source and reviewer signature"],
+    "warnings":["All runtime, benchmark, ownership, market, and valuation values are synthetic demo values."],
+    "missingCodes":["DEMO_SYNTHETIC_DATA"],
+    "warningCodes":["NOT_ATTESTABLE","NOT_FOR_CREDIT","NOT_FOR_VALUATION"],
+    "nextActions":["Replace demo collector fixture","Register producer-signed benchmarks","Upload and review real evidence","Regenerate signed formal report"]
+  },
+  "disclaimer":"演示报告：硬件规格采用 NVIDIA 官方口径，运行、Benchmark、权属、市场和估值数据为合成示例。不得用于真实挂牌、授信、保险、估值或资产验收。"
+}

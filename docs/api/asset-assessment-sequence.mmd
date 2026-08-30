@@ -10,7 +10,7 @@ sequenceDiagram
     participant M as 市场数据 / 定价管理员
     participant S as Renderer / Signer / TSA
 
-    Note over User,S: Beta 仅对白名单用户和资产开放；测试报告 testOnly=true、productionEligible=false
+    Note over User,S: 新版正式报告绑定 CPES 模型、Schema、模板和报告版本；旧报告不可变；Beta 仅对白名单开放且 productionEligible=false
 
     User->>N: POST /assets，绑定在线 client 或选择离线采集
     N->>N: 认证、OwnerScope、幂等、加密引用、保存 HMAC 摘要
@@ -113,10 +113,18 @@ sequenceDiagram
         A->>A: 保存成色、制造/启用/保修事实和 evidenceId 审计
         A-->>N: signed callback，evidence_reviewing / ready_for_valuation / changes_requested
         N-->>A: 200 EVENT_ACCEPTED
+
+        opt 查询报告生成条件
+            User->>N: GET /asset-assessments/{id}/report-readiness
+            N->>A: GET /internal/v1/asset-assessments/{id}/report-readiness
+            A->>A: 聚合技术、遥测、Benchmark、材料、市场、评分、审核和签章状态
+            A-->>N: available / missing / stale / unverified / not_applicable + missingItems
+            N-->>User: 数据收集进度、缺少项和建议动作
+        end
     end
 
     rect rgb(255, 248, 235)
-        Note over A,M: 市场快照、策略审批与确定性估值
+        Note over A,M: 市场快照、CPES 评分、报告就绪度与确定性估值
         alt Beta 白名单测试数据
             A->>A: 引用预置合成市场快照和已批准测试定价策略
             A->>A: 将市场、策略和估值信任等级标记为 test_only
@@ -128,13 +136,22 @@ sequenceDiagram
             M->>A: 独立审批策略版本及生效范围
         end
         A->>A: 校验技术配置=市场配置、审核成色=快照成色
-        A->>A: 使用已存快照和已批准策略执行可复算估值
-        A->>A: 创建持久化正式审核任务
-        A-->>N: signed callback，valuating / review_pending
+        A->>A: 构建不可变 AssessmentFactSnapshot 并计算事实 Hash
+        A->>A: 执行输入就绪度门禁，校验采样窗口、新鲜度、证据和市场可比口径
+        alt 输入缺失、过期、未核验或口径不一致
+            A-->>N: signed callback，waiting_for_* / readiness + missingItems
+            N-->>User: 保持未就绪，不生成评分、估值或正式报告
+        else 输入就绪
+            A->>A: 加载版本化 CPES model manifest，计算 20 项指标和四维评分
+            A->>A: 保存 ScoringResult、CPI、评级、风险原因和 algorithmDigest
+            A->>A: 使用已存快照和已批准策略执行可复算估值
+            A->>A: 创建持久化正式审核任务
+            A-->>N: signed callback，valuating / review_pending + scoringSummary
+        end
     end
 
     rect rgb(250, 242, 252)
-        Note over A,W: 双人正式审核和生产工作流边界
+        Note over A,W: 以下双审仅适用于输入就绪分支；生产工作流不会自动越过实名审核
         alt Beta 白名单测试自动化
             A->>A: 分配两个不同测试 reviewer 并自动记录双人测试批准
             Note over A: 仅允许 testOnly 报告，不得作为生产实名审核
@@ -148,8 +165,16 @@ sequenceDiagram
         end
         alt 双审批准且全部门禁仍满足
             A->>A: 固化 collected/measured/catalog/reviewer/derived 来源与 trust level
-            A->>A: 再验 Benchmark、材料、估值和审核后冻结不可变 JSON/HTML
-            A-->>N: signed callback，approved / frozen / issuing
+            A->>A: 重新执行 ReportReadiness，复核 Benchmark、遥测、材料、市场、评分、估值和审核
+            alt 冻结门禁满足
+                A->>A: 生成版本化报告文档，写入 model/schema/template/reportVersion 与 Hash
+                A->>A: 渲染格式化 HTML，校验零占位符、零错误默认值、零远程资源
+                A->>A: canonical JSON + HTML SHA-256，冻结不可变报告
+                A->>A: assessmentId + clientRequestId 幂等；显式新版本才生成新 reportVersion
+                A-->>N: signed callback，approved / frozen / issuing + 版本与 Hash 摘要
+            else 数据在审核期间失效或模板校验失败
+                A-->>N: signed callback，readiness_failed / frozen_failed + missingItems
+            end
         else 补件、拒绝或超时
             A-->>N: signed callback，changes_requested / rejected / manual_intervention
         end
@@ -175,8 +200,8 @@ sequenceDiagram
                     A->>A: 独立验证签名、证书链、TSA token 和能力快照一致性
                 end
                 A->>O: 私有保存已签发 PDF
-                A-->>N: signed callback，issued + reportId/Hash/validUntil
-                N->>N: 保存报告投影，不保存对象 key 或下载 URL
+                A-->>N: signed callback，issued + reportId/reportVersion/modelVersion/templateVersion/classification/Hash/validUntil
+                N->>N: 保存版本化报告投影，按 reportVersion + status 维护最新/历史；不保存对象 key 或下载 URL
 
                 User->>N: POST /{id}/downloads
                 N->>A: POST /internal/v1/reports/{reportId}/downloads

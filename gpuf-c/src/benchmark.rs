@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tracing::{info, warn};
 
 const MAX_TASK_LIFETIME_MS: u64 = 10 * 60 * 1_000;
 const MAX_CLOCK_SKEW_MS: u64 = 60 * 1_000;
@@ -50,6 +51,10 @@ pub async fn execute(
     engine: Arc<Mutex<Option<AnyEngine>>>,
 ) -> BenchmarkResult {
     let identity = (task.task_id.clone(), task.challenge, task.parameters_sha256);
+    info!(
+        "Starting optional benchmark task {} with {} trials",
+        identity.0, task.workload.trial_count
+    );
     let outcome = async {
         validate_task(&task)?;
         let _running = RunningGuard::acquire()?;
@@ -58,22 +63,32 @@ pub async fn execute(
     .await;
 
     match outcome {
-        Ok(trials) => BenchmarkResult {
-            task_id: identity.0,
-            challenge: identity.1,
-            parameters_sha256: identity.2,
-            success: true,
-            trials,
-            error: None,
-        },
-        Err(error) => BenchmarkResult {
-            task_id: identity.0,
-            challenge: identity.1,
-            parameters_sha256: identity.2,
-            success: false,
-            trials: Vec::new(),
-            error: Some(sanitize_error(&error.to_string())),
-        },
+        Ok(trials) => {
+            info!(
+                "Optional benchmark task {} completed with {} trials",
+                identity.0,
+                trials.len()
+            );
+            BenchmarkResult {
+                task_id: identity.0,
+                challenge: identity.1,
+                parameters_sha256: identity.2,
+                success: true,
+                trials,
+                error: None,
+            }
+        }
+        Err(error) => {
+            warn!("Optional benchmark task {} failed: {}", identity.0, error);
+            BenchmarkResult {
+                task_id: identity.0,
+                challenge: identity.1,
+                parameters_sha256: identity.2,
+                success: false,
+                trials: Vec::new(),
+                error: Some(sanitize_error(&error.to_string())),
+            }
+        }
     }
 }
 
@@ -157,7 +172,13 @@ async fn run_trials(
     };
 
     let mut trials = Vec::with_capacity(task.workload.trial_count as usize);
-    for _ in 0..task.workload.trial_count {
+    for trial_index in 0..task.workload.trial_count {
+        info!(
+            "Starting optional benchmark task {} trial {}/{}",
+            task.task_id,
+            trial_index + 1,
+            task.workload.trial_count
+        );
         let remaining_ms = task.expires_at_unix_ms.saturating_sub(now_unix_ms()?);
         if remaining_ms == 0 {
             bail!("benchmark task expired during execution");
@@ -173,6 +194,14 @@ async fn run_trials(
                 .await
                 .context("Ollama benchmark trial timed out")??,
         };
+        info!(
+            "Completed optional benchmark task {} trial {}/{}: {} tokens in {} ns",
+            task.task_id,
+            trial_index + 1,
+            task.workload.trial_count,
+            trial.completion_tokens,
+            trial.duration_ns
+        );
         trials.push(trial);
     }
     Ok(trials)

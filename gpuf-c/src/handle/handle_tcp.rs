@@ -3356,6 +3356,8 @@ impl WorkerHandle for ClientWorker {
                                     tokio::spawn(async move {
                                         let task_id = task.task_id.clone();
                                         let result = crate::benchmark::execute(task, engine).await;
+                                        let success = result.success;
+                                        let trial_count = result.trials.len();
                                         if let Err(error) = Self::send_command_v1_on_writer(
                                             writer,
                                             CommandV1::BenchmarkResult { result },
@@ -3365,6 +3367,11 @@ impl WorkerHandle for ClientWorker {
                                             warn!(
                                                 "Failed to send optional benchmark result for {}: {}",
                                                 task_id, error
+                                            );
+                                        } else {
+                                            info!(
+                                                "Sent optional benchmark result for {} (success={}, trials={})",
+                                                task_id, success, trial_count
                                             );
                                         }
                                     });
